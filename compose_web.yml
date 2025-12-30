@@ -1,0 +1,44 @@
+name: chat_engine
+services:
+  web:
+    container_name: web_service
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    env_file:
+      - .env
+    environment:
+      - DISABLE_UVICORN_PROPAGATION=true
+      - NUM_WORKERS=${NUM_WORKERS}
+    ports:
+      - "${FASTAPI_PORT:-8005}:8005"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      worker:
+        condition: service_started
+    command: >
+      uvicorn app.app:app 
+      --host 0.0.0.0 
+      --port 8005
+      --workers ${NUM_WORKERS}
+
+  worker:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: taskiq_worker
+    env_file:
+      - .env
+    command: taskiq worker taskiq_worker:broker
+    environment:
+      REDIS_URL: redis://redis:${REDIS_PORT:-6379}/0
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      GIT_PYTHON_REFRESH: "quiet"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mlflow:
+        condition: service_healthy
