@@ -22,30 +22,30 @@ os.environ["AWS_SECRET_ACCESS_KEY"] = MINIO_ROOT_PASSWORD
 os.environ["MLFLOW_S3_ENDPOINT_URL"] = MLFLOW_S3_ENDPOINT_URL
 os.environ["MLFLOW_DEFAULT_ARTIFACT_ROOT"] = MLFLOW_DEFAULT_ARTIFACT_ROOT
 
-async def init_model(serving_service_name :str = "vllm",
-                     port :int = 8000):
-    """Start Postgres Connection"""
-    global llm
-    llm = ChatOpenAI(model = MODEL_NAME,
-                     base_url = f"http://{serving_service_name}:{port}/v1",
-                     streaming = True,
-                     api_key = SERVING_API_KEY,
-                     extra_body={
-                         "chat_template_kwargs": {"enable_thinking": False}
-                     })
-
-    try:
-        resp = await llm.ainvoke("Hello")
-    except:
-        # Response
-        SystemLogger.error("❌ Failed to get response from LLM!")
-    return llm
+# async def init_model(serving_service_name :str = "vllm",
+#                      port :int = 8000):
+#     """Start Postgres Connection"""
+#     global llm
+#     llm = ChatOpenAI(model = MODEL_NAME,
+#                      base_url = f"http://{serving_service_name}:{port}/v1",
+#                      streaming = True,
+#                      api_key = SERVING_API_KEY,
+#                      extra_body={
+#                          "chat_template_kwargs": {"enable_thinking": False}
+#                      })
+#
+#     try:
+#         resp = await llm.ainvoke("Hello")
+#     except:
+#         # Response
+#         SystemLogger.error("❌ Failed to get response from LLM!")
+#     return llm
 
 async def init_embed_model(serving_service_name :str = "vllm",
                            port :int = 8000) -> OpenAIEmbeddings:
     """Start Postgres Connection"""
     global embed_model
-    embed_model = OpenAIEmbeddings(model = MODEL_NAME,
+    embed_model = OpenAIEmbeddings(model = EMBEDDING_MODEL_NAME,
                                    base_url = f"http://{serving_service_name}:{port}/v1",
                                    api_key = SERVING_API_KEY)
 
@@ -103,8 +103,8 @@ def init_qdrant():
     qdrant_service = QdrantService(url = "http://qdrant:6333")
     return qdrant_service
 
-def get_model():
-    return llm
+# def get_model():
+#     return llm
 
 def get_embed_model():
     return embed_model

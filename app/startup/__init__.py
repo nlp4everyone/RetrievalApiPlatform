@@ -1,6 +1,5 @@
-from .startup import (init_model,
-                      init_embed_model,
-                      get_model,
+from .startup import (init_embed_model,
+                      # get_model,
                       get_embed_model,
                       wait_for_serving,
                       wait_for_postgres,
