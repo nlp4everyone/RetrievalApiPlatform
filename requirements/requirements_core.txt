@@ -1,0 +1,18 @@
+# Core
+fastapi==0.100.0
+python-multipart==0.0.20
+uvicorn==0.34.2
+python-dotenv==1.0.0
+loguru==0.7.3
+StrEnum==0.4.15
+
+# LangChain
+langchain==0.3.27
+langchain-openai==0.3.27
+langchain-text-splitters==0.3.11
+# Token counter
+tiktoken==0.11.0
+
+# Background task
+taskiq==0.11.18
+taskiq-redis==1.1.0
