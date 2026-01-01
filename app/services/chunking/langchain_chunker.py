@@ -7,44 +7,21 @@ from langchain_text_splitters import (CharacterTextSplitter,
                                       TextSplitter)
 # Components
 from langchain_core.documents import Document
-from enum import Enum
 
+# Local imports
+from app.schemas.chunking import (ChunkingStrategy,
+                                  LangchainChunkingConfig)
 
-class ChunkingStrategy(str, Enum):
-    """Available text chunking strategies."""
-    CHARACTER = "character"
-    RECURSIVE = "recursive"
-
-
-class ChunkingConfig(BaseModel):
-    """Configuration for text chunking.
-    
-    Attributes:
-        strategy: The chunking strategy to use (character or recursive)
-        chunk_size: Maximum size of chunks to create
-        chunk_overlap: How much overlap between chunks
-        separator: Separator to use for splitting (for character strategy)
-        separators: List of separators to use (for recursive strategy)
-    """
-    strategy: ChunkingStrategy = ChunkingStrategy.RECURSIVE
-    chunk_size: int = 1000
-    chunk_overlap: int = 200
-    separator: str = "\n\n"
-    separators: List[str] = Field(
-        default_factory=lambda: ["\n\n", "\n", ". ", " ", ""]
-    )
-
-
-class ChunkingService:
+class LangchainChunkingService:
     """Service for splitting text into chunks."""
     
-    def __init__(self, config: Optional[ChunkingConfig] = None):
+    def __init__(self, config: Optional[LangchainChunkingConfig] = None):
         """Initialize with optional configuration.
         
         Args:
             config: Chunking configuration. Uses defaults if not provided.
         """
-        self.config = config or ChunkingConfig()
+        self.config = config or LangchainChunkingConfig()
         self._splitter = self._create_splitter()
     
     def _create_splitter(self) -> TextSplitter:
@@ -53,11 +30,15 @@ class ChunkingService:
                        'chunk_overlap': self.config.chunk_overlap}
         
         if self.config.strategy == ChunkingStrategy.CHARACTER:
+            # Token chunker
             return CharacterTextSplitter(separator = self.config.separator,
                                          **common_args)
-        else:  # RECURSIVE
+        elif self.config.strategy == ChunkingStrategy.RECURSIVE:
+            # Recursive chunker
             return RecursiveCharacterTextSplitter(separators = self.config.separators,
                                                   **common_args)
+        else:
+            raise Exception("Not support this kind of text splitter")
     
     def split_text(self, text: str) -> List[str]:
         """Split text into chunks.
