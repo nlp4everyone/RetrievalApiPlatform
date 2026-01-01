@@ -75,14 +75,16 @@ bash view_log.sh
 
 ## 📋 To-Do List
 - [x] Define base components
+- [x] Update Chonkie chunking strategy
 - [ ] Add docx, pdf parser module
 - [ ] Complete search function
 - [ ] Tracing retrieval with MLflow
 - [ ] Filter with metadata filtering
 
 
-# 💴 Intergrations:
+# 💴 Integrations:
 - 📄 Framework: Langchain, vLLM, SGLang
+- 🔤 Text Chunking: [Chonkie](https://docs.chonkie.ai)
 - 🗄️ User Management: Postgres
 - 🔔 Task Queue: Redis + TaskIQ
 - 📦 Tracking: MLflow + MinIO
