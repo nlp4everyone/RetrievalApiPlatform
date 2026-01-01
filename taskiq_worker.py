@@ -12,7 +12,8 @@ from typing import Literal, Optional
 from loggers import SystemLogger
 # Text Parser
 from app.services.parsers import ParserFactory, AsyncTextParser
-from app.services.chunking import ChunkingService, ChunkingConfig
+from app.services.chunking.chonkie_chunker import (ChonkieChunkingService,
+                                                   ChonkieChunkingConfig)
 # Other components
 from pathlib import Path
 from langchain_core.documents import Document
@@ -88,8 +89,7 @@ async def process_vector_store_files(vectorstore_id: str,
             # Chunking with base splitter
             if chunking_strategy in ["auto","static"]:
                 # Define service
-                chunking_service = ChunkingService(config = ChunkingConfig(chunk_size = chunk_size,
-                                                                           chunk_overlap = chunk_overlap))
+                chunking_service = ChonkieChunkingService(config = ChonkieChunkingConfig(chunk_size = chunk_size))
                 # Split
                 chunked_texts = chunking_service.split_text(text = file_content)
 

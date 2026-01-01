@@ -16,3 +16,5 @@ app/router/__pycache__
 app/core/config/constants/__pycache__/
 app/utils/key_generator/__pycache__/
 app/utils/token_counter/__pycache__/
+app/schemas/chunking/__pycache__
+app/services/chunking/__pycache__/

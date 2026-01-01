@@ -1,0 +1,5 @@
+# Text splitter
+langchain-text-splitters==0.3.11
+chonkie==1.4.2
+# Token counter
+tiktoken==0.11.0

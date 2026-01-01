@@ -17,6 +17,11 @@ COPY requirements/requirements_db.txt .
 # Install requirements
 RUN pip install -r requirements_db.txt
 
+# Copy requirements component files and install
+COPY requirements/requirements_component.txt .
+# Install requirements
+RUN pip install -r requirements_component.txt
+
 # Copy the rest of the application
 COPY . /workspace
 
