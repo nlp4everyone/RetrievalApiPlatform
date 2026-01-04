@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 # Schemas
 from app.schemas.vector_store import *
+from app.schemas.file.types import UploadingStatus
 # Security
 from app.security.auth import verify_api_key
 # DB
@@ -69,7 +70,7 @@ async def create_vector_store(request: VectorStoreCreateRequest,
                                                   description = request.description,
                                                   created_at = created_at,
                                                   last_active_at = created_at,
-                                                  status = "in_progress",
+                                                  status = UploadingStatus.IN_PROGRESS,
                                                   usage_bytes = 0,
                                                   metadata = request.metadata,
                                                   expires_at = expires_at,  # Pass the datetime object directly

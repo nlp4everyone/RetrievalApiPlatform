@@ -7,18 +7,23 @@ from app.db.postgres import PostgresVectorStore, PostgresFileStore
 from app.db.minio import MinioFileStore
 from app.db.qdrant import AsyncQdrantVectorStore
 # Schema
+from app.schemas.file.types import FileFormat, UploadingStatus
 # Typing
 from typing import Literal, Optional
-from loggers import SystemLogger
 # Text Parser
-from app.services.parsers import ParserFactory, AsyncTextParser
+from app.services.parsers import ParserFactory
 from app.services.chunking.chonkie_chunker import (ChonkieChunkingService,
                                                    ChonkieChunkingConfig)
+# Utils
+from app.utils.io import async_temp_file
 # Other components
 from pathlib import Path
 from langchain_core.documents import Document
+from datetime import datetime
 # Config
 from app.core.config.service_params import *
+# Logger
+from loggers import SystemLogger
 
 REDIS_URL = "redis://redis:6379"
 
@@ -28,9 +33,6 @@ broker = RedisStreamBroker(url=REDIS_URL).with_result_backend(result_backend)
 postgres_service = init_postgres()
 minio_service = init_minio()
 qdrant_service = init_qdrant()
-# Text parser
-async_text_parser = AsyncTextParser()
-
 
 @broker.task
 async def process_vector_store_files(vectorstore_id: str,
@@ -72,14 +74,31 @@ async def process_vector_store_files(vectorstore_id: str,
                 # Get file extension
                 file_ext = Path(files_metadata[0].get("filename")).suffix
                 # Get parser
-                parser = ParserFactory.get(file_type = file_ext)
+                current_file_format, parser = ParserFactory.get(file_type = file_ext)
+                # Check status
+                if current_file_format is None or parser is None:
+                    # Update failed status to vector store
+                    await PostgresVectorStore.update(pool = postgres_service.pool,
+                                                     vector_store_id = vectorstore_id,
+                                                     api_key = api_key,
+                                                     status = UploadingStatus.FAILED,
+                                                     usage_bytes = usage_bytes,
+                                                     last_active_at = datetime.utcnow())
+                    # Raise exception
+                    raise ValueError(f"Unsupported file format: {file_ext}")
 
                 # Get as bytes
                 file_bytes = await MinioFileStore._load_file(minio_client = minio_service.client,
                                                              bucket_name = files_metadata[0].get("minio_bucket"),
                                                              file_path = files_metadata[0].get("minio_path"))
-                # Get file content
-                file_content = await async_text_parser.parse_file(file_bytes = file_bytes)
+                if current_file_format == FileFormat.TEXT:
+                    # Get file content
+                    file_content = await parser.parse(file_input = file_bytes)
+                elif current_file_format == FileFormat.PDF:
+                    # Get file content
+                    async with async_temp_file(file_bytes, suffix=".pdf") as path:
+                        # Get file content
+                        file_content = await parser.parse(file_input = path)
             # Chunk multiple files ( Do later)
             elif len(files_metadata) > 1:
                 file_content = ""
@@ -108,13 +127,14 @@ async def process_vector_store_files(vectorstore_id: str,
                                                            embeddings = embeddings,
                                                            embedding_model_name = "Qwen3-Embedding")
 
-        # Get Qdrant Vector store
+            # Get Qdrant Vector store
 
-        # Update vector store
-        await PostgresVectorStore.update(pool = postgres_service.pool,
-                                         vector_store_id = vectorstore_id,
-                                         api_key = api_key,
-                                         status = "completed",
-                                         usage_bytes = usage_bytes)
+            # Update vector store
+            await PostgresVectorStore.update(pool = postgres_service.pool,
+                                             vector_store_id = vectorstore_id,
+                                             api_key = api_key,
+                                             status = UploadingStatus.COMPLETED,
+                                             usage_bytes = usage_bytes,
+                                             last_active_at = datetime.utcnow())
     except Exception as e:
         SystemLogger.info(e)

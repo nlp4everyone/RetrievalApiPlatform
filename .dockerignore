@@ -1,3 +1,18 @@
 .venv
 .idea
 .git
+# Cached
+app/__pycache__/
+app/schemas/__pycache__/
+app/startup/__pycache__/
+app/router/__pycache__
+app/core/config/constants/__pycache__/
+app/utils/key_generator/__pycache__/
+app/utils/token_counter/__pycache__/
+app/schemas/chunking/__pycache__
+app/services/chunking/__pycache__/
+app/core/config/__pycache__/
+app/schemas/base/__pycache__/
+app/schemas/file/__pycache__/
+app/services/parsers/__pycache__/
+app/services/parsers/pdf/__pycache__/
