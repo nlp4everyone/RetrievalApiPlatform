@@ -3,3 +3,6 @@ langchain-text-splitters==0.3.11
 chonkie==1.4.2
 # Token counter
 tiktoken==0.11.0
+# Read lib
+langchain-undatasio==1.0.1
+undatasio==0.2.0.2
