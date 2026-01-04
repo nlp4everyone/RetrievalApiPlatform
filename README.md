@@ -76,11 +76,13 @@ bash view_log.sh
 ## 📋 To-Do List
 - [x] Define base components
 - [x] Update Chonkie chunking strategy
-- [ ] Add docx, pdf parser module
+- [x] Add PDF parser (UndatasIO) module (04/01)
 - [ ] Complete search function
 - [ ] Tracing retrieval with MLflow
 - [ ] Filter with metadata filtering
-
+- [ ] Implement other PDF parser service (LlamaParse,etc) (soon)
+- [ ] Accept processing docx document (soon)
+- [ ] Attach multiple document files to vector store(soon)
 
 # 💴 Integrations:
 - 📄 Framework: Langchain, vLLM, SGLang
