@@ -1,15 +1,20 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, status
 # Schemas
 from app.schemas.vector_store import *
+from app.schemas.vector_store.requests import *
+from app.schemas.vector_store.responses import *
 from app.schemas.file.types import UploadingStatus
 # Security
 from app.security.auth import verify_api_key
 # DB
 from app.db.postgres import PostgresVectorStore
 from app.db.qdrant import AsyncQdrantVectorStore
-from app.startup import get_postgres_pool, get_qdrant_service
+from app.startup import get_postgres_pool, get_qdrant_service, get_embed_model
+# Typing
+from typing import List
 # Helper
 from app.utils.key_generator import generate_vectorstore_id
+from app.utils import _convert_to_qdrant_filter
 # Exceptions
 from app.exceptions.postgres import PostgresConnectionException
 # Logger
@@ -17,7 +22,10 @@ from loggers import SystemLogger
 # Other components
 from datetime import datetime, timezone, timedelta
 import asyncpg, socket
+# TaskIQ worker
 from taskiq_worker import process_vector_store_files
+# Qdrant component
+from qdrant_client import models
 
 # Define router
 vector_store_router = APIRouter()
@@ -348,6 +356,103 @@ async def delete_vector_store(vector_store_id: str,
         return VectorStoreDeletion(id=vector_store_id,
                                    object="vector_store.deleted",
                                    deleted=True)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error searching vector store: {str(e)}"
+        )
+
+    except (asyncpg.PostgresError, socket.gaierror) as e:
+        SystemLogger.error(e)
+        raise PostgresConnectionException()
+
+
+@vector_store_router.post("/vector_stores/{vector_store_id}/search",response_model = VectorStoreSearchResponse)
+async def search_vector_store(vector_store_id: str,
+                              search_request: VectorStoreSearchRequest,
+                              api_key: str = Depends(verify_api_key)) -> VectorStoreSearchResponse:
+    """
+    ## Search a vector store.
+    
+    This endpoint searches for documents in a vector store based on a query and optional filters.
+    It supports semantic search with filtering capabilities.
+
+    ### Args
+    - `vector_store_id` (str): The ID of the vector store to search in.
+    - `query` (Union[str, List[str]]): The query string or list of query strings to search for.
+    - `filters` (Optional[Union[ComparisonFilter, CompoundFilter]]): Optional filters to apply to the search.
+    - `max_num_results` (int, optional): Maximum number of results to return (1-50). Defaults to 10.
+    - `ranking_options` (Optional[RankingOptions]): Options for controlling search result ranking.
+    
+    ### Returns
+    - `VectorStoreSearchResponse`: A response containing the search results.
+    """
+    # Get service
+    qdrant_service = get_qdrant_service()
+    # Embed model
+    embed_model = get_embed_model()
+
+    try:
+        # # Check if collection exists
+        # collection_exists = await qdrant_service.client.collection_exists(collection_name = vector_store_id)
+        # # If not existed
+        # if not collection_exists:
+        #     # Raise exception
+        #     raise VectorStoreNotFoundException(vector_store_id = vector_store_id)
+
+        qdrant_vector_store = AsyncQdrantVectorStore(collection_name = vector_store_id,
+                                                     client = qdrant_service.client)
+        # Convert filters to Qdrant format if provided
+        qdrant_filter = None
+        if search_request.filters:
+            qdrant_filter = _convert_to_qdrant_filter(search_request.filters)
+        
+        # Prepare search parameters
+        search_params = models.SearchParams(
+            quantization=models.QuantizationSearchParams(
+                ignore=search_request.ranking_options.ranker == "none" if search_request.ranking_options else False,
+                rescore=search_request.ranking_options.ranker == "auto" if search_request.ranking_options else True,
+            )
+        ) if search_request.ranking_options else None
+        
+        # Convert query to list if it's a single string ( If it's a list, remain only first element)
+        queries = [search_request.query] if isinstance(search_request.query, str) else search_request.query[:1]
+
+        # Embed the queries
+        queries_vectors = await embed_model.aembed_documents(queries)
+        # Perform search
+        search_results :List[models.QueryResponse] = await qdrant_vector_store.retrieve(query_vectors = queries_vectors,
+                                                            query_filter = qdrant_filter,
+                                                            limit = search_request.max_num_results)
+
+        # Convert results to response format
+        documents = []
+        for query_result in search_results:
+            for point in query_result.points:
+                payload = point.payload or {}
+                metadata = payload.get('metadata', {})
+                content = payload.get('page_content', '')
+
+                # Clean up the content by removing extra whitespace and newlines
+                cleaned_content = ' '.join(line.strip() for line in content.splitlines() if line.strip())
+
+                # Append document
+                documents.append(SearchResult(score=point.score,
+                                              attributes=metadata,
+                                              content=[ContentChunk(text=cleaned_content)]))
+
+        # Return
+        return VectorStoreSearchResponse(search_query=search_request.query,
+                                         data=documents,
+                                         has_more=len(documents) >= search_request.max_num_results,
+                                         total = len(documents))
+        
+    except Exception as e:
+        SystemLogger.error(e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error searching vector store: {str(e)}"
+        )
 
     except (asyncpg.PostgresError, socket.gaierror) as e:
         SystemLogger.error(e)

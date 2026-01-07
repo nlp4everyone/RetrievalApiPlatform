@@ -2,16 +2,19 @@
 from qdrant_client import AsyncQdrantClient
 # LangChain Document
 from langchain_core.documents import Document
-from typing import Union
 # Other components
 from typing import Optional, List, Sequence, Literal, Union
 # Qdrant components
 from qdrant_client import models
 # Embedding type
 from uuid import uuid4
+# Config
+from app.core.config.constants import EMBEDDING_MODEL_NAME
+# Other component
+import asyncio
+
 # DataType
 Embedding = List[float]
-
 
 class AsyncQdrantVectorStore:
     """
@@ -263,12 +266,10 @@ class AsyncQdrantVectorStore:
                                   points = points)
 
     async def insert_documents(self,
-                             documents: Sequence[Document],
-                             embeddings: Optional[List[Embedding]],
-                             embedding_model_name: str,
-                             embedded_batch_size: int = 32,
-                             upload_batch_size: int = 16,
-                             upload_parallel: int = 1) -> None:
+                               documents: Sequence[Document],
+                               embeddings: Optional[List[Embedding]],
+                               upload_batch_size: int = 16,
+                               upload_parallel: int = 1) -> None:
         """
         Insert documents with their embeddings into the vector store.
 
@@ -279,8 +280,6 @@ class AsyncQdrantVectorStore:
             documents: Sequence of LangChain Document objects to be inserted.
             embeddings: Pre-computed embeddings for the documents. If None, they must be
                       computed using the provided embedding model.
-            embedding_model_name: Name of the embedding model used to generate the embeddings.
-            embedded_batch_size: Number of documents to process in each embedding batch.
             upload_batch_size: Number of documents to upload in each batch to Qdrant.
             upload_parallel: Number of parallel upload operations to perform.
 
@@ -292,62 +291,65 @@ class AsyncQdrantVectorStore:
         # Get dims
         embedding_dim = len(embeddings[0])
 
+        # Get dense config
         dense_vectors_config = self._get_dense_embedding_config(embedding_dimension = embedding_dim,
                                                                 distance = self._distance,
                                                                 on_disk = self._on_disk,
-                                                                model = embedding_model_name)
-
+                                                                model = EMBEDDING_MODEL_NAME)
+        # Define payload
         payloads = self._convert_documents_to_payloads(documents)
 
+        # Create collection with config
         await self._create_collection(dense_vectors_config = dense_vectors_config,
                                       shard_number = self._shard_number,
                                       quantization_mode = self._quantization_mode,
                                       default_segment_number = self._default_segment_number)
-
+        # Insert points
         await self._insert_points(dense_embeddings = embeddings,
                                   payloads = payloads,
                                   batch_size = upload_batch_size,
                                   parallel = upload_parallel,
-                                  embedding_model_name = embedding_model_name)
+                                  embedding_model_name = EMBEDDING_MODEL_NAME)
 
     # ------------------------------------------------------------------
-    # RETRIEVE
+    # SEARCH
     # ------------------------------------------------------------------
-    # async def retrieve(
-    #     self,
-    #     query: Optional[str] = None,
-    #     query_embedding: Optional[Embedding] = None,
-    #     similarity_top_k: int = 3,
-    #     query_filter: Optional[models.Filter] = None,
-    #     score_threshold: Optional[float] = None,
-    #     return_type: Literal["ScoredPoints", "documents"] = "documents",
-    # ):
-    #     if not await self._client.collection_exists(self._collection_name):
-    #         raise ValueError(f"Collection {self._collection_name} does not exist")
-    #
-    #     if await self._count_points() == 0:
-    #         raise ValueError("Collection is empty")
-    #
-    #     if query_embedding is None:
-    #         if query is None:
-    #             raise ValueError("Either query or query_embedding must be provided")
-    #         if self._dense_embedding_model is None:
-    #             raise ValueError("No embedding model available")
-    #         query_embedding = await self._dense_embedding_model.aembed_query(query)
-    #
-    #     config = await self._collection_info()
-    #     vector_name = list(config.config.params.vectors.keys())[0]
-    #
-    #     result = await self._client.query_points(
-    #         collection_name=self._collection_name,
-    #         query=query_embedding,
-    #         using=vector_name,
-    #         limit=similarity_top_k,
-    #         query_filter=query_filter,
-    #         score_threshold=score_threshold,
-    #     )
-    #
-    #     if return_type == "ScoredPoints":
-    #         return result.points
-    #
-    #     return self._convert_score_point_to_document(result.points)
+    async def retrieve(self,
+                       query_vectors: List[List[float]],
+                       query_filter: Optional[models.Filter] = None,
+                       limit: int = 10,
+                       score_threshold: Optional[float] = None,
+                       search_params: Optional[models.SearchParams] = None,
+                       with_payload: bool = True,
+                       with_vectors: bool = False) -> List[models.QueryResponse]:
+        """
+        Search for similar vectors in the collection.
+
+        Args:
+            query_vectors: A single query vector or a list of query vectors to search with.
+            query_filter: Optional filter to apply to the search results.
+            limit: Maximum number of results to return per query.
+            score_threshold: Minimum score threshold for results.
+            search_params: Additional search parameters.
+            with_payload: Whether to include the payload in the results.
+            with_vectors: Whether to include the vectors in the results.
+
+        Returns:
+            List[models.ScoredPoint]: List of search results as ScoredPoint objects.
+
+        Raises:
+            ValueError: If the collection does not exist or is empty.
+        """
+        # Define task
+        tasks = [self._client.query_points(collection_name=self._collection_name,
+                                           query=v,
+                                           using=EMBEDDING_MODEL_NAME,
+                                           limit=limit,
+                                           score_threshold=score_threshold,
+                                           search_params=search_params,
+                                           with_payload=with_payload,
+                                           with_vectors=with_vectors) for v in query_vectors]
+        # Handle multiple at once
+        results = await asyncio.gather(*tasks)
+        # Return
+        return results

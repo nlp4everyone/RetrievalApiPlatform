@@ -124,8 +124,7 @@ async def process_vector_store_files(vectorstore_id: str,
                                       metadata = {"source": file_ids[0]}) for text in chunked_texts]
                 # Insert to Qdrant
                 await qdrant_vector_store.insert_documents(documents = documents,
-                                                           embeddings = embeddings,
-                                                           embedding_model_name = "Qwen3-Embedding")
+                                                           embeddings = embeddings)
 
             # Get Qdrant Vector store
 
