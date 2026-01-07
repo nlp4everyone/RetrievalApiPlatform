@@ -6,6 +6,12 @@ from .base import (AutoChunkingStrategy,
 from .create import VectorStoreCreateRequest
 from .modify import VectorStoreModifyRequest
 from .query import VectorStoreQueryRequest
+from .search import (ComparisonType,
+                     ComparisonFilter,
+                     CompoundFilterType,
+                     CompoundFilter,
+                     RankingOptions,
+                     VectorStoreSearchRequest)
 
 __all__ = [
     'AutoChunkingStrategy',
@@ -15,5 +21,11 @@ __all__ = [
     'ExpiresAfter',
     'VectorStoreCreateRequest',
     'VectorStoreModifyRequest',
-    'VectorStoreQueryRequest'
+    'VectorStoreQueryRequest',
+    'ComparisonType',
+    'ComparisonFilter',
+    'CompoundFilterType',
+    'CompoundFilter',
+    'RankingOptions',
+    'VectorStoreSearchRequest',
 ]
