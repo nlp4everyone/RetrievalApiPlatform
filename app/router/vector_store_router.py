@@ -10,22 +10,23 @@ from app.security.auth import verify_api_key
 from app.db.postgres import PostgresVectorStore
 from app.db.qdrant import AsyncQdrantVectorStore
 from app.startup import get_postgres_pool, get_qdrant_service, get_embed_model
-# Typing
-from typing import List
 # Helper
 from app.utils.key_generator import generate_vectorstore_id
-from app.utils import _convert_to_qdrant_filter
+from app.utils.vector_store.utils import convert_query_response_to_search_results
 # Exceptions
 from app.exceptions.postgres import PostgresConnectionException
 # Logger
 from loggers import SystemLogger
 # Other components
 from datetime import datetime, timezone, timedelta
-import asyncpg, socket
+import asyncpg, socket, mlflow
 # TaskIQ worker
 from taskiq_worker import process_vector_store_files
 # Qdrant component
 from qdrant_client import models
+from mlflow.entities import SpanType
+# Enable logging
+mlflow.config.enable_async_logging()
 
 # Define router
 vector_store_router = APIRouter()
@@ -190,7 +191,6 @@ async def list_vector_stores(query_object: VectorStoreQueryRequest = Depends(),
                                              status=record.get("status"),
                                              usage_bytes=record.get("usage_bytes", 0))
             vector_stores.append(vector_store)
-            #vector_stores.append(vector_store)
 
         # Return
         return ListVectorStoreObject(data = vector_stores,
@@ -366,7 +366,6 @@ async def delete_vector_store(vector_store_id: str,
         SystemLogger.error(e)
         raise PostgresConnectionException()
 
-
 @vector_store_router.post("/vector_stores/{vector_store_id}/search",response_model = VectorStoreSearchResponse)
 async def search_vector_store(vector_store_id: str,
                               search_request: VectorStoreSearchRequest,
@@ -392,61 +391,88 @@ async def search_vector_store(vector_store_id: str,
     # Embed model
     embed_model = get_embed_model()
 
+
     try:
-        # # Check if collection exists
-        # collection_exists = await qdrant_service.client.collection_exists(collection_name = vector_store_id)
-        # # If not existed
-        # if not collection_exists:
-        #     # Raise exception
-        #     raise VectorStoreNotFoundException(vector_store_id = vector_store_id)
+        with mlflow.start_span(name="POST /v1/vector_stores/{vector_store_id}/search", span_type=SpanType.UNKNOWN) as span:
+            # # Check if collection exists
+            # collection_exists = await qdrant_service.client.collection_exists(collection_name = vector_store_id)
+            # # If not existed
+            # if not collection_exists:
+            #     # Raise exception
+            #     raise VectorStoreNotFoundException(vector_store_id = vector_store_id)
+            # Log
+            # Set inputs
+            span.set_inputs({"search_request": search_request.model_dump()})
 
-        qdrant_vector_store = AsyncQdrantVectorStore(collection_name = vector_store_id,
-                                                     client = qdrant_service.client)
-        # Convert filters to Qdrant format if provided
-        qdrant_filter = None
-        if search_request.filters:
-            qdrant_filter = _convert_to_qdrant_filter(search_request.filters)
-        
-        # Prepare search parameters
-        search_params = models.SearchParams(
-            quantization=models.QuantizationSearchParams(
-                ignore=search_request.ranking_options.ranker == "none" if search_request.ranking_options else False,
-                rescore=search_request.ranking_options.ranker == "auto" if search_request.ranking_options else True,
-            )
-        ) if search_request.ranking_options else None
-        
-        # Convert query to list if it's a single string ( If it's a list, remain only first element)
-        queries = [search_request.query] if isinstance(search_request.query, str) else search_request.query[:1]
+            qdrant_vector_store = AsyncQdrantVectorStore(collection_name = vector_store_id,
+                                                         client = qdrant_service.client)
+            # Convert filters to Qdrant format if provided
+            qdrant_filter = None
+            # if search_request.filters:
+            #     qdrant_filter = _normalize_qdrant_filter(search_request.filters)
 
-        # Embed the queries
-        queries_vectors = await embed_model.aembed_documents(queries)
-        # Perform search
-        search_results :List[models.QueryResponse] = await qdrant_vector_store.retrieve(query_vectors = queries_vectors,
-                                                            query_filter = qdrant_filter,
-                                                            limit = search_request.max_num_results)
+            # Prepare search parameters
+            search_params = models.SearchParams(
+                quantization=models.QuantizationSearchParams(
+                    ignore=search_request.ranking_options.ranker == "none" if search_request.ranking_options else False,
+                    rescore=search_request.ranking_options.ranker == "auto" if search_request.ranking_options else True,
+                )
+            ) if search_request.ranking_options else None
 
-        # Convert results to response format
-        documents = []
-        for query_result in search_results:
-            for point in query_result.points:
-                payload = point.payload or {}
-                metadata = payload.get('metadata', {})
-                content = payload.get('page_content', '')
+            # Convert query to list if it's a single string ( If it's a list, remain only first element)
+            queries = [search_request.query] if isinstance(search_request.query, str) else search_request.query[:1]
 
-                # Clean up the content by removing extra whitespace and newlines
-                cleaned_content = ' '.join(line.strip() for line in content.splitlines() if line.strip())
+            # Embedding span
+            with mlflow.start_span(name="embedding", span_type=SpanType.EMBEDDING) as span:
+                # Set inputs
+                span.set_inputs({"queries_batch_size": len(queries)})
+                # Set attribute
+                span.set_attributes({"embedding_model_name": embed_model.model})
+                # Embed the queries
+                queries_vectors = await embed_model.aembed_documents(queries)
+                # Define embedding dims
+                embedding_dims = len(queries_vectors[0])
+                embedding_batch_size = len(queries_vectors)
+                # Set output
+                span.set_outputs({"embedding_batch_size": embedding_batch_size,
+                                  "embedding_dims": embedding_dims})
 
-                # Append document
-                documents.append(SearchResult(score=point.score,
-                                              attributes=metadata,
-                                              content=[ContentChunk(text=cleaned_content)]))
+            # Retrieval span
+            with mlflow.start_span(name="retrieve", span_type=SpanType.RETRIEVER) as span:
+                # Set inputs
+                span.set_inputs({"embedding_batch_size": embedding_batch_size,
+                                 "embedding_dims": embedding_dims,
+                                 "max_num_results": search_request.max_num_results})
+                # Perform search
+                retrieved_results = await qdrant_vector_store.retrieve(query_vectors = queries_vectors,
+                                                                       query_filter = qdrant_filter,
+                                                                       limit = search_request.max_num_results)
 
-        # Return
-        return VectorStoreSearchResponse(search_query=search_request.query,
-                                         data=documents,
-                                         has_more=len(documents) >= search_request.max_num_results,
-                                         total = len(documents))
-        
+                # Construct data
+                displayed_results = []
+                for point in retrieved_results[0].points:
+                    displayed_results.append({"chunk_id": point.id,
+                                              "score": point.score,
+                                              "metadata": point.payload.get("metadata")})
+
+                # Set attribute
+                span.set_attributes({"vector_store_type": "qdrant",
+                                     "vector_store_id": vector_store_id})
+                # Set output
+                span.set_outputs({"results": displayed_results})
+
+            # Convert results to response format
+            data = convert_query_response_to_search_results(retrieved_results)
+            # Add tag
+            mlflow.update_current_trace(tags={"vector_store_id": vector_store_id,
+                                              "token": api_key})
+            # Update state
+            mlflow.flush_async_logging()
+            # Return
+            return VectorStoreSearchResponse(search_query=search_request.query,
+                                             data=data,
+                                             has_more=len(data) >= search_request.max_num_results)
+
     except Exception as e:
         SystemLogger.error(e)
         raise HTTPException(
