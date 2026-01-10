@@ -78,7 +78,7 @@ bash view_log.sh
 - [x] Update Chonkie chunking strategy
 - [x] Add PDF parser (UndatasIO) module (04/01)
 - [x] Complete naive search function (07/01)
-- [ ] Tracing retrieval with MLflow
+- [x] Tracing retrieval with MLflow (10/01)
 - [ ] Add vector store file branch
 - [ ] Filter with metadata filtering
 - [ ] Implement other PDF parser service (LlamaParse,etc) (soon)
