@@ -1,5 +1,10 @@
-from ..base_exception import BaseException, BaseResponse
+# Base exception
+from ..base_exception import (BaseException,
+                              BaseResponse,
+                              WrongPrefixException)
+# Typing
 from typing import Any
+# FastAPI
 from fastapi import status
 
 class VectorStoreNotFoundException(BaseException):
@@ -13,3 +18,17 @@ class VectorStoreNotFoundException(BaseException):
                                                  type = type,
                                                  params = params,
                                                  code = code))
+
+class WrongPrefixVectorstoreException(WrongPrefixException):
+    def __init__(self,
+                 input: str,
+                 type: str = "invalid_request_error",
+                 params: str = "vector_store_id",
+                 prefix: str = "vs",
+                 code: Any = "invalid_value"):
+        # Inherit
+        super().__init__(input = input,
+                         type = type,
+                         prefix = prefix,
+                         params = params,
+                         code = code)

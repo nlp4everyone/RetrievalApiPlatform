@@ -1,5 +1,5 @@
 # Typing
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional
 # Table
 from .tables import CREATE_VECTOR_STORE_TABLE, CREATE_VECTOR_STORE_INDEXES
 # Exception
@@ -15,6 +15,22 @@ class PostgresVectorStore:
             async with conn.transaction():
                 await conn.execute(CREATE_VECTOR_STORE_TABLE)
                 await conn.execute(CREATE_VECTOR_STORE_INDEXES)
+
+    @staticmethod
+    async def _check_vector_store_existance(pool: asyncpg.Pool,
+                                            vector_store_id: str,
+                                            api_key: str):
+        # Define query
+        query = """
+        SELECT * FROM vector_stores
+        WHERE id = $1 AND api_key = $2
+        """
+
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(query, vector_store_id, api_key)
+
+        # Raise exception
+        if not row: raise VectorStoreNotFoundException(vector_store_id)
 
     @staticmethod
     async def create(pool: asyncpg.Pool,
@@ -185,13 +201,9 @@ class PostgresVectorStore:
             DELETE FROM vector_stores
             WHERE id = $1 AND api_key = $2
         """
-        
+        # Handle the deletion
         async with pool.acquire() as conn:
             result = await conn.execute(query, vector_store_id, api_key)
-            
-        if result == "DELETE 0":
-            # Raise exception
-            raise VectorStoreNotFoundException(vector_store_id)
 
     @staticmethod
     async def list(pool: asyncpg.Pool,

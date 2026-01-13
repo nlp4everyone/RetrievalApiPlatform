@@ -1,10 +1,9 @@
-# FastAPI component
-from fastapi import HTTPException, status
 # Typing
-from typing import Union, List
+from typing import List
 # Schema
 from app.schemas.vector_store.responses.search import SearchResult, ContentChunk
-from app.schemas.vector_store.requests import *
+# Exception
+from app.exceptions.vector_store import WrongPrefixVectorstoreException
 # Qdrant component
 from qdrant_client import models
 
@@ -42,3 +41,7 @@ def convert_query_response_to_search_results(retrieved_results: List[models.Quer
 
     return documents
 
+def validate_vector_store_prefix(vector_store_id):
+    # Check prefix
+    if not vector_store_id.startswith("vs"):
+        raise WrongPrefixVectorstoreException(input=vector_store_id)

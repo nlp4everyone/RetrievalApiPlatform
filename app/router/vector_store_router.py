@@ -12,7 +12,8 @@ from app.db.qdrant import AsyncQdrantVectorStore
 from app.startup import get_postgres_pool, get_qdrant_service, get_embed_model
 # Helper
 from app.utils.key_generator import generate_vectorstore_id
-from app.utils.vector_store.utils import convert_query_response_to_search_results
+from app.utils.vector_store.utils import (convert_query_response_to_search_results,
+                                          validate_vector_store_prefix)
 # Exceptions
 from app.exceptions.postgres import PostgresConnectionException
 # Logger
@@ -204,10 +205,8 @@ async def list_vector_stores(query_object: VectorStoreQueryRequest = Depends(),
 
 
 @vector_store_router.get("/vector_stores/{vector_store_id}", response_model=VectorStoreObject)
-async def get_vector_store(
-    vector_store_id: str,
-    api_key: str = Depends(verify_api_key)
-) -> VectorStoreObject:
+async def get_vector_store(vector_store_id: str,
+                           api_key: str = Depends(verify_api_key)) -> VectorStoreObject:
     """
     ## Retrieve a specific vector store by ID.
     Fetches the details of a vector store including its metadata, status, and file counts.
@@ -215,7 +214,10 @@ async def get_vector_store(
     ### Args:
     - `vector_store_id` (str): The unique identifier of the vector store
     """
+    # Get module
     postgres_pool = get_postgres_pool()
+    # Validate vector store id
+    validate_vector_store_prefix(vector_store_id)
 
     try:
         # Get vector store from database
@@ -223,9 +225,6 @@ async def get_vector_store(
                                                vector_store_id=vector_store_id,
                                                api_key=api_key)
 
-        # Check if vector store exists
-        if not record:
-            raise HTTPException(status_code=404, detail="Vector store not found")
 
         # Convert timestamps to Unix timestamps (integers)
         created_at = record["created_at"]
@@ -278,7 +277,10 @@ async def modify_vector_store(vector_store_id: str,
     - `name` (str, optional): New name for the vector store
     - `metadata` (Dict[str, Any], optional): New metadata to merge with existing metadata
     """
+    # Get module
     postgres_pool = get_postgres_pool()
+    # Validate vector store id
+    validate_vector_store_prefix(vector_store_id)
 
     try:
         # Update the record
@@ -339,10 +341,19 @@ async def delete_vector_store(vector_store_id: str,
     ### Args:
     - `vector_store_id` (str): The unique identifier of the vector store to delete
     """
+    # Get module
     postgres_pool = get_postgres_pool()
     qdrant_service = get_qdrant_service()
+    # Validate vector store id
+    validate_vector_store_prefix(vector_store_id)
+
+    # Check vector store existance
+    await PostgresVectorStore._check_vector_store_existance(pool=postgres_pool,
+                                                            vector_store_id=vector_store_id,
+                                                            api_key=api_key)
 
     try:
+
         # Delete the record
         await PostgresVectorStore.delete(pool=postgres_pool,
                                          vector_store_id=vector_store_id,
@@ -386,11 +397,19 @@ async def search_vector_store(vector_store_id: str,
     ### Returns
     - `VectorStoreSearchResponse`: A response containing the search results.
     """
-    # Get service
+    # Get Qdrant service
     qdrant_service = get_qdrant_service()
     # Embed model
     embed_model = get_embed_model()
+    # Get Postgres service
+    postgres_pool = get_postgres_pool()
+    # Validate vector store id
+    validate_vector_store_prefix(vector_store_id)
 
+    # Check vector store existance
+    await PostgresVectorStore._check_vector_store_existance(pool=postgres_pool,
+                                                            vector_store_id=vector_store_id,
+                                                            api_key=api_key)
 
     try:
         with mlflow.start_span(name="POST /v1/vector_stores/{vector_store_id}/search", span_type=SpanType.UNKNOWN) as span:
