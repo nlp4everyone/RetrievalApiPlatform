@@ -31,7 +31,9 @@ result_backend = RedisAsyncResultBackend(redis_url=REDIS_URL)
 broker = RedisStreamBroker(url=REDIS_URL).with_result_backend(result_backend)
 # Postgres Service
 postgres_service = init_postgres()
+# Minio service
 minio_service = init_minio()
+# Qdrant service
 qdrant_service = init_qdrant()
 
 @broker.task
@@ -47,8 +49,8 @@ async def process_vector_store_files(vectorstore_id: str,
     """
     # Wait for postgres
     await postgres_service._create_pool()
-    embedding_model = await init_embed_model(serving_service_name = EMBEDDING_SERVING_SERVICE_NAME,
-                                             port = 30001)
+    embedding_model = await init_embed_model(serving_service_name=EMBEDDING_SERVING_SERVICE_NAME,
+                                             port=30001)
     try:
         # Check file existance
         existing_files = await PostgresFileStore.check_existing_files(pool = postgres_service.pool,
@@ -126,14 +128,12 @@ async def process_vector_store_files(vectorstore_id: str,
                 await qdrant_vector_store.insert_documents(documents = documents,
                                                            embeddings = embeddings)
 
-            # Get Qdrant Vector store
-
-            # Update vector store
-            await PostgresVectorStore.update(pool = postgres_service.pool,
-                                             vector_store_id = vectorstore_id,
-                                             api_key = api_key,
-                                             status = UploadingStatus.COMPLETED,
-                                             usage_bytes = usage_bytes,
-                                             last_active_at = datetime.utcnow())
+        # Update vector store
+        await PostgresVectorStore.update(pool = postgres_service.pool,
+                                         vector_store_id = vectorstore_id,
+                                         api_key = api_key,
+                                         status = UploadingStatus.COMPLETED,
+                                         usage_bytes = usage_bytes,
+                                         last_active_at = datetime.utcnow())
     except Exception as e:
         SystemLogger.info(e)

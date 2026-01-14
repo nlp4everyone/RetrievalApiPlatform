@@ -25,7 +25,7 @@ import asyncpg, socket, mlflow
 from taskiq_worker import process_vector_store_files
 # Qdrant component
 from qdrant_client import models
-from mlflow.entities import SpanType
+from mlflow.entities import SpanType, SpanEvent
 # Enable logging
 mlflow.config.enable_async_logging()
 
@@ -109,18 +109,15 @@ async def create_vector_store(request: VectorStoreCreateRequest,
                                              chunking_strategy = chunking_strategy,
                                              chunk_size = chunk_size,
                                              chunk_overlap = chunk_overlap)
-
-        # Convert expires_after to dict
-        expires_after_days = timedelta(seconds=int(expires_after)).days
         
         # Build response from stored record
         return VectorStoreObject(id = vectorstore_id,
                                  name = request.name,
                                  created_at = int(created_at.timestamp()),
                                  last_active_at = int(created_at.timestamp()),
-                                 expires_at = int(record.get("expires_at").timestamp()),
+                                 expires_at = int(record.get("expires_at").timestamp()) if record.get("expires_at") is not None else None,
                                  expires_after = VectorStoreExpiresAfter(days = timedelta(seconds=int(expires_after)).days,
-                                                                         anchor = "last_active_at"),
+                                                                         anchor = "last_active_at") if expires_after is not None else None,
                                  file_counts = VectorStoreFileCounts(in_progress = nums_in_progress_file,
                                                                      total = nums_in_progress_file),
                                  metadata = record.get("metadata"),
@@ -462,17 +459,33 @@ async def search_vector_store(vector_store_id: str,
                 span.set_inputs({"embedding_batch_size": embedding_batch_size,
                                  "embedding_dims": embedding_dims,
                                  "max_num_results": search_request.max_num_results})
-                # Perform search
-                retrieved_results = await qdrant_vector_store.retrieve(query_vectors = queries_vectors,
-                                                                       query_filter = qdrant_filter,
-                                                                       limit = search_request.max_num_results)
 
-                # Construct data
-                displayed_results = []
-                for point in retrieved_results[0].points:
-                    displayed_results.append({"chunk_id": point.id,
-                                              "score": point.score,
-                                              "metadata": point.payload.get("metadata")})
+                # Check vector store existance
+                vector_store_existance = await qdrant_service.client.collection_exists(collection_name = vector_store_id)
+
+                # When vector store not existed
+                if not vector_store_existance:
+                    # Handle case vector store not existed
+                    data = []
+                    displayed_results = []
+                    # Log event
+                    span.add_event(event = SpanEvent(name = "Vector store is not existed"))
+                else:
+                    # Existance case
+                    # Perform search
+                    retrieved_results = await qdrant_vector_store.retrieve(query_vectors = queries_vectors,
+                                                                           query_filter = qdrant_filter,
+                                                                           limit = search_request.max_num_results)
+
+                    # Construct data
+                    displayed_results = []
+                    for point in retrieved_results[0].points:
+                        displayed_results.append({"chunk_id": point.id,
+                                                  "score": point.score,
+                                                  "metadata": point.payload.get("metadata")})
+
+                    # Convert results to response format
+                    data = convert_query_response_to_search_results(retrieved_results)
 
                 # Set attribute
                 span.set_attributes({"vector_store_type": "qdrant",
@@ -480,11 +493,9 @@ async def search_vector_store(vector_store_id: str,
                 # Set output
                 span.set_outputs({"results": displayed_results})
 
-            # Convert results to response format
-            data = convert_query_response_to_search_results(retrieved_results)
-            # Add tag
-            mlflow.update_current_trace(tags={"vector_store_id": vector_store_id,
-                                              "token": api_key})
+                # Add tag
+                mlflow.update_current_trace(tags={"vector_store_id": vector_store_id,
+                                                  "token": api_key})
             # Update state
             mlflow.flush_async_logging()
             # Return
