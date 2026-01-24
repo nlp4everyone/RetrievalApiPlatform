@@ -45,32 +45,42 @@ Built with scalability and performance in mind, this Retrieval Engine supports v
 
 # 🚀 Quick Start
 
-1. Clone the repository:
-```bash
-git clone https://github.com/nlp4everyone/RetrievalEngine.git
-cd RetrievalEngine
-```
+1. **Clone the repository**
+   ```bash
+   # Clone the main repository
+   git clone -b retrieval/naive-rag https://github.com/nlp4everyone/PrivateAI.git
+   # Navigate to project directory
+   cd PrivateAI
+   ```
 
-2. Set up environment:
-```bash
-cp .env.sample .env
-# Edit .env file with your configuration
-```
+2. **Set up environment configuration**
+   ```bash
+   # Copy the sample environment file
+   cp .env.sample .env
+   # Edit the .env file to customize settings like ports, API keys, etc.
+   # nano .env  # or use your preferred text editor
+   ```
 
-3. Build and start services:
-```bash
-# Build the Docker containers
-bash build_docker.sh
+3. **Build and start the services**
+   ```bash
+   # Build all Docker containers (this might take a while on first run)
+   bash build_docker.sh
+   
+   # Start all services in detached mode
+   bash run_docker.sh
+   ```
 
-# Start all services
-bash run_docker.sh
-```
+4. **Monitor the services**
+   ```bash
+   # View logs to check if all services started successfully
+   bash view_log.sh
+   ```
 
-4. Verify the installation:
-```bash
-# Check service status
-bash view_log.sh
-```
+5. **Access the services** (default ports - customize in `.env`)
+   - 🔌 **API Documentation**: http://localhost:8005/docs - Interactive API docs
+   - 🗄️ **Vector Store**: http://localhost:6333/dashboard - Qdrant vector database UI
+   - 📦 **Object Storage**: http://localhost:9001 - MinIO dashboard (default: minioadmin/minioadmin)
+   - 📊 **MLflow UI**: http://localhost:5000 - Track experiments and model versions
 
 
 ## 📋 To-Do List
