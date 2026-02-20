@@ -1,3 +1,4 @@
+from typing import Optional, Dict, Any, Union
 # Minio component
 from minio import Minio
 from minio.error import S3Error
@@ -7,36 +8,54 @@ from loggers import SystemLogger
 
 class MinioFileStore:
     @staticmethod
-    async def upload_file(minio_client :Minio,
-                          file_buffer,
-                          file_name :str,
-                          bucket_name :str,
-                          content_type:str):
+    async def upload_file(minio_client: Minio,
+                          file_buffer: Union[bytes, bytearray],
+                          file_name: str,
+                          bucket_name: str,
+                          content_type: str) -> Optional[Dict[str, Any]]:
+        """
+        Upload a file to a Minio bucket with automatic handling for small and large files.
+        
+        Args:
+            minio_client: Configured Minio client instance
+            file_buffer: File data as bytes or bytearray
+            file_name: Name to assign to the file in the bucket
+            bucket_name: Target bucket name
+            content_type: MIME type of the file (e.g., 'application/pdf')
+            
+        Returns:
+            dict: Upload result containing bucket, object name, and etag on success
+            None: On upload failure
+            
+        Note:
+            Files < 50MB are uploaded in a single operation
+            Files >= 50MB are uploaded using multipart upload with 10MB parts
+        """
         try:
-            # Get file size
+            # Calculate file size to determine upload strategy
             file_size_bytes = len(file_buffer)
-            # Convert to mb
+            # Convert to MB for threshold comparison
             file_size_mb = file_size_bytes / (1024 * 1024)
 
             if file_size_mb < 50:
-                # File size small (Less than 50MB)
+                # Small file upload (< 50MB) - single part upload using BytesIO
                 result = await asyncio.to_thread(minio_client.put_object,
                                                  bucket_name,
                                                  file_name,
-                                                 data = io.BytesIO(file_buffer),
-                                                 length = file_size_bytes,
-                                                 content_type = content_type)
+                                                 data=io.BytesIO(file_buffer),
+                                                 length=file_size_bytes,
+                                                 content_type=content_type)
             else:
-                # Large file size
+                # Large file upload (>= 50MB) - multipart upload with 10MB parts
                 result = await asyncio.to_thread(minio_client.put_object,
                                                  bucket_name,
                                                  file_name,
                                                  file_buffer,
-                                                 length = -1,
-                                                 part_size = 10 * 1024 * 1024,
-                                                 content_type = content_type)
+                                                 length=-1,  # Unknown length for streaming
+                                                 part_size=10 * 1024 * 1024,  # 10MB parts
+                                                 content_type=content_type)
 
-                # ✅ Upload succeeded if no exception and we got result info
+            # Return upload success information
             return {
                 "message": "Upload successful",
                 "bucket": result.bucket_name,
@@ -45,29 +64,62 @@ class MinioFileStore:
             }
 
         except S3Error as e:
+            # Log upload failure with specific error details
             SystemLogger.error(f"Failed when trying to upload file: {file_name}")
 
     @staticmethod
-    async def delete_file(minio_client :Minio,
+    async def delete_file(minio_client: Minio,
                           bucket_name: str,
-                          file_path: str):
+                          file_path: str) -> Optional[Dict[str, Any]]:
+        """
+        Delete a file from a Minio bucket.
+        
+        Args:
+            minio_client: Configured Minio client instance
+            bucket_name: Bucket containing the file
+            file_path: Path to the file within the bucket
+            
+        Returns:
+            dict: Deletion confirmation with bucket and path on success
+            None: On deletion failure
+        """
         try:
-            # Run the blocking I/O call in a thread
+            # Execute the blocking delete operation in a thread pool to avoid blocking
             await asyncio.to_thread(minio_client.remove_object, bucket_name, file_path)
             return {"deleted": True, "bucket": bucket_name, "path": file_path}
         except S3Error as e:
+            # Log deletion failure with specific error details
             SystemLogger.error(f"Failed when trying to delete file: {file_path} in bucket {bucket_name}")
 
     @staticmethod
-    async def _load_file(minio_client: Minio,
-                         bucket_name: str,
-                         file_path: str):
+    async def download_file(minio_client: Minio,
+                           bucket_name: str,
+                           file_path: str) -> Optional[bytes]:
+        """
+        Download a file from a Minio bucket.
+        
+        Args:
+            minio_client: Configured Minio client instance
+            bucket_name: Bucket containing the file
+            file_path: Path to the file within the bucket
+            
+        Returns:
+            bytes: File content on success
+            None: On download failure
+            
+        Note:
+            Properly cleans up network resources in finally block
+        """
+        # Get object from Minio in a thread pool to avoid blocking the event loop
         response = await asyncio.to_thread(minio_client.get_object, bucket_name, file_path)
         try:
-            # Run the blocking I/O call in a thread
+            # Read the file content from the response stream
             return response.read()
         except S3Error as e:
-            SystemLogger.error(f"Failed when trying to delete file: {file_path} in bucket {bucket_name}")
+            # Log download failure with specific error details
+            SystemLogger.error(f"Failed when trying to download file: {file_path} in bucket {bucket_name}")
+            return None
         finally:
+            # Always clean up network connections and resources to prevent leaks
             response.close()
             response.release_conn()
