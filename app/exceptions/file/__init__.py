@@ -1,1 +1,1 @@
-from .file_exception import FileSizeLimitExceededException, FileNotFoundException
+from .base import FileSizeLimitExceededException, FileNotFoundException

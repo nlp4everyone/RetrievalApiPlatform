@@ -1,1 +1,1 @@
-from .embedding_exception import EmbeddingModelNotFoundException
+from .base import EmbeddingModelNotFoundException

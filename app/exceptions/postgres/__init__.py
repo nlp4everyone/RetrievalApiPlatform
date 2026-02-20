@@ -1,1 +1,1 @@
-from .base_exception import PostgresConnectionException
+from .base import PostgresConnectionException

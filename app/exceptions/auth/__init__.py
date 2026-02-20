@@ -1,2 +1,2 @@
-from .auth_exception import (APIKeyIncorrectException,
-                             BearerMissingException)
+from .base import (APIKeyIncorrectException,
+                   BearerMissingException)
