@@ -1,4 +1,4 @@
-name: chat_engine
+name: retrieval_engine
 services:
   postgres:
     image: postgres:15.9-alpine3.20
@@ -12,7 +12,14 @@ services:
       - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./initdb:/docker-entrypoint-initdb.d
+    command:
+      - bash
+      - -c
+      - |
+        docker-entrypoint.sh postgres &
+        sleep 5
+        psql -U $POSTGRES_USER -d postgres -c 'CREATE DATABASE mlflow;' || true
+        wait
     healthcheck:
       test: [ "CMD-SHELL", "pg_isready -U $POSTGRES_USER" ]
       interval: 5s
@@ -37,11 +44,11 @@ services:
     restart: always
     ports:
       - "${QDRANT_GRPC_PORT:-6334}:6334"
-      - "${QDRANT_HTTP_PORT:-6333}:6333"
+      - "${QDRANT_PORT:-6333}:6333"
     volumes:
       - qdrant_data:/qdrant/storage
     healthcheck:
-      test: [ "CMD", "wget", "--spider", "http://localhost:6333/readyz"]
+      test: [ "CMD", "curl", "-f", "http://localhost:6333/healthz", "-H", "api-key: ${QDRANT_API_KEY}" ]
       interval: 30s
       timeout: 10s
       retries: 3

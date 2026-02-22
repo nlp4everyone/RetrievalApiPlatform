@@ -1,0 +1,31 @@
+name: retrieval_engine
+services:
+  vllm_embedding:
+    image: vllm/vllm-openai:v0.15.1
+    container_name: vllm_embedding
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all          # or change to 1, or list device_ids
+              capabilities: [ gpu ]
+              options:
+                runtime: nvidia
+    ports:
+      - "${VLLM_EMBEDDING_PORT:-8100}:8000"
+    volumes:
+      - vllm-cache:/root/.cache/huggingface/hub
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - DISABLE_UVICORN_PROPAGATION=true
+      - VLLM_USE_V1=0
+    command: >
+      --model ${EMBEDDING_MODEL_NAME:-Qwen/Qwen3-Embedding-0.6B}
+      --runner pooling
+      --convert embed
+      --api-key ${SERVING_API_KEY:-token}
+      --gpu-memory-utilization ${EMBEDDING_GPU_MEM_UTIL:-0.8}
+volumes:
+  vllm-cache:

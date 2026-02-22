@@ -1,12 +1,10 @@
-name: chat_engine
+name: retrieval_engine
 services:
   web:
     container_name: web_service
     build:
-      context: .
+      context: ..
       dockerfile: docker/Dockerfile
-    env_file:
-      - .env
     environment:
       - DISABLE_UVICORN_PROPAGATION=true
       - NUM_WORKERS=${NUM_WORKERS}
@@ -25,11 +23,9 @@ services:
 
   worker:
     build:
-      context: .
+      context: ..
       dockerfile: docker/Dockerfile
     container_name: taskiq_worker
-    env_file:
-      - .env
     command: taskiq worker taskiq_worker:broker
     environment:
       REDIS_URL: redis://redis:${REDIS_PORT:-6379}/0
