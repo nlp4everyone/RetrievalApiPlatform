@@ -6,3 +6,5 @@ tiktoken==0.11.0
 # Read lib
 langchain-undatasio==1.0.1
 undatasio==0.2.0.2
+llama_parse==0.6.91
+

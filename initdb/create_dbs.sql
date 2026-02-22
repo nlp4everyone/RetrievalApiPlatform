@@ -1,2 +1,0 @@
-CREATE DATABASE mlflow;
-CREATE DATABASE "retrieval-db";

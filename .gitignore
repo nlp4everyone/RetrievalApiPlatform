@@ -9,6 +9,7 @@ document.txt
 experimental.txt
 mlruns
 .env
+__pycache__/
 app/__pycache__/
 app/schemas/__pycache__/
 app/startup/__pycache__/
