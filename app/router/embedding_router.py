@@ -7,15 +7,14 @@ from app.schemas.embeddings import (EmbeddingObject,
                                     EmbeddingCreateRequest)
 # Exceptions
 from app.exceptions.embeddings import EmbeddingModelNotFoundException
-#  Get model
 from app.startup import get_embed_model
 # Config
-from app.core.config.constants import EMBEDDING_MODEL_NAME
+from app.core.config import *
 # Security
 from app.security.auth import verify_api_key
 # Token counter
 from app.utils.token_counter import approximate_count_tokens
-from app.utils.transform import floats_to_base64
+from app.utils.encoding.transform import floats_to_base64
 # Logger
 from loggers import SystemLogger
 
@@ -26,49 +25,42 @@ embedding_router = APIRouter()
 async def create_embedding(request: EmbeddingCreateRequest,
                            api_key: str = Depends(verify_api_key)) -> ListEmbeddingObject:
     """
-    ## Generate embeddings for the input text(s).
-
-    This endpoint takes a text or list of texts and returns their corresponding vector embeddings
-    using the configured embedding model. It supports both string and list of strings as input.
+    ## Creates an embedding vector representing the input text.
 
     ### Args:
-    - `model`: The name of the embedding model to use
-    - `input`: Text or list of texts to generate embeddings for
-    - `encoding_format`: The format of the returned embeddings ('float' or 'base64')
+    - `model`: ID of the model to use
+    - `input`: Input text to embed, encoded as a string or array of tokens
+    - `user`: A unique identifier representing your end-user, which can help OpenAI to monitor and detect abuse.
+    - `encoding_format`: The format to return the embeddings in. Can be either float or base64.
 
-    ### Example
-        ```json
-        {
-            "model": "text-embedding-ada-002",
-            "input": "Sample text to embed",
-            "encoding_format": "float"
-        }
-        ```
+
+    Reference: [OpenAI Create Embedding API](https://developers.openai.com/api/reference/resources/embeddings/methods/create)
+
     """
-    # Embed model
+    # Get embedding model
     embed_model = get_embed_model()
-    # Check model name
+    # Check if requested model matches the configured model
     if request.model != EMBEDDING_MODEL_NAME:
-        # When not correct, raise exception
+        # Raise exception when model doesn't match
         raise EmbeddingModelNotFoundException(model_name = request.model)
 
-    # Normalize input
+    # Normalize input to list format
     inputs = [request.input] if isinstance(request.input,str) else request.input
-    # Embed object
+    # Generate embeddings for all inputs
     embeddings = await embed_model.aembed_documents(inputs)
-    # Get embedding objects
+    # Create embedding objects based on encoding format
     if request.encoding_format == "float":
-        # Float type
+        # Return embeddings as float arrays
         embedding_objects = [EmbeddingObject(embedding = embedding,
                                              index = index) for (index,embedding) in enumerate(embeddings)]
     else:
-        # Base64 type
+        # Return embeddings as base64 encoded strings
         embedding_objects = [EmbeddingObject(embedding = floats_to_base64(embedding),
                                              index = index) for (index, embedding) in enumerate(embeddings)]
 
-    # Estimate number of tokens
+    # Estimate token count for usage tracking
     prompt_tokens = approximate_count_tokens(" ".join(inputs))
-    # Return
+    # Return response with embeddings and usage information
     return ListEmbeddingObject(data = embedding_objects,
                                model = EMBEDDING_MODEL_NAME,
                                usage = EmbeddingUsage(prompt_tokens = prompt_tokens,

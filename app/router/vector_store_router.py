@@ -36,43 +36,45 @@ vector_store_router = APIRouter()
 async def create_vector_store(request: VectorStoreCreateRequest,
                               api_key: str = Depends(verify_api_key)) -> VectorStoreObject:
     """
-    ## Create a new vector store.
-    This endpoint creates a new vector store with the provided configuration and returns its representation.
-    The endpoint follows the OpenAI `/vector_stores` create endpoint specification.
+    ## Create a vector store.
 
     ### Args
-    - `name` (str): A name for the vector store
-    - `description` (str, optional): A description for the vector store
-    - `file_ids` (List[str], optional): List of file IDs to include in the vector store
-    - `expires_after` (optional): Expiration configuration
-    - `metadata` (optional): Additional metadata
-    - `chunking_strategy` (optional): Strategy for chunking documents
+    - `name` (str): The name of the vector store.
+    - `description` (str, optional): A description for the vector store. Can be used to describe the vector store's purpose.
+    - `file_ids` (List[str], optional): A list of File IDs that the vector store should use. Useful for tools like file_search that can access files.
+    - `expires_after` (optional): The expiration policy for a vector store.
+    - `metadata` (optional): Set of 16 key-value pairs that can be attached to an object
+    - `chunking_strategy` (optional): The chunking strategy used to chunk the file(s).
+
+    Reference: [OpenAI Create Vector Store API](https://developers.openai.com/api/reference/python/resources/vector_stores/methods/create)
+
     """
-    # Get current time in UTC
+    # Get current time in UTC for timestamps
     current_time = datetime.now(timezone.utc)
     created_at = current_time
 
-    # Generate id
+    # Generate unique vector store ID
     vectorstore_id = generate_vectorstore_id()
 
-    # Persist to Postgres
+    # Get PostgreSQL connection pool
     postgres_pool = get_postgres_pool()
 
     try:
-        # Define expires_after and expires_at
+        # Calculate expiration time and policy if specified
         expires_at = None
         expires_after = None
-        # If request after is not None
         if request.expires_after is not None:
+            # Convert days to seconds for storage
             expires_after = timedelta(days = request.expires_after.days).total_seconds()
+            # Calculate absolute expiration timestamp
             expires_at = created_at + timedelta(days = request.expires_after.days)
 
-        # Define process file
+        # Count files that will be processed
         nums_in_progress_file = 0
         if request.file_ids is not None:
             nums_in_progress_file = len(request.file_ids)
 
-        # Save to database
+        # Save vector store metadata to PostgreSQL database
         record = await PostgresVectorStore.create(pool = postgres_pool,
                                                   id = vectorstore_id,
                                                   api_key = api_key,
@@ -88,21 +90,24 @@ async def create_vector_store(request: VectorStoreCreateRequest,
                                                   chunking_strategy = request.chunking_strategy.model_dump() if request.chunking_strategy else None,
                                                   vector_store_type = VectorStoreType.QDRANT)
 
-        # Auto case
+        # Determine chunking strategy parameters
+        # Default to auto chunking if no strategy specified
         if request.chunking_strategy is None:
             chunking_strategy = "auto"
             chunk_size = 800
             chunk_overlap = 400
+        # Use static chunking parameters if specified
         elif request.chunking_strategy.type == "static":
             chunking_strategy = "static"
             chunk_size = request.chunking_strategy.static.max_chunk_size_tokens
             chunk_overlap = request.chunking_strategy.static.chunk_overlap_tokens
+        # Use fuse chunking as fallback
         else:
             chunking_strategy = "fuse"
             chunk_size = 800
             chunk_overlap = 400
 
-        # Run in background
+        # Start background processing of files using TaskIQ worker
         await process_vector_store_files.kiq(vectorstore_id = vectorstore_id,
                                              api_key = api_key,
                                              file_ids = request.file_ids,
@@ -110,7 +115,7 @@ async def create_vector_store(request: VectorStoreCreateRequest,
                                              chunk_size = chunk_size,
                                              chunk_overlap = chunk_overlap)
         
-        # Build response from stored record
+        # Build and return response object from stored record
         return VectorStoreObject(id = vectorstore_id,
                                  name = request.name,
                                  created_at = int(created_at.timestamp()),
@@ -131,23 +136,25 @@ async def create_vector_store(request: VectorStoreCreateRequest,
 async def list_vector_stores(query_object: VectorStoreQueryRequest = Depends(),
                              api_key: str = Depends(verify_api_key)) -> ListVectorStoreObject:
     """
-    ## List vector stores with pagination.
-    Retrieves a paginated list of vector stores for the authenticated API key.
+    ## Returns a list of vector stores.
 
     ### Args:
-    - `limit` (int, optional): Maximum number of results to return
-    - `order` (str, optional): Sort order ('asc' or 'desc')
-    - `after` (str, optional): Cursor for pagination (ID of last item from previous page)
-    - `before` (str, optional): Cursor for pagination (ID of first item from next page)
+    - `limit` (int, optional): A limit on the number of objects to be returned. Limit can range between 1 and 100, and the default is 20
+    - `order` (str, optional): Sort order by the created_at timestamp of the objects. asc for ascending order and desc for descending order.
+    - `after` (str, optional): A cursor for use in pagination. after is an object ID that defines your place in the lis
+    - `before` (str, optional): A cursor for use in pagination. before is an object ID that defines your place in the list.
+
+    Reference: [OpenAI List Vector Stores API](https://developers.openai.com/api/reference/python/resources/vector_stores/methods/list)
+
     """
     postgres_pool = get_postgres_pool()
     
     try:
         # List vector stores from database
-        result = await PostgresVectorStore.list(pool=postgres_pool,
-                                                api_key=api_key,
-                                                limit=query_object.limit,
-                                                order=query_object.order,
+        result = await PostgresVectorStore.list_vector_stores(pool=postgres_pool,
+                                                        api_key=api_key,
+                                                        limit=query_object.limit,
+                                                        order=query_object.order,
                                                 after=query_object.after,
                                                 before=query_object.before)
         
@@ -205,11 +212,13 @@ async def list_vector_stores(query_object: VectorStoreQueryRequest = Depends(),
 async def get_vector_store(vector_store_id: str,
                            api_key: str = Depends(verify_api_key)) -> VectorStoreObject:
     """
-    ## Retrieve a specific vector store by ID.
-    Fetches the details of a vector store including its metadata, status, and file counts.
+    ## Retrieves a vector store.
 
     ### Args:
     - `vector_store_id` (str): The unique identifier of the vector store
+
+    Reference: [OpenAI Retrieve Vector Store API](https://developers.openai.com/api/reference/python/resources/vector_stores/methods/retrieve)
+
     """
     # Get module
     postgres_pool = get_postgres_pool()
@@ -218,7 +227,7 @@ async def get_vector_store(vector_store_id: str,
 
     try:
         # Get vector store from database
-        record = await PostgresVectorStore.get(pool=postgres_pool,
+        record = await PostgresVectorStore.get_by_id(pool=postgres_pool,
                                                vector_store_id=vector_store_id,
                                                api_key=api_key)
 
@@ -266,13 +275,15 @@ async def modify_vector_store(vector_store_id: str,
                               request: VectorStoreModifyRequest,
                               api_key: str = Depends(verify_api_key)) -> VectorStoreObject:
     """
-    ## Update a vector store's metadata.
-    Modifies the specified vector store's name and metadata. Only the provided fields will be updated.
+    ## Modifies a vector store.
 
     ### Args:
     - `vector_store_id` (str): The unique identifier of the vector store to update
-    - `name` (str, optional): New name for the vector store
-    - `metadata` (Dict[str, Any], optional): New metadata to merge with existing metadata
+    - `name` (str, optional): The name of the vector store.
+    - `metadata` (Dict[str, Any], optional): Set of 16 key-value pairs that can be attached to an object.
+
+    Reference: [OpenAI Update Vector Store API](https://developers.openai.com/api/reference/python/resources/vector_stores/methods/update)
+
     """
     # Get module
     postgres_pool = get_postgres_pool()
@@ -331,12 +342,13 @@ async def modify_vector_store(vector_store_id: str,
 async def delete_vector_store(vector_store_id: str,
                               api_key: str = Depends(verify_api_key)) -> VectorStoreDeletion:
     """
-    ## Permanently delete a vector store.
-    This action cannot be undone. All data associated with the vector store,
-    including its vector embeddings and metadata, will be permanently removed.
+    ## Delete a vector store.
 
     ### Args:
     - `vector_store_id` (str): The unique identifier of the vector store to delete
+
+    Reference: [OpenAI Delete Vector Store API](https://developers.openai.com/api/reference/python/resources/vector_stores/methods/delete)
+
     """
     # Get module
     postgres_pool = get_postgres_pool()
@@ -344,18 +356,18 @@ async def delete_vector_store(vector_store_id: str,
     # Validate vector store id
     validate_vector_store_prefix(vector_store_id)
 
-    # Check vector store existance
-    await PostgresVectorStore._check_vector_store_existance(pool=postgres_pool,
+    # Check vector store existence
+    await PostgresVectorStore._check_vector_store_existence(pool=postgres_pool,
                                                             vector_store_id=vector_store_id,
                                                             api_key=api_key)
 
     try:
 
-        # Delete the record
+        # Delete vector store metadata from PostgreSQL database
         await PostgresVectorStore.delete(pool=postgres_pool,
                                          vector_store_id=vector_store_id,
                                          api_key=api_key)
-        # Delete to vector store
+        # Delete the actual vector collection from Qdrant
         qdrant_vector_store = AsyncQdrantVectorStore(collection_name = vector_store_id,
                                                      client=qdrant_service.client)
         await qdrant_vector_store.delete_collection()
@@ -379,20 +391,20 @@ async def search_vector_store(vector_store_id: str,
                               search_request: VectorStoreSearchRequest,
                               api_key: str = Depends(verify_api_key)) -> VectorStoreSearchResponse:
     """
-    ## Search a vector store.
-    
-    This endpoint searches for documents in a vector store based on a query and optional filters.
-    It supports semantic search with filtering capabilities.
+    ## Search a vector store for relevant chunks based on a query and file attributes filter.
 
     ### Args
     - `vector_store_id` (str): The ID of the vector store to search in.
-    - `query` (Union[str, List[str]]): The query string or list of query strings to search for.
-    - `filters` (Optional[Union[ComparisonFilter, CompoundFilter]]): Optional filters to apply to the search.
-    - `max_num_results` (int, optional): Maximum number of results to return (1-50). Defaults to 10.
-    - `ranking_options` (Optional[RankingOptions]): Options for controlling search result ranking.
+    - `query` (Union[str, List[str]]): A query string for a search
+    - `filters` (Optional[Union[ComparisonFilter, CompoundFilter]]): A filter to apply based on file attributes.
+    - `max_num_results` (int, optional): The maximum number of results to return. This number should be between 1 and 50 inclusive.
+    - `ranking_options` (Optional[RankingOptions]): Ranking options for search.
     
     ### Returns
     - `VectorStoreSearchResponse`: A response containing the search results.
+
+    Reference: [OpenAI Search Vector Store API](https://developers.openai.com/api/reference/python/resources/vector_stores/methods/search)
+
     """
     # Get Qdrant service
     qdrant_service = get_qdrant_service()
@@ -403,20 +415,13 @@ async def search_vector_store(vector_store_id: str,
     # Validate vector store id
     validate_vector_store_prefix(vector_store_id)
 
-    # Check vector store existance
-    await PostgresVectorStore._check_vector_store_existance(pool=postgres_pool,
+    # Check vector store existence
+    await PostgresVectorStore._check_vector_store_existence(pool=postgres_pool,
                                                             vector_store_id=vector_store_id,
                                                             api_key=api_key)
 
     try:
-        with mlflow.start_span(name="POST /v1/vector_stores/{vector_store_id}/search", span_type=SpanType.UNKNOWN) as span:
-            # # Check if collection exists
-            # collection_exists = await qdrant_service.client.collection_exists(collection_name = vector_store_id)
-            # # If not existed
-            # if not collection_exists:
-            #     # Raise exception
-            #     raise VectorStoreNotFoundException(vector_store_id = vector_store_id)
-            # Log
+        with mlflow.start_span(name="/v1/vector_stores/{vector_store_id}/search", span_type=SpanType.UNKNOWN) as span:
             # Set inputs
             span.set_inputs({"search_request": search_request.model_dump()})
 
@@ -435,7 +440,8 @@ async def search_vector_store(vector_store_id: str,
                 )
             ) if search_request.ranking_options else None
 
-            # Convert query to list if it's a single string ( If it's a list, remain only first element)
+            # Normalize query to list format - handle both single string and list inputs
+            # For lists, only use the first query for now
             queries = [search_request.query] if isinstance(search_request.query, str) else search_request.query[:1]
 
             # Embedding span
@@ -460,31 +466,30 @@ async def search_vector_store(vector_store_id: str,
                                  "embedding_dims": embedding_dims,
                                  "max_num_results": search_request.max_num_results})
 
-                # Check vector store existance
-                vector_store_existance = await qdrant_service.client.collection_exists(collection_name = vector_store_id)
+                # Check if vector store collection exists in Qdrant
+                vector_store_existence = await qdrant_service.client.collection_exists(collection_name = vector_store_id)
 
-                # When vector store not existed
-                if not vector_store_existance:
-                    # Handle case vector store not existed
+                # Handle case when vector store doesn't exist
+                if not vector_store_existence:
+                    # Return empty results when vector store is not found
                     data = []
                     displayed_results = []
-                    # Log event
-                    span.add_event(event = SpanEvent(name = "Vector store is not existed"))
+                    # Log event for monitoring
+                    span.add_event(event = SpanEvent(name = "Vector store collection not found"))
                 else:
-                    # Existance case
-                    # Perform search
+                    # Vector store exists - perform search
                     retrieved_results = await qdrant_vector_store.retrieve(query_vectors = queries_vectors,
                                                                            query_filter = qdrant_filter,
                                                                            limit = search_request.max_num_results)
 
-                    # Construct data
+                    # Extract search results for logging/display
                     displayed_results = []
                     for point in retrieved_results[0].points:
                         displayed_results.append({"chunk_id": point.id,
                                                   "score": point.score,
                                                   "metadata": point.payload.get("metadata")})
 
-                    # Convert results to response format
+                    # Convert results to API response format
                     data = convert_query_response_to_search_results(retrieved_results)
 
                 # Set attribute
