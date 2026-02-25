@@ -8,10 +8,8 @@ from .router import (embedding_router,
 # Exception
 from .exceptions import BaseException
 from .exceptions.handlers import common_exception_handler
-# DB
-from .db.postgres import PostgresFileStore, PostgresVectorStore
 # Config
-from .core.config.service_params import *
+from .core.config import *
 
 # Components
 import time, logging
@@ -19,7 +17,8 @@ import time, logging
 from loggers import SystemLogger
 logging.getLogger("uvicorn.error").propagate = False
 
-# Tags
+
+# Define OpenAPI tags for API documentation
 tags_metadata = [
     {
         "name": "Embedding",
@@ -34,59 +33,57 @@ tags_metadata = [
         "description": "Provides a secure way to create, manage, and retrieve vector store",
     },
 ]
-# Define app
+# Initialize FastAPI application with OpenAPI tags
 app = FastAPI(openapi_tags = tags_metadata)
-# Add embedding route
+
+# Register API Routes
+# Add embedding router for vector embedding operations
 app.include_router(embedding_router,
                    prefix = "/v1",
                    tags = [tags_metadata[0].get("name")])
-# Add file route
+# Add file router for file upload and management operations
 app.include_router(file_router,
                    prefix = "/v1",
                    tags = [tags_metadata[1].get("name")])
-# Add file route
+# Add vector store router for vector database operations
 app.include_router(vector_store_router,
                    prefix = "/v1",
                    tags = [tags_metadata[2].get("name")])
 
-# Add exception
+# Register global exception handler for custom exceptions
 app.add_exception_handler(BaseException, common_exception_handler)
 
+# Application Startup Event
+# Initializes all required services and dependencies
 @app.on_event("startup")
 async def startup_event():
-    SystemLogger.info(f"Waiting for warm up ...")
+    SystemLogger.info("[APP] Starting application warm up...")
     # Start
     start = time.perf_counter()
-    # # Wait until llm model started
-    # wait_for_serving(serving_service_name = SERVING_SERVICE_NAME,
-    #                  serving_port = 30000)
-    # SystemLogger.info(" ✅ Serving LLM service ready!")
 
     # Wait until embedding model started
-    wait_for_serving(serving_service_name = EMBEDDING_SERVING_SERVICE_NAME,
-                     serving_port = 30001,
+    wait_for_serving(serving_service_name = EMBEDDING_SERVICE_NAME,
+                     serving_port = DOCKER_EMBEDDING_PORT,
                      max_wait = 60)
 
-    # # Init ml model
-    # await init_model(serving_service_name=SERVING_SERVICE_NAME,
-    #                  port=30000)  # Default port for vLLM
-
     # Init embed model
-    await init_embed_model(serving_service_name = EMBEDDING_SERVING_SERVICE_NAME,
-                           port = 30001)
-    SystemLogger.info(" ✅ Serving embedding service ready!")
+    await init_embed_model(serving_service_name = EMBEDDING_SERVICE_NAME,
+                           port = DOCKER_EMBEDDING_PORT)
+    SystemLogger.info("[APP] ✅ Serving embedding ready!")
 
 
     # Init Postgres
-    postgres_service = init_postgres()
+    postgres_client = init_postgres()
+    # Create pool and wait for postgres
+    await postgres_client._create_pool()
     # Wait for postgres
-    await wait_for_postgres(postgres_service._create_pool())
-    # Create file store in Postgres
-    await PostgresFileStore._create_table(postgres_service.pool)
-    # Create Vector store in Postgres
-    await PostgresVectorStore._create_table(postgres_service.pool)
+    await wait_for_postgres(postgres_client.pool)
+    # Create table if not existed
+    await postgres_client._create_table()
+    SystemLogger.info("[APP] ✅ Postgres ready")
     # Init Minio
     init_minio()
+    SystemLogger.info("[APP] ✅ MinIO ready")
     # Logging
     SystemLogger.info(" ✅ Minio ready!")
-    SystemLogger.info(f"Start services after :{round(time.perf_counter() - start,1)}s")
+    SystemLogger.success(f"[APP] Service started in {round(time.perf_counter() - start,1)}s")

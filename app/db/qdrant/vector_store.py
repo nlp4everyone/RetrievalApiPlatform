@@ -9,7 +9,7 @@ from qdrant_client import models
 # Embedding type
 from uuid import uuid4
 # Config
-from app.core.config.constants import EMBEDDING_MODEL_NAME
+from app.core.config import EMBEDDING_MODEL_NAME
 # Other component
 import asyncio
 
