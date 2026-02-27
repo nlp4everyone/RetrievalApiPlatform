@@ -64,10 +64,7 @@ Built with scalability and performance in mind, this Retrieval Engine supports v
 3. **Build and start the services**
    ```bash
    # Build all Docker containers (this might take a while on first run)
-   bash build_docker.sh
-   
-   # Start all services in detached mode
-   bash run_docker.sh
+   bash run_service.sh
    ```
 
 4. **Monitor the services**
@@ -82,6 +79,22 @@ Built with scalability and performance in mind, this Retrieval Engine supports v
    - 📦 **Object Storage**: http://localhost:9001 - MinIO dashboard (default: minioadmin/minioadmin)
    - 📊 **MLflow UI**: http://localhost:5000 - Track experiments and model versions
 
+# 📝 Examples
+
+## File Upload and Vector Store Creation
+
+Check out the `examples/file_upload_example.py` file to see how to:
+- Upload PDF files to OpenAI-compatible file storage
+- Create vector stores for RAG (Retrieval Augmented Generation)
+- Set up file expiration policies
+
+```bash
+# Run the file upload example
+python examples/file_upload_example.py
+```
+
+This example demonstrates the complete workflow from file upload to vector store creation, using a Vietnamese Wikipedia PDF as a test resource.
+
 
 ## 📋 To-Do List
 - [x] Define base components
@@ -89,9 +102,9 @@ Built with scalability and performance in mind, this Retrieval Engine supports v
 - [x] Add PDF parser (UndatasIO) module (04/01)
 - [x] Complete naive search function (07/01)
 - [x] Tracing retrieval with MLflow (10/01)
+- [ ] Implement other PDF parser service (LlamaParse) (27/02)
 - [ ] Add vector store file branch
 - [ ] Filter with metadata filtering
-- [ ] Implement other PDF parser service (LlamaParse,etc) (soon)
 - [ ] Accept processing docx document (soon)
 - [ ] Attach multiple document files to vector store(soon)
 
