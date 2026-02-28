@@ -17,3 +17,7 @@ app/schemas/base/__pycache__/
 app/schemas/file/__pycache__/
 app/services/parsers/__pycache__/
 app/services/parsers/pdf/__pycache__/
+
+# uv
+.uv_cache
+requirements/

@@ -39,7 +39,8 @@ Built with scalability and performance in mind, this Retrieval Engine supports v
    - GPU: Optional but recommended for faster embeddings (NVIDIA GPU with CUDA support)
 
 2. **Software Dependencies**
-   - Python 3.9+
+   - Python 3.10+
+   - uv (Python package manager) - Install with: `curl -LsSf https://astral.sh/uv/install.sh | sh`
    - Docker and Docker Compose
    - (Optional) CUDA Toolkit if using GPU acceleration
 

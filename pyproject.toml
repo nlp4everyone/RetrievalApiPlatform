@@ -1,0 +1,82 @@
+[project]
+name = "chatengine"
+version = "0.1.0"
+description = "Chat Engine with AI capabilities"
+authors = [
+    { name = "Your Name", email = "your.email@example.com" }
+]
+readme = "README.md"
+requires-python = ">=3.10"
+
+dependencies = [
+    # Core
+    "fastapi==0.100.0",
+    "python-multipart==0.0.20",
+    "uvicorn==0.34.2",
+    "python-dotenv>=1.0.1",
+    "loguru==0.7.3",
+    "StrEnum==0.4.15",
+    "aiofiles==25.1.0",
+    
+    # LangChain
+    "langchain==0.3.27",
+    "langchain-openai==0.3.27",
+    
+    # Background task
+    "taskiq==0.11.18",
+    "taskiq-redis==1.1.0",
+    
+    # Config
+    "toml==0.10.2",
+    
+    # Text splitter
+    "langchain-text-splitters==0.3.11",
+    "chonkie==1.4.2",
+    
+    # Token counter
+    "tiktoken==0.11.0",
+    
+    # Read lib
+    "langchain-undatasio==1.0.1",
+    "undatasio==0.2.0.2",
+    "llama_parse==0.6.91",
+    
+    # PostgreSQL
+    "asyncpg==0.29.0",
+    "psycopg[binary]>=3.2",
+    
+    # ML and Monitoring
+    "mlflow==3.1.4",
+    "boto3==1.40.50",
+    
+    # MinIO
+    "minio==7.2.17",
+    
+    # Vector Store
+    "qdrant-client==1.16.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "black",
+    "isort",
+    "flake8",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "black",
+    "isort",
+    "flake8",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
