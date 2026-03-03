@@ -81,6 +81,9 @@ async def startup_event():
     # Create table if not existed
     await postgres_client._create_table()
     SystemLogger.info("[APP] ✅ Postgres ready")
+    # Init qdrant
+    init_qdrant()
+    SystemLogger.info("[APP] ✅ Qdrant ready")
     # Init Minio
     init_minio()
     SystemLogger.info("[APP] ✅ MinIO ready")
