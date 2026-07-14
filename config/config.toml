@@ -1,10 +1,6 @@
 [api]
 FASTAPI_API_KEY = "token"
 
-[docker]
-EMBEDDING_SERVICE_NAME = "vllm_embedding"
-DOCKER_EMBEDDING_PORT = 8000
-
 [storage]
 UPLOADED_FILE_BUCKET = "uploaded-files"
 MAX_FILE_SIZE = 100
