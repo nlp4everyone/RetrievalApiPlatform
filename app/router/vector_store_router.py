@@ -9,7 +9,9 @@ from app.security.auth import verify_api_key
 # DB
 from app.db.postgres import PostgresVectorStore
 from app.db.qdrant import AsyncQdrantVectorStore
-from app.startup import get_postgres_pool, get_qdrant_service, get_embed_model
+from app.startup import get_postgres_pool, get_qdrant_service, get_dense_embedding
+# Config
+from app.core.config import DENSE_MODEL_NAME
 # Helper
 from app.utils.key_generator import generate_vectorstore_id
 from app.utils.vector_store.utils import (convert_query_response_to_search_results,
@@ -408,8 +410,6 @@ async def search_vector_store(vector_store_id: str,
     """
     # Get Qdrant service
     qdrant_service = get_qdrant_service()
-    # Embed model
-    embed_model = get_embed_model()
     # Get Postgres service
     postgres_pool = get_postgres_pool()
     # Validate vector store id
@@ -449,9 +449,9 @@ async def search_vector_store(vector_store_id: str,
                 # Set inputs
                 span.set_inputs({"queries_batch_size": len(queries)})
                 # Set attribute
-                span.set_attributes({"embedding_model_name": embed_model.model})
+                span.set_attributes({"embedding_model_name": DENSE_MODEL_NAME})
                 # Embed the queries
-                queries_vectors = await embed_model.aembed_documents(queries)
+                queries_vectors = await get_dense_embedding(queries)
                 # Define embedding dims
                 embedding_dims = len(queries_vectors[0])
                 embedding_batch_size = len(queries_vectors)

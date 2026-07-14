@@ -2,8 +2,7 @@ from fastapi import FastAPI
 # Define startup
 from .startup import *
 # Router
-from .router import (embedding_router,
-                     file_router,
+from .router import (file_router,
                      vector_store_router)
 # Exception
 from .exceptions import BaseException
@@ -21,10 +20,6 @@ logging.getLogger("uvicorn.error").propagate = False
 # Define OpenAPI tags for API documentation
 tags_metadata = [
     {
-        "name": "Embedding",
-        "description": "Contains operations related to embedding vectors",
-    },
-    {
         "name": "File",
         "description": "Provides a secure way to upload, manage, and retrieve files",
     },
@@ -37,18 +32,14 @@ tags_metadata = [
 app = FastAPI(openapi_tags = tags_metadata)
 
 # Register API Routes
-# Add embedding router for vector embedding operations
-app.include_router(embedding_router,
-                   prefix = "/v1",
-                   tags = [tags_metadata[0].get("name")])
 # Add file router for file upload and management operations
 app.include_router(file_router,
                    prefix = "/v1",
-                   tags = [tags_metadata[1].get("name")])
+                   tags = [tags_metadata[0].get("name")])
 # Add vector store router for vector database operations
 app.include_router(vector_store_router,
                    prefix = "/v1",
-                   tags = [tags_metadata[2].get("name")])
+                   tags = [tags_metadata[1].get("name")])
 
 # Register global exception handler for custom exceptions
 app.add_exception_handler(BaseException, common_exception_handler)
@@ -61,14 +52,8 @@ async def startup_event():
     # Start
     start = time.perf_counter()
 
-    # Wait until embedding model started
-    wait_for_serving(serving_service_name = EMBEDDING_SERVICE_NAME,
-                     serving_port = DOCKER_EMBEDDING_PORT,
-                     max_wait = 60)
-
     # Init embed model
-    await init_embed_model(serving_service_name = EMBEDDING_SERVICE_NAME,
-                           port = DOCKER_EMBEDDING_PORT)
+    await init_embed_model()
     SystemLogger.info("[APP] ✅ Serving embedding ready!")
 
 

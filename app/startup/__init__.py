@@ -1,7 +1,6 @@
 from .startup import (init_embed_model,
-                      # get_model,
                       get_embed_model,
-                      wait_for_serving,
+                      get_dense_embedding,
                       wait_for_postgres,
                       init_postgres,
                       get_postgres_pool,

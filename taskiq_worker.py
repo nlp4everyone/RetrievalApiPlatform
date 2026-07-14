@@ -5,6 +5,7 @@ from taskiq import TaskiqEvents, TaskiqState
 from app.startup import (init_postgres,
                          init_minio,
                          init_embed_model,
+                         get_dense_embedding,
                          init_qdrant)
 # Database services
 from app.db.postgres import PostgresVectorStore, PostgresFileStore
@@ -41,7 +42,6 @@ broker = RedisStreamBroker(url=REDIS_URL).with_result_backend(result_backend)
 postgres_service: Optional[any] = None
 minio_service: Optional[any] = None
 qdrant_service: Optional[any] = None
-embedding_model: Optional[any] = None
 _services_initialized: bool = False
 
 async def initialize_services():
@@ -52,24 +52,23 @@ async def initialize_services():
     are created only once, optimizing resource usage in the worker process.
     Initializes PostgreSQL, MinIO, Qdrant, and embedding model services.
     """
-    global postgres_service, minio_service, qdrant_service, embedding_model, _services_initialized
-    
+    global postgres_service, minio_service, qdrant_service, _services_initialized
+
     if _services_initialized:
         return
-    
+
     # Postgres Service
     postgres_service = init_postgres()
     await postgres_service._create_pool()
-    
+
     # Minio service
     minio_service = init_minio()
     # Qdrant service
     qdrant_service = init_qdrant()
-    
+
     # Embedding model
-    embedding_model = await init_embed_model(serving_service_name = EMBEDDING_SERVICE_NAME,
-                                             port = DOCKER_EMBEDDING_PORT)
-    
+    await init_embed_model()
+
     _services_initialized = True
     SystemLogger.info("[WORKER] TaskIQ is ready")
 
@@ -219,7 +218,7 @@ async def process_vector_store_files(vectorstore_id: str,
                     # Split text into manageable chunks for embedding
                     chunked_texts = chunking_service.split_text(text = file_content)
                     # Generate vector embeddings for each text chunk
-                    embeddings = await embedding_model.aembed_documents(chunked_texts)
+                    embeddings = await get_dense_embedding(chunked_texts)
 
                     # Step 8: Store documents in Qdrant vector database
                     # Initialize vector store with collection name matching vectorstore_id

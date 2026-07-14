@@ -1,5 +1,5 @@
-# Langchain component
-from langchain_openai import OpenAIEmbeddings
+# OpenAI client
+from openai import AsyncOpenAI
 # DB
 from app.db.postgres import PostgresClient
 from app.db.minio import MinioService
@@ -10,6 +10,7 @@ from asyncpg import PostgresError
 from app.core.config import *
 # Other component
 import requests, time, asyncio, mlflow, re, os, asyncpg
+from typing import List
 # Logger
 from loggers import SystemLogger
 
@@ -22,36 +23,43 @@ os.environ["AWS_SECRET_ACCESS_KEY"] = MINIO_ROOT_PASSWORD
 os.environ["MLFLOW_S3_ENDPOINT_URL"] = MLFLOW_S3_ENDPOINT_URL
 os.environ["MLFLOW_DEFAULT_ARTIFACT_ROOT"] = MLFLOW_DEFAULT_ARTIFACT_ROOT
 
-async def init_embed_model(serving_service_name :str = "vllm",
-                           port :int = 8000) -> OpenAIEmbeddings:
+async def init_embed_model() -> AsyncOpenAI:
     """
-    Initialize and test the embedding model service.
+    Initialize and test the dense embedding model service.
 
-    Creates an OpenAIEmbeddings instance configured for the specified
-    serving service and tests connectivity with a sample embedding.
-
-    Args:
-        serving_service_name (str): Name of the embedding service (default: "vllm")
-        port (int): Port number for the embedding service (default: 8000)
+    Creates an AsyncOpenAI client configured for the vLLM dense embedding
+    service and tests connectivity with a sample embedding.
 
     Returns:
-        OpenAIEmbeddings: Configured embedding model instance
+        AsyncOpenAI: Configured embedding client instance
 
     Raises:
         Exception: If embedding service is not reachable or fails to respond
     """
     global embed_model
-    embed_model = OpenAIEmbeddings(model = EMBEDDING_MODEL_NAME,
-                                   base_url = f"http://{serving_service_name}:{port}/v1",
-                                   api_key = SERVING_API_KEY)
+    embed_model = AsyncOpenAI(base_url = VLLM_DENSE_EMBEDDING_URL,
+                              api_key = SERVING_API_KEY)
 
     try:
-        resp = await embed_model.aembed_documents(["Hello"])
-        SystemLogger.warning(f"[STARTUP] {serving_service_name.capitalize()} embedding service ready")
+        await embed_model.embeddings.create(model = DENSE_MODEL_NAME, input = ["Hello"])
+        SystemLogger.warning("[STARTUP] Dense embedding service ready")
     except:
         # Response
-        SystemLogger.error("[STARTUP] Init {serving_service_name.capitalize()} embedding service failed")
+        SystemLogger.error("[STARTUP] Init dense embedding service failed")
     return embed_model
+
+async def get_dense_embedding(texts: List[str]) -> List[List[float]]:
+    """
+    Generate dense embedding vectors for a list of texts via the vLLM service.
+
+    Args:
+        texts (List[str]): Texts to embed
+
+    Returns:
+        List[List[float]]: Embedding vector for each input text
+    """
+    response = await embed_model.embeddings.create(model = DENSE_MODEL_NAME, input = texts)
+    return [item.embedding for item in response.data]
 
 def init_postgres() -> PostgresClient:
     """
@@ -142,12 +150,12 @@ def init_qdrant() -> QdrantService:
     qdrant_service = QdrantService(url = QDRANT_URL)
     return qdrant_service
 
-def get_embed_model() -> OpenAIEmbeddings:
+def get_embed_model() -> AsyncOpenAI:
     """
     Get the global embedding model instance.
 
     Returns:
-        OpenAIEmbeddings: The initialized embedding model
+        AsyncOpenAI: The initialized embedding client
 
     Raises:
         AttributeError: If embedding model has not been initialized
@@ -189,46 +197,6 @@ def get_qdrant_service() -> QdrantService:
         AttributeError: If Qdrant service has not been initialized
     """
     return qdrant_service
-
-def wait_for_serving(serving_service_name :str = "vllm",
-                     serving_port :int = 8000,
-                     wait_time :int = 5,
-                     max_wait: int = 120) -> bool:
-    """
-    Wait for a serving service to become healthy and reachable.
-
-    Continuously polls the service's health endpoint until it responds
-    with status 200 or the maximum wait time is exceeded.
-
-    Args:
-        serving_service_name (str): Name of the service to wait for (default: "vllm")
-        serving_port (int): Port number of the service (default: 8000)
-        wait_time (int): Time to wait between attempts in seconds (default: 5)
-        max_wait (int): Maximum total wait time in seconds (default: 120)
-
-    Returns:
-        bool: True if service becomes reachable, False if timeout is exceeded
-    """
-    # Define url
-    serving_url = f"http://{serving_service_name}:{serving_port}"
-    start_time = time.time()
-
-    # Loop
-    while True:
-        try:
-            response = requests.get(f"{serving_url}/health", timeout=1)
-            if response.status_code == 200:
-                return True
-        except requests.exceptions.RequestException:
-            pass
-
-        # Check total wait time
-        elapsed = time.time() - start_time
-        if elapsed >= max_wait:
-            SystemLogger.error(f"❌ Timeout: {serving_service_name} not reachable after {max_wait}s. Try increasing max_wait params or changing config service")
-            return False
-
-        time.sleep(wait_time)
 
 async def wait_for_postgres(create_pool_func,
                             retries: int = 5,

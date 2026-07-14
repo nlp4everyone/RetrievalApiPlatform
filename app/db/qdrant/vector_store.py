@@ -9,7 +9,7 @@ from qdrant_client import models
 # Embedding type
 from uuid import uuid4
 # Config
-from app.core.config import EMBEDDING_MODEL_NAME
+from app.core.config import DENSE_MODEL_NAME
 # Other component
 import asyncio
 
@@ -295,7 +295,7 @@ class AsyncQdrantVectorStore:
         dense_vectors_config = self._get_dense_embedding_config(embedding_dimension = embedding_dim,
                                                                 distance = self._distance,
                                                                 on_disk = self._on_disk,
-                                                                model = EMBEDDING_MODEL_NAME)
+                                                                model = DENSE_MODEL_NAME)
         # Define payload
         payloads = self._convert_documents_to_payloads(documents)
 
@@ -309,7 +309,7 @@ class AsyncQdrantVectorStore:
                                   payloads = payloads,
                                   batch_size = upload_batch_size,
                                   parallel = upload_parallel,
-                                  embedding_model_name = EMBEDDING_MODEL_NAME)
+                                  embedding_model_name = DENSE_MODEL_NAME)
 
     # ------------------------------------------------------------------
     # SEARCH
@@ -343,7 +343,7 @@ class AsyncQdrantVectorStore:
         # Define task
         tasks = [self._client.query_points(collection_name=self._collection_name,
                                            query=v,
-                                           using=EMBEDDING_MODEL_NAME,
+                                           using=DENSE_MODEL_NAME,
                                            limit=limit,
                                            score_threshold=score_threshold,
                                            search_params=search_params,
