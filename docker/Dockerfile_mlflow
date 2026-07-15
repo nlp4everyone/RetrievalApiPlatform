@@ -1,12 +1,12 @@
 FROM ghcr.io/mlflow/mlflow:v3.5.0
 
+COPY --from=ghcr.io/astral-sh/uv:0.9.17 /uv /usr/local/bin/uv
+
 # Install dependencies needed to build psycopg2
 RUN apt-get update && apt-get install -y \
       gcc \
       libpq-dev \
-      curl \
       && rm -rf /var/lib/apt/lists/*
 
 # Install psycopg2-binary (or psycopg2)
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
-    && /root/.local/bin/uv pip install --system psycopg2-binary==2.9.11 boto3==1.40.50
+RUN uv pip install --system psycopg2-binary==2.9.11 boto3==1.40.50

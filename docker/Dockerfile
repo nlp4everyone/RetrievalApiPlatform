@@ -1,12 +1,10 @@
-FROM python:3.11-slim
+FROM python:3.11-slim AS builder
 
-# Set workdir
 WORKDIR /workspace
 
-# Install uv
-RUN pip install uv
+COPY --from=ghcr.io/astral-sh/uv:0.9.17 /uv /usr/local/bin/uv
 
-# System deps
+# System deps needed to build packages without prebuilt wheels
 RUN apt-get update && apt-get install -y build-essential \
     && rm -rf /var/lib/apt/lists/*
 
@@ -14,6 +12,13 @@ RUN apt-get update && apt-get install -y build-essential \
 COPY pyproject.toml uv.lock README.md ./
 # Install dependencies using uv
 RUN uv sync --frozen
+
+FROM python:3.11-slim AS runtime
+
+WORKDIR /workspace
+
+COPY --from=ghcr.io/astral-sh/uv:0.9.17 /uv /usr/local/bin/uv
+COPY --from=builder /workspace/.venv /workspace/.venv
 
 # Copy the rest of the application
 COPY . /workspace
