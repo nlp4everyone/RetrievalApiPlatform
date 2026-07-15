@@ -65,13 +65,13 @@ Built with scalability and performance in mind, this Retrieval Engine supports v
 3. **Build and start the services**
    ```bash
    # Build all Docker containers (this might take a while on first run)
-   bash run_service.sh
+   make up
    ```
 
 4. **Monitor the services**
    ```bash
-   # View logs to check if all services started successfully
-   bash view_log.sh
+   # View logs of the main web service
+   make logs
    ```
 
 5. **Access the services** (default ports - customize in `.env`)
