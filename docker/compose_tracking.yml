@@ -7,8 +7,10 @@ services:
     image: mlflow_psycopg2
     container_name: mlflow
     depends_on:
-      - postgres
-      - minio
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
     ports:
       - "${MLFLOW_PORT:-5000}:5000"
     environment:
