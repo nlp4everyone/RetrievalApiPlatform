@@ -18,4 +18,9 @@ RUN uv sync --frozen
 # Copy the rest of the application
 COPY . /workspace
 
+# Run as a non-root user
+RUN useradd --create-home --shell /bin/bash appuser \
+    && chown -R appuser:appuser /workspace
+USER appuser
+
 EXPOSE 8005
