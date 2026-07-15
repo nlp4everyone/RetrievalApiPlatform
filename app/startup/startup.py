@@ -147,7 +147,7 @@ def init_qdrant() -> QdrantService:
     """
     global qdrant_service
     # Init connection
-    qdrant_service = QdrantService(url = QDRANT_URL)
+    qdrant_service = QdrantService(url = QDRANT_URL, api_key = QDRANT_API_KEY)
     return qdrant_service
 
 def get_embed_model() -> AsyncOpenAI:

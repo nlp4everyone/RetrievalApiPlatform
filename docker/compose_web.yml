@@ -7,7 +7,8 @@ services:
       dockerfile: docker/Dockerfile
     environment:
       - DISABLE_UVICORN_PROPAGATION=true
-      - NUM_WORKERS=${NUM_WORKERS}
+      - NUM_WORKERS=${NUM_WORKERS:-1}
+      - QDRANT_API_KEY=${QDRANT_API_KEY}
     ports:
       - "${FASTAPI_PORT:-8005}:8005"
     depends_on:
@@ -19,7 +20,7 @@ services:
       uv run uvicorn app.app:app 
       --host 0.0.0.0 
       --port 8005
-      --workers ${NUM_WORKERS}
+      --workers ${NUM_WORKERS:-1}
 
   worker:
     build:
@@ -31,6 +32,7 @@ services:
       REDIS_URL: redis://redis:${REDIS_PORT:-6379}/0
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       GIT_PYTHON_REFRESH: "quiet"
+      QDRANT_API_KEY: ${QDRANT_API_KEY}
     depends_on:
       postgres:
         condition: service_healthy

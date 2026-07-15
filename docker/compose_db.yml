@@ -42,6 +42,8 @@ services:
     image: qdrant/qdrant:v1.16
     container_name: qdrant_db
     restart: always
+    environment:
+      QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY}
     ports:
       - "${QDRANT_GRPC_PORT:-6334}:6334"
       - "${QDRANT_PORT:-6333}:6333"
