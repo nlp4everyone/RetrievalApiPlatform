@@ -54,6 +54,20 @@ def _convert_timestamps_to_unix(record: dict) -> tuple:
     
     return created_at, last_active_at, expires_at
 
+def _calculate_file_counts(status: str) -> VectorStoreFileCounts:
+    """Calculate file counts based on vector store status.
+    
+    Args:
+        status: Current status of the vector store
+        
+    Returns:
+        VectorStoreFileCounts with completed/failed counts
+    """
+    return VectorStoreFileCounts(
+        completed=1 if status == "completed" else 0,
+        failed=1 if status == "failed" else 0
+    )
+
 # Define router
 vector_store_router = APIRouter()
 
@@ -205,8 +219,7 @@ async def list_vector_stores(query_object: VectorStoreQueryRequest = Depends(),
                                              last_active_at=last_active_at,
                                              expires_at=expires_at,
                                              expires_after=expires_after,
-                                             file_counts=VectorStoreFileCounts(completed=1 if status == "completed" else 0,
-                                                                               failed=1 if status == "failed" else 0),
+                                             file_counts=_calculate_file_counts(status),
                                              metadata=record.get("metadata"),
                                              status=record.get("status"),
                                              usage_bytes=record.get("usage_bytes", 0))
@@ -263,8 +276,7 @@ async def get_vector_store(vector_store_id: str,
                                  last_active_at=last_active_at,
                                  expires_at=expires_at,
                                  expires_after=expires_after,
-                                 file_counts=VectorStoreFileCounts(completed = 1 if status == "completed" else 0,
-                                                                   failed = 1 if status == "failed" else 0),
+                                 file_counts=_calculate_file_counts(status),
                                  metadata=record.get("metadata"),
                                  status=record.get("status"),
                                  usage_bytes=record.get("usage_bytes", 0))
@@ -321,8 +333,7 @@ async def modify_vector_store(vector_store_id: str,
                                  last_active_at=last_active_at,
                                  expires_at=expires_at,
                                  expires_after=expires_after,
-                                 file_counts=VectorStoreFileCounts(completed=1 if status == "completed" else 0,
-                                                                   failed=1 if status == "failed" else 0),
+                                 file_counts=_calculate_file_counts(status),
                                  metadata=record.get("metadata"),
                                  status=record.get("status"),
                                  usage_bytes=record.get("usage_bytes", 0))
@@ -370,15 +381,15 @@ async def delete_vector_store(vector_store_id: str,
         return VectorStoreDeletion(id=vector_store_id,
                                    object="vector_store.deleted",
                                    deleted=True)
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error searching vector store: {str(e)}"
-        )
-
     except (asyncpg.PostgresError, socket.gaierror) as e:
         SystemLogger.error(e)
         raise PostgresConnectionException()
+    except Exception as e:
+        SystemLogger.error(f"Error deleting vector store: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error deleting vector store: {str(e)}"
+        )
 
 @vector_store_router.post("/vector_stores/{vector_store_id}/search",response_model = VectorStoreSearchResponse)
 async def search_vector_store(vector_store_id: str,
@@ -500,13 +511,12 @@ async def search_vector_store(vector_store_id: str,
                                              data=data,
                                              has_more=len(data) >= search_request.max_num_results)
 
+    except (asyncpg.PostgresError, socket.gaierror) as e:
+        SystemLogger.error(e)
+        raise PostgresConnectionException()
     except Exception as e:
         SystemLogger.error(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error searching vector store: {str(e)}"
         )
-
-    except (asyncpg.PostgresError, socket.gaierror) as e:
-        SystemLogger.error(e)
-        raise PostgresConnectionException()
