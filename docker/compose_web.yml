@@ -1,4 +1,3 @@
-name: retrieval_engine
 services:
   web:
     container_name: web_service
