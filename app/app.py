@@ -7,14 +7,21 @@ from .router import (file_router,
 # Exception
 from .exceptions import BaseException
 from .exceptions.handlers import common_exception_handler
-# Config
-from .core.config import *
-
 # Components
 import time, logging
 # Logger
 from loggers import SystemLogger
 logging.getLogger("uvicorn.error").propagate = False
+
+# Silence successful /health probe pings; still log them when they fail
+class HealthCheckLogFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        if len(record.args) < 5:
+            return True
+        _, _, path, _, status_code = record.args
+        return not (path == "/health" and 200 <= status_code < 300)
+
+logging.getLogger("uvicorn.access").addFilter(HealthCheckLogFilter())
 
 
 # Define OpenAPI tags for API documentation
@@ -43,6 +50,10 @@ app.include_router(vector_store_router,
 
 # Register global exception handler for custom exceptions
 app.add_exception_handler(BaseException, common_exception_handler)
+
+@app.get("/health", include_in_schema=False)
+async def health():
+    return {"status": "ok"}
 
 # Application Startup Event
 # Initializes all required services and dependencies
