@@ -8,10 +8,11 @@ COPY --from=ghcr.io/astral-sh/uv:0.9.17 /uv /usr/local/bin/uv
 RUN apt-get update && apt-get install -y build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy pyproject.toml, uv.lock, and README.md for package build
-COPY pyproject.toml uv.lock README.md ./
-# Install dependencies using uv
-RUN uv sync --frozen
+# Copy pyproject.toml and uv.lock first so README edits don't invalidate the sync cache
+COPY pyproject.toml uv.lock ./
+# Install dependencies using uv (placeholder README satisfies pyproject.toml's readme field)
+RUN touch README.md && uv sync --frozen
+COPY README.md ./
 
 FROM python:3.11-slim AS runtime
 
