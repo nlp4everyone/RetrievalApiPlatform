@@ -1,5 +1,5 @@
 # Typing
-from typing import List, Dict, Sequence
+from typing import List, Dict, Sequence, Any
 from datetime import datetime
 # Exceptions
 from app.exceptions.file import FileNotFoundException
@@ -7,6 +7,23 @@ from app.exceptions.file import FileNotFoundException
 import asyncpg, json
 
 class PostgresFileStore:
+    @staticmethod
+    def _parse_json_field(value: Any) -> Any:
+        """Parse JSON string to Python object if needed.
+        
+        Args:
+            value: Value that might be a JSON string
+            
+        Returns:
+            Parsed Python object or None if parsing fails
+        """
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except json.JSONDecodeError:
+                return None
+        return value
+
     @staticmethod
     async def insert_file(pool: asyncpg.Pool,
                           id: str,
@@ -146,11 +163,7 @@ class PostgresFileStore:
         for r in rows:
             record = dict(r)
             # Convert metadata from JSON string to dict for each record
-            if isinstance(record.get("metadata"), str):
-                try:
-                    record["metadata"] = json.loads(record["metadata"])
-                except json.JSONDecodeError:
-                    record["metadata"] = None
+            record["metadata"] = PostgresFileStore._parse_json_field(record.get("metadata"))
             result.append(record)
 
         return result
@@ -222,11 +235,7 @@ class PostgresFileStore:
                 metadata = row["metadata"]
 
                 # Parse metadata from JSON string if needed
-                if isinstance(metadata, str):
-                    try:
-                        metadata = json.loads(metadata)
-                    except json.JSONDecodeError:
-                        metadata = None
+                metadata = PostgresFileStore._parse_json_field(metadata)
 
                 # Execute the deletion
                 await conn.execute("DELETE FROM files WHERE id = $1;", file_id)

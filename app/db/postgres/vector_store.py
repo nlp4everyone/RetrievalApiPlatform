@@ -7,6 +7,26 @@ import asyncpg, json
 
 class PostgresVectorStore:
     @staticmethod
+    def _normalize_jsonb_fields(record: dict, keys: tuple) -> dict:
+        """Normalize JSONB fields from database record.
+        
+        Args:
+            record: Dictionary containing JSONB string fields
+            keys: Tuple of field names to normalize
+            
+        Returns:
+            Record with JSONB strings converted to Python objects
+        """
+        for key in keys:
+            value = record.get(key)
+            if isinstance(value, str):
+                try:
+                    record[key] = json.loads(value)
+                except json.JSONDecodeError:
+                    record[key] = None
+        return record
+
+    @staticmethod
     async def _check_vector_store_existence(pool: asyncpg.Pool,
                                             vector_store_id: str,
                                             api_key: str):
@@ -118,14 +138,7 @@ class PostgresVectorStore:
 
         # Convert result to dictionary and normalize JSONB fields
         record = dict(row)
-        # Convert JSONB strings back to Python objects for consistency
-        for key in ("metadata", "chunking_strategy"):
-            value = record.get(key)
-            if isinstance(value, str):
-                try:
-                    record[key] = json.loads(value)
-                except json.JSONDecodeError:
-                    record[key] = None
+        record = PostgresVectorStore._normalize_jsonb_fields(record, ("metadata", "chunking_strategy"))
         return record
 
     @staticmethod
@@ -162,14 +175,7 @@ class PostgresVectorStore:
 
         # Convert result to dictionary and normalize JSONB fields
         record = dict(row)
-        # Convert JSONB strings back to Python objects for consistency
-        for key in ("metadata", "expires_after", "chunking_strategy", "file_ids"):
-            value = record.get(key)
-            if isinstance(value, str):
-                try:
-                    record[key] = json.loads(value)
-                except json.JSONDecodeError:
-                    record[key] = None
+        record = PostgresVectorStore._normalize_jsonb_fields(record, ("metadata", "expires_after", "chunking_strategy", "file_ids"))
         return record
 
     @staticmethod
@@ -255,14 +261,7 @@ class PostgresVectorStore:
 
         # Convert result to dictionary and normalize JSONB fields
         record = dict(row)
-        # Convert JSONB strings back to Python objects for consistency
-        for key in ("metadata", "expires_after", "chunking_strategy", "file_ids"):
-            value = record.get(key)
-            if isinstance(value, str):
-                try:
-                    record[key] = json.loads(value)
-                except json.JSONDecodeError:
-                    record[key] = None
+        record = PostgresVectorStore._normalize_jsonb_fields(record, ("metadata", "expires_after", "chunking_strategy", "file_ids"))
         return record
 
     @staticmethod
@@ -363,14 +362,7 @@ class PostgresVectorStore:
         vector_stores = []
         for row in rows:
             record = dict(row)
-            # Convert JSONB strings back to Python objects for consistency
-            for key in ("metadata", "chunking_strategy", "file_ids"):
-                value = record.get(key)
-                if isinstance(value, str):
-                    try:
-                        record[key] = json.loads(value)
-                    except json.JSONDecodeError:
-                        record[key] = None
+            record = PostgresVectorStore._normalize_jsonb_fields(record, ("metadata", "chunking_strategy", "file_ids"))
             vector_stores.append(record)
 
         # Build pagination response
