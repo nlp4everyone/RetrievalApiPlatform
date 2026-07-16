@@ -17,15 +17,15 @@ FROM python:3.11-slim AS runtime
 
 WORKDIR /workspace
 
+# Run as a non-root user
+RUN useradd --create-home --shell /bin/bash appuser
+
 COPY --from=ghcr.io/astral-sh/uv:0.9.17 /uv /usr/local/bin/uv
-COPY --from=builder /workspace/.venv /workspace/.venv
+COPY --from=builder --chown=appuser:appuser /workspace/.venv /workspace/.venv
 
 # Copy the rest of the application
-COPY . /workspace
+COPY --chown=appuser:appuser . /workspace
 
-# Run as a non-root user
-RUN useradd --create-home --shell /bin/bash appuser \
-    && chown -R appuser:appuser /workspace
 USER appuser
 
 EXPOSE 8005
