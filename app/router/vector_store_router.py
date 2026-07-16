@@ -31,6 +31,29 @@ from mlflow.entities import SpanType, SpanEvent
 # Enable logging
 mlflow.config.enable_async_logging()
 
+def _convert_timestamps_to_unix(record: dict) -> tuple:
+    """Convert datetime timestamps from database record to Unix timestamps.
+    
+    Args:
+        record: Dictionary containing timestamp fields from database
+        
+    Returns:
+        Tuple of (created_at, last_active_at, expires_at) as Unix timestamps or None
+    """
+    created_at = record["created_at"]
+    if hasattr(created_at, 'timestamp'):
+        created_at = int(created_at.timestamp())
+
+    last_active_at = record.get("last_active_at")
+    if last_active_at and hasattr(last_active_at, 'timestamp'):
+        last_active_at = int(last_active_at.timestamp())
+
+    expires_at = record.get("expires_at")
+    if expires_at and hasattr(expires_at, 'timestamp'):
+        expires_at = int(expires_at.timestamp())
+    
+    return created_at, last_active_at, expires_at
+
 # Define router
 vector_store_router = APIRouter()
 
@@ -164,17 +187,7 @@ async def list_vector_stores(query_object: VectorStoreQueryRequest = Depends(),
         vector_stores = []
         for record in result["data"]:
             # Convert timestamps to Unix timestamps (integers)
-            created_at = record["created_at"]
-            if hasattr(created_at, 'timestamp'):
-                created_at = int(created_at.timestamp())
-
-            last_active_at = record.get("last_active_at")
-            if last_active_at and hasattr(last_active_at, 'timestamp'):
-                last_active_at = int(last_active_at.timestamp())
-
-            expires_at = record.get("expires_at")
-            if expires_at and hasattr(expires_at, 'timestamp'):
-                expires_at = int(expires_at.timestamp())
+            created_at, last_active_at, expires_at = _convert_timestamps_to_unix(record)
 
             # Convert expires_after to VectorStoreExpiresAfter if it exists
             expires_after = record.get("expires_after")
@@ -233,19 +246,8 @@ async def get_vector_store(vector_store_id: str,
                                                vector_store_id=vector_store_id,
                                                api_key=api_key)
 
-
         # Convert timestamps to Unix timestamps (integers)
-        created_at = record["created_at"]
-        if hasattr(created_at, 'timestamp'):
-            created_at = int(created_at.timestamp())
-
-        last_active_at = record.get("last_active_at")
-        if last_active_at and hasattr(last_active_at, 'timestamp'):
-            last_active_at = int(last_active_at.timestamp())
-
-        expires_at = record.get("expires_at")
-        if expires_at and hasattr(expires_at, 'timestamp'):
-            expires_at = int(expires_at.timestamp())
+        created_at, last_active_at, expires_at = _convert_timestamps_to_unix(record)
 
         # Convert expires_after to VectorStoreExpiresAfter if it exists
         expires_after = record.get("expires_after")
@@ -301,17 +303,7 @@ async def modify_vector_store(vector_store_id: str,
                                                   metadata=request.metadata)
 
         # Convert timestamps to Unix timestamps (integers)
-        created_at = record["created_at"]
-        if hasattr(created_at, 'timestamp'):
-            created_at = int(created_at.timestamp())
-
-        last_active_at = record.get("last_active_at")
-        if last_active_at and hasattr(last_active_at, 'timestamp'):
-            last_active_at = int(last_active_at.timestamp())
-
-        expires_at = record.get("expires_at")
-        if expires_at and hasattr(expires_at, 'timestamp'):
-            expires_at = int(expires_at.timestamp())
+        created_at, last_active_at, expires_at = _convert_timestamps_to_unix(record)
 
         # Convert expires_after to VectorStoreExpiresAfter if it exists
         expires_after = record.get("expires_after")
