@@ -1,8 +1,8 @@
-from ..base_exception import BaseException, BaseResponse
+from ..base_exception import AppBaseException, BaseResponse
 from typing import Any
 from fastapi import status
 
-class APIKeyIncorrectException(BaseException):
+class APIKeyIncorrectException(AppBaseException):
     def __init__(self,
                  api_key: str,
                  type: str = "invalid_request_error",
@@ -14,7 +14,7 @@ class APIKeyIncorrectException(BaseException):
                                                  params = params,
                                                  code = code))
 
-class BearerMissingException(BaseException):
+class BearerMissingException(AppBaseException):
     def __init__(self,
                  type: str = "invalid_request_error",
                  params: Any = None,

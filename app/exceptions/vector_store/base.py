@@ -1,5 +1,5 @@
 # Base exception
-from ..base_exception import (BaseException,
+from ..base_exception import (AppBaseException,
                               BaseResponse,
                               WrongPrefixException)
 # Typing
@@ -7,7 +7,7 @@ from typing import Any
 # FastAPI
 from fastapi import status
 
-class VectorStoreNotFoundException(BaseException):
+class VectorStoreNotFoundException(AppBaseException):
     def __init__(self,
                  vector_store_id :str,
                  type: str = "invalid_request_error",

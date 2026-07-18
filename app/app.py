@@ -1,11 +1,15 @@
 from fastapi import FastAPI
 # Define startup
-from .startup import *
+from .startup import (init_embed_model,
+                      init_postgres,
+                      init_qdrant,
+                      init_minio,
+                      wait_for_postgres)
 # Router
 from .router import (file_router,
                      vector_store_router)
 # Exception
-from .exceptions import BaseException
+from .exceptions import AppBaseException
 from .exceptions.handlers import common_exception_handler
 # Components
 import time, logging
@@ -49,7 +53,7 @@ app.include_router(vector_store_router,
                    tags = [tags_metadata[1].get("name")])
 
 # Register global exception handler for custom exceptions
-app.add_exception_handler(BaseException, common_exception_handler)
+app.add_exception_handler(AppBaseException, common_exception_handler)
 
 @app.get("/health", include_in_schema=False)
 async def health():
@@ -84,5 +88,4 @@ async def startup_event():
     init_minio()
     SystemLogger.info("[APP] ✅ MinIO ready")
     # Logging
-    SystemLogger.info(" ✅ Minio ready!")
     SystemLogger.success(f"[APP] Service started in {round(time.perf_counter() - start,1)}s")

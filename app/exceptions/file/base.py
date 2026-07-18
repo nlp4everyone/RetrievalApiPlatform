@@ -1,8 +1,8 @@
-from ..base_exception import BaseException, BaseResponse
+from ..base_exception import AppBaseException, BaseResponse
 from typing import Any, Union
 from fastapi import status
 
-class FileSizeLimitExceededException(BaseException):
+class FileSizeLimitExceededException(AppBaseException):
     def __init__(self,
                  max_size :Union[int,float],
                  current_size :Union[int,float],
@@ -15,7 +15,7 @@ class FileSizeLimitExceededException(BaseException):
                                                  params = params,
                                                  code = code))
 
-class FileNotFoundException(BaseException):
+class FileNotFoundException(AppBaseException):
     def __init__(self,
                  file_id :str,
                  type: str = "invalid_request_error",

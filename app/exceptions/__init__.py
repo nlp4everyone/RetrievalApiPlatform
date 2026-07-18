@@ -1,1 +1,1 @@
-from .base_exception import BaseException, WrongPrefixException
+from .base_exception import AppBaseException, WrongPrefixException

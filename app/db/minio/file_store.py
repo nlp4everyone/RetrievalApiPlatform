@@ -67,6 +67,7 @@ class MinioFileStore:
         except S3Error as e:
             # Log upload failure with specific error details
             SystemLogger.error(f"Failed when trying to upload file: {file_name}")
+            raise
 
     @staticmethod
     async def delete_file(minio_client: Minio,
@@ -91,6 +92,7 @@ class MinioFileStore:
         except S3Error as e:
             # Log deletion failure with specific error details
             SystemLogger.error(f"Failed when trying to delete file: {file_path} in bucket {bucket_name}")
+            raise
 
     @staticmethod
     async def download_file(minio_client: Minio,
@@ -119,7 +121,7 @@ class MinioFileStore:
         except S3Error as e:
             # Log download failure with specific error details
             SystemLogger.error(f"Failed when trying to download file: {file_path} in bucket {bucket_name}")
-            return None
+            raise
         finally:
             # Always clean up network connections and resources to prevent leaks
             response.close()

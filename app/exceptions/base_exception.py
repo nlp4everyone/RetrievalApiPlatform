@@ -8,12 +8,12 @@ class BaseResponse(BaseModel):
     params :Any = None
     code :Any = None
 
-class BaseException(Exception):
+class AppBaseException(Exception):
     def __init__(self, status_code: int, response: BaseResponse):
         self.status_code = status_code
         self.response = response
 
-class WrongPrefixException(BaseException):
+class WrongPrefixException(AppBaseException):
     def __init__(self,
                  input :str,
                  type: str = "invalid_request_error",
