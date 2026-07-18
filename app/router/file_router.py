@@ -50,10 +50,8 @@ async def upload_file(purpose: FilePurposes = Form(..., description="The intende
     minio_service = get_minio_service()
     # Get PostgreSQL connection pool
     postgres_pool = get_postgres_pool()
-    # Read file content
-    file_bytes = await file.read()
-    # Calculate file size in bytes and MB
-    file_size_bytes = len(file_bytes)
+    # Get file size without loading content into memory
+    file_size_bytes = file.size if file.size else 0
     file_size_mb = file_size_bytes / (1024 * 1024)
 
     # Check if file size exceeds limit
@@ -74,7 +72,8 @@ async def upload_file(purpose: FilePurposes = Form(..., description="The intende
     # Upload file to MinIO storage
     try:
         result = await MinioFileStore.upload_file(minio_client = minio_service.client,
-                                                  file_buffer = file_bytes,
+                                                  file_buffer = file.file,
+                                                  file_size = file_size_bytes,
                                                   file_name = object_path,
                                                   bucket_name = UPLOADED_FILE_BUCKET,
                                                   content_type = file.content_type)

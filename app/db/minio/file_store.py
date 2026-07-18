@@ -1,4 +1,4 @@
-from typing import Optional, Dict, Any, Union
+from typing import Optional, Dict, Any, Union, BinaryIO
 # Minio component
 from minio import Minio
 from minio.error import S3Error
@@ -9,36 +9,35 @@ from loggers import SystemLogger
 class MinioFileStore:
     @staticmethod
     async def upload_file(minio_client: Minio,
-                          file_buffer: Union[bytes, bytearray],
+                          file_buffer: Union[bytes, bytearray, BinaryIO],
                           file_name: str,
                           bucket_name: str,
-                          content_type: str) -> Optional[Dict[str, Any]]:
+                          content_type: str,
+                          file_size: Optional[int] = None) -> Optional[Dict[str, Any]]:
         """
-        Upload a file to a Minio bucket with automatic handling for small and large files.
+        Upload a file to a Minio bucket with streaming support.
         
         Args:
             minio_client: Configured Minio client instance
-            file_buffer: File data as bytes or bytearray
+            file_buffer: File data as bytes, bytearray, or file-like object (for streaming)
             file_name: Name to assign to the file in the bucket
             bucket_name: Target bucket name
             content_type: MIME type of the file (e.g., 'application/pdf')
+            file_size: File size in bytes (required for file-like objects)
             
         Returns:
             dict: Upload result containing bucket, object name, and etag on success
             None: On upload failure
             
         Note:
-            Files < 50MB are uploaded in a single operation
-            Files >= 50MB are uploaded using multipart upload with 10MB parts
+            - For bytes/bytearray: uploads in single operation
+            - For file-like objects: MinIO handles streaming automatically
         """
         try:
-            # Calculate file size to determine upload strategy
-            file_size_bytes = len(file_buffer)
-            # Convert to MB for threshold comparison
-            file_size_mb = file_size_bytes / (1024 * 1024)
-
-            if file_size_mb < 50:
-                # Small file upload (< 50MB) - single part upload using BytesIO
+            # Handle different input types
+            if isinstance(file_buffer, (bytes, bytearray)):
+                # Legacy support for bytes input
+                file_size_bytes = len(file_buffer)
                 result = await asyncio.to_thread(minio_client.put_object,
                                                  bucket_name,
                                                  file_name,
@@ -46,13 +45,15 @@ class MinioFileStore:
                                                  length=file_size_bytes,
                                                  content_type=content_type)
             else:
-                # Large file upload (>= 50MB) - multipart upload with 10MB parts
+                # Streaming upload with file object
+                if file_size is None:
+                    raise ValueError("file_size is required when using file-like objects")
+                
                 result = await asyncio.to_thread(minio_client.put_object,
                                                  bucket_name,
                                                  file_name,
-                                                 file_buffer,
-                                                 length=-1,  # Unknown length for streaming
-                                                 part_size=10 * 1024 * 1024,  # 10MB parts
+                                                 data=file_buffer,
+                                                 length=file_size,
                                                  content_type=content_type)
 
             # Return upload success information
