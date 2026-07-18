@@ -259,13 +259,12 @@ class PostgresFileStore:
         """
         if not file_ids:
             return []
-            
-        # Build parameterized query to prevent SQL injection
-        placeholders = ','.join(f'${i+1}' for i in range(len(file_ids)))
-        query = f"SELECT id FROM files WHERE id IN ({placeholders})"
-        
+
+        # Use ANY() for better performance with array parameter
+        query = "SELECT id FROM files WHERE id = ANY($1::text[])"
+
         async with pool.acquire() as conn:
-            rows = await conn.fetch(query, *file_ids)
+            rows = await conn.fetch(query, list(file_ids))
         
         # Extract existing file IDs from query results
         return [row['id'] for row in rows]

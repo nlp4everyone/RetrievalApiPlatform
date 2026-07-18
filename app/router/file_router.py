@@ -130,20 +130,18 @@ async def list_files(query: FileQueryRequest = Depends(),
                                                  limit = query.limit,
                                                  order = query.order)
 
-    # Construct file objects from database results
-    file_objects = []
-    for result in results:
-        # Convert datetime to Unix timestamp
-        created_at = int(result.get("created_at").timestamp())
-        expires_at = int(result.get("expires_at").timestamp()) if result.get("expires_at") else None
-
-        # Add file object to list
-        file_objects.append(FileObject(id=result.get("id"),
-                                       bytes=result.get("bytes"),
-                                       created_at=created_at,
-                                       expires_at=expires_at,
-                                       filename=result.get("metadata", {}).get("filename"),
-                                       purpose=result.get("purpose")))
+    # Construct file objects from database results using list comprehension
+    file_objects = [
+        FileObject(
+            id=result.get("id"),
+            bytes=result.get("bytes"),
+            created_at=int(result.get("created_at").timestamp()),
+            expires_at=int(expires_at.timestamp()) if (expires_at := result.get("expires_at")) else None,
+            filename=result.get("metadata", {}).get("filename"),
+            purpose=result.get("purpose")
+        )
+        for result in results
+    ]
 
     # Return paginated file list
     return FileListResponse(data=file_objects,
