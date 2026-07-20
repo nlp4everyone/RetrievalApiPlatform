@@ -36,9 +36,9 @@ class VectorStoreObject(BaseModel):
     )
     name: Optional[str] = Field(None,
                                 description="The name of the vector store.")
-    status: Literal["expired", "in_progress", "completed"] = Field(...,
+    status: Literal["expired", "in_progress", "completed", "cancelled", "failed"] = Field(...,
                                                                    description=("The status of the vector store, which can be either 'expired', 'in_progress', "
-                                                                                "or 'completed'. A status of 'completed' indicates that the vector store is ready for use."))
+                                                                                "'completed', 'cancelled', or 'failed'. A status of 'completed' indicates that the vector store is ready for use."))
     usage_bytes: int = Field(...,
                              description="The total number of bytes used by the files in the vector store.",
                              ge=0)
