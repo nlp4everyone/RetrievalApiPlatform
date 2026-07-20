@@ -5,8 +5,7 @@ from app.schemas.file import FilePurposes, FileObject, FileListResponse, FileQue
 from app.db.minio import MinioFileStore
 from app.db.postgres import PostgresFileStore
 from app.startup import get_minio_service, get_postgres_pool
-from app.exceptions.file import FileSizeLimitExceededException
-from app.core.config import MAX_FILE_SIZE, UPLOADED_FILE_BUCKET
+from app.core.config import UPLOADED_FILE_BUCKET
 from app.utils.key_generator import generate_file_id
 from loggers import SystemLogger
 import uuid
@@ -79,11 +78,8 @@ class FileService:
         minio_service = get_minio_service()
         postgres_pool = get_postgres_pool()
         
-        # Validate file size
+        # File size validation is now handled at router level via dependency
         file_size_bytes = file.size if file.size else 0
-        file_size_mb = file_size_bytes / (1024 * 1024)
-        if file_size_mb > MAX_FILE_SIZE:
-            raise FileSizeLimitExceededException(max_size=MAX_FILE_SIZE, current_size=file_size_mb)
         
         # Generate unique identifiers and storage path
         unique_name = f"{uuid.uuid4().hex}_{file.filename}"

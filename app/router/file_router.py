@@ -12,13 +12,15 @@ from app.schemas.file import (FilePurposes,
 from app.services.file import FileService
 # Security
 from app.security.auth import verify_api_key
+# Dependencies
+from app.dependencies.file_validation import validate_file_size
 
 # Router
 file_router = APIRouter()
 
 @file_router.post("/files", response_model = FileObject)
 async def upload_file(purpose: FilePurposes = Form(..., description="The intended purpose of the uploaded file. Must be one of: assistants, batch, fine-tune, vision, user_data, evals"),
-                      file: UploadFile = File(..., description="The file to upload"),
+                      file: UploadFile = Depends(validate_file_size),
                       expires_after_anchor: Optional[str] = Form(None, alias="expires_after[anchor]", description="Anchor point for expiration time calculation"),
                       expires_after_seconds: Optional[int] = Form(None, alias="expires_after[seconds]", description="Number of seconds after which the file will expire"),
                       api_key: str = Depends(verify_api_key)):
