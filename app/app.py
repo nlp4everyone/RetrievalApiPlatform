@@ -11,6 +11,8 @@ from .router import (file_router,
 # Exception
 from .exceptions import AppBaseException
 from .exceptions.handlers import common_exception_handler
+# Config
+from .core.config.storage import API_VERSION
 # Components
 import time, logging
 # Logger
@@ -45,11 +47,11 @@ app = FastAPI(openapi_tags = tags_metadata)
 # Register API Routes
 # Add file router for file upload and management operations
 app.include_router(file_router,
-                   prefix = "/v1",
+                   prefix = f"/{API_VERSION}",
                    tags = [tags_metadata[0].get("name")])
 # Add vector store router for vector database operations
 app.include_router(vector_store_router,
-                   prefix = "/v1",
+                   prefix = f"/{API_VERSION}",
                    tags = [tags_metadata[1].get("name")])
 
 # Register global exception handler for custom exceptions

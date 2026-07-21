@@ -12,6 +12,9 @@ MINIO_ROOT_PASSWORD = os.getenv("MINIO_ROOT_PASSWORD")
 UPLOADED_FILE_BUCKET = storage_config.get("UPLOADED_FILE_BUCKET")
 MAX_FILE_SIZE = storage_config.get("MAX_FILE_SIZE")
 
+# API Versioning
+API_VERSION = os.getenv("API_VERSION", "v1")
+
 # Allowed MIME types for file upload
 ALLOWED_MIME_TYPES = [
     "application/pdf",
