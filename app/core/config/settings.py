@@ -18,6 +18,10 @@ class Settings(BaseSettings):
     NUM_WORKERS: int = 1
     SERVING_API_KEY: str = Field(..., description="Serving API key for authentication")
     FASTAPI_API_KEY: str = Field(..., description="FastAPI API key for authentication")
+
+    # Logging Config
+    LOG_LEVEL: str = Field("INFO", description="Minimum log level captured by SystemLogger")
+    LOG_FORMAT: str = Field("auto", description="Log output format: 'auto' (detect TTY), 'console' (colorized text), or 'json' (structured)")
     
     # External API Keys
     UNDATASIO_API_KEY: Optional[str] = Field(None, description="Undatasio API key")
@@ -75,7 +79,7 @@ class Settings(BaseSettings):
             raise ValueError(f'Port must be positive, got: {v}')
         return v
     
-    @field_validator('SERVING_API_KEY', 'FASTAPI_API_KEY', 'POSTGRES_PASSWORD', 
+    @field_validator('SERVING_API_KEY', 'FASTAPI_API_KEY', 'POSTGRES_PASSWORD',
                     'MINIO_ROOT_PASSWORD', 'QDRANT_API_KEY')
     @classmethod
     def validate_required_secrets(cls, v):
@@ -83,6 +87,26 @@ class Settings(BaseSettings):
         if not v or v.strip() == "":
             raise ValueError('Required secret cannot be empty')
         return v
+
+    @field_validator('LOG_LEVEL')
+    @classmethod
+    def validate_log_level(cls, v):
+        """Validate that log level is one supported by loguru."""
+        allowed = {"TRACE", "DEBUG", "INFO", "SUCCESS", "WARNING", "ERROR", "CRITICAL"}
+        normalized = v.upper()
+        if normalized not in allowed:
+            raise ValueError(f'LOG_LEVEL must be one of {sorted(allowed)}, got: {v}')
+        return normalized
+
+    @field_validator('LOG_FORMAT')
+    @classmethod
+    def validate_log_format(cls, v):
+        """Validate that log format is a supported mode."""
+        allowed = {"auto", "console", "json"}
+        normalized = v.lower()
+        if normalized not in allowed:
+            raise ValueError(f'LOG_FORMAT must be one of {sorted(allowed)}, got: {v}')
+        return normalized
 
 
 # Global settings instance
