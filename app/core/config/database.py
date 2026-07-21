@@ -1,11 +1,13 @@
-import os
+from .settings import settings
 
 # Postgres configuration
-POSTGRES_USER = os.getenv("POSTGRES_USER")
-POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD")
-POSTGRES_DB = os.getenv("POSTGRES_DB")
-POSTGRES_HOST = os.getenv("POSTGRES_HOST")
+POSTGRES_USER = settings.POSTGRES_USER
+POSTGRES_PASSWORD = settings.POSTGRES_PASSWORD
+POSTGRES_DB = settings.POSTGRES_DB
+POSTGRES_HOST = settings.POSTGRES_HOST
+POSTGRES_PORT = settings.POSTGRES_PORT
 
 # Qdrant configuration
-QDRANT_URL = os.getenv("QDRANT_URL")
-QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
+QDRANT_URL = settings.QDRANT_URL
+QDRANT_API_KEY = settings.QDRANT_API_KEY
+QDRANT_PORT = settings.QDRANT_PORT

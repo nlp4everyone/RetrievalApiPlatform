@@ -1,9 +1,11 @@
-import os
+from .settings import settings
 
-# Other service API keys
-UNDATASIO_API_KEY = os.getenv("UNDATASIO_API_KEY")
-LLAMAPARSE_API_KEY = os.getenv("LLAMAPARSE_API_KEY")
+# API Config
+API_VERSION = settings.API_VERSION
+NUM_WORKERS = settings.NUM_WORKERS
+SERVING_API_KEY = settings.SERVING_API_KEY
+FASTAPI_API_KEY = settings.FASTAPI_API_KEY
 
-# API keys
-SERVING_API_KEY = os.getenv("SERVING_API_KEY")
-FASTAPI_API_KEY = os.getenv("FASTAPI_API_KEY")
+# External API Keys
+UNDATASIO_API_KEY = settings.UNDATASIO_API_KEY
+LLAMAPARSE_API_KEY = settings.LLAMAPARSE_API_KEY

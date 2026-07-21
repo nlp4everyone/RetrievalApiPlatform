@@ -13,6 +13,7 @@ from .exceptions import AppBaseException
 from .exceptions.handlers import common_exception_handler
 # Config
 from .core.config.storage import API_VERSION
+from .core.config import settings
 # Components
 import time, logging
 # Logger
@@ -66,6 +67,17 @@ async def health():
 @app.on_event("startup")
 async def startup_event():
     SystemLogger.info("[APP] Starting application warm up...")
+    
+    # Validate configuration at startup
+    try:
+        SystemLogger.info("[APP] Validating configuration...")
+        # Settings validation happens automatically on import
+        # This ensures all required environment variables are present
+        SystemLogger.success("[APP] ✅ Configuration validated")
+    except Exception as e:
+        SystemLogger.error(f"[APP] ❌ Configuration validation failed: {e}")
+        raise
+    
     # Start
     start = time.perf_counter()
 

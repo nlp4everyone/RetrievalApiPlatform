@@ -1,12 +1,15 @@
-import os
+from .settings import settings
 from app.utils.config_loader import get_yaml_config
 
 # Load interaction settings from YAML
 yaml_config = get_yaml_config()
 storage_config = yaml_config.get_section("storage")
+
 # Minio configuration
-MINIO_ROOT_USER = os.getenv("MINIO_ROOT_USER")
-MINIO_ROOT_PASSWORD = os.getenv("MINIO_ROOT_PASSWORD")
+MINIO_ROOT_USER = settings.MINIO_ROOT_USER
+MINIO_ROOT_PASSWORD = settings.MINIO_ROOT_PASSWORD
+MINIO_API_PORT = settings.MINIO_API_PORT
+MINIO_CONSOLE_PORT = settings.MINIO_CONSOLE_PORT
 
 # Uploaded File config
 UPLOADED_FILE_BUCKET = storage_config.get("uploaded_file_bucket")
@@ -14,7 +17,7 @@ MAX_FILE_SIZE = storage_config.get("max_file_size")
 
 # API Versioning - load from YAML with ENV override
 api_config = yaml_config.get_section("api")
-API_VERSION = os.getenv("API_VERSION", api_config.get("version", "v1"))
+API_VERSION = settings.API_VERSION
 
 # Allowed MIME types for file upload
 ALLOWED_MIME_TYPES = [
