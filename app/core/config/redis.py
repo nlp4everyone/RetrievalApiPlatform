@@ -1,8 +1,8 @@
-from app.utils.config_loader import get_toml_config
+from app.utils.config_loader import get_yaml_config
 
-# Load Redis configuration from TOML
-toml_config = get_toml_config()
-redis_config = toml_config.get_section("redis")
+# Load Redis configuration from YAML
+yaml_config = get_yaml_config()
+redis_config = yaml_config.get_section("redis")
 
-# Redis configuration from TOML
-REDIS_URL = redis_config.get("REDIS_URL")
+# Redis configuration from YAML
+REDIS_URL = redis_config.get("url")
