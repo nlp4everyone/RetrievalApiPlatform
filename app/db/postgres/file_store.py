@@ -195,12 +195,7 @@ class PostgresFileStore:
         file_data = dict(row)
 
         # Parse metadata from JSON string to dictionary if needed
-        metadata = file_data.get("metadata")
-        if isinstance(metadata, str):
-            try:
-                file_data["metadata"] = json.loads(metadata)
-            except json.JSONDecodeError:
-                file_data["metadata"] = None  # fallback if invalid JSON
+        file_data["metadata"] = PostgresFileStore._parse_json_field(file_data.get("metadata"))
 
         return file_data
 
@@ -299,7 +294,7 @@ class PostgresFileStore:
         async with pool.acquire() as conn:
             async with conn.transaction():
                 rows = await conn.fetch(query, list(file_ids))
-                return [json.loads(row["metadata"]) for row in rows if row["metadata"] is not None]
+                return [PostgresFileStore._parse_json_field(row["metadata"]) for row in rows if row["metadata"] is not None]
 
     @staticmethod
     async def get_total_bytes(pool: asyncpg.Pool, file_ids: [str]) -> int:

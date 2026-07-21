@@ -21,6 +21,7 @@ from app.core.config import DENSE_MODEL_NAME
 from app.utils.key_generator import generate_vectorstore_id
 from app.utils.vector_store.utils import (convert_query_response_to_search_results,
                                           validate_vector_store_prefix)
+from app.utils.datetime_utils import convert_to_unix_timestamp
 
 # Exceptions
 from app.exceptions.postgres import PostgresConnectionException
@@ -47,30 +48,6 @@ class VectorStoreService:
     separating concerns from HTTP handling and database/storage implementations.
     """
     
-    @staticmethod
-    def _convert_timestamps_to_unix(record: dict) -> tuple:
-        """
-        Convert datetime timestamps from database record to Unix timestamps.
-        
-        Args:
-            record: Dictionary containing timestamp fields from database
-            
-        Returns:
-            Tuple of (created_at, last_active_at, expires_at) as Unix timestamps or None
-        """
-        created_at = record["created_at"]
-        if hasattr(created_at, 'timestamp'):
-            created_at = int(created_at.timestamp())
-
-        last_active_at = record.get("last_active_at")
-        if last_active_at and hasattr(last_active_at, 'timestamp'):
-            last_active_at = int(last_active_at.timestamp())
-
-        expires_at = record.get("expires_at")
-        if expires_at and hasattr(expires_at, 'timestamp'):
-            expires_at = int(expires_at.timestamp())
-        
-        return created_at, last_active_at, expires_at
     
     @staticmethod
     def _calculate_file_counts(status: str) -> VectorStoreFileCounts:
@@ -118,7 +95,9 @@ class VectorStoreService:
             VectorStoreObject with properly formatted fields
         """
         # Convert timestamps to Unix timestamps
-        created_at, last_active_at, expires_at = VectorStoreService._convert_timestamps_to_unix(record)
+        created_at = convert_to_unix_timestamp(record["created_at"])
+        last_active_at = convert_to_unix_timestamp(record.get("last_active_at"))
+        expires_at = convert_to_unix_timestamp(record.get("expires_at"))
         
         # Convert expires_after to VectorStoreExpiresAfter
         expires_after = VectorStoreService._convert_expires_after(record.get("expires_after"))
@@ -232,9 +211,9 @@ class VectorStoreService:
             return VectorStoreObject(
                 id=vectorstore_id,
                 name=request.name,
-                created_at=int(created_at.timestamp()),
-                last_active_at=int(created_at.timestamp()),
-                expires_at=int(record.get("expires_at").timestamp()) if record.get("expires_at") is not None else None,
+                created_at=convert_to_unix_timestamp(created_at),
+                last_active_at=convert_to_unix_timestamp(created_at),
+                expires_at=convert_to_unix_timestamp(record.get("expires_at")),
                 expires_after=VectorStoreExpiresAfter(
                     days=timedelta(seconds=int(expires_after)).days,
                     anchor="last_active_at"

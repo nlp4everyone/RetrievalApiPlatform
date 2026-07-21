@@ -7,6 +7,7 @@ from app.db.postgres import PostgresFileStore
 from app.startup import get_minio_service, get_postgres_pool
 from app.core.config import UPLOADED_FILE_BUCKET
 from app.utils.key_generator import generate_file_id
+from app.utils.datetime_utils import convert_to_unix_timestamp
 from loggers import SystemLogger
 import uuid
 
@@ -17,18 +18,6 @@ class FileService:
     This class provides static methods for file-related business logic, separating
     concerns from HTTP handling and database/storage implementations.
     """
-    @staticmethod
-    def _convert_timestamp(dt: Optional[datetime]) -> Optional[int]:
-        """
-        Convert datetime object to Unix timestamp (seconds since epoch).
-        
-        Args:
-            dt: Datetime object to convert, or None
-            
-        Returns:
-            Unix timestamp as integer, or None if input is None
-        """
-        return int(dt.timestamp()) if dt else None
     
     @staticmethod
     def _calculate_expiration(current_time: datetime,
@@ -47,7 +36,7 @@ class FileService:
         if not expires_after_seconds:
             return None, None
         expires_at_dt = current_time + timedelta(seconds=expires_after_seconds)
-        expires_at_timestamp = int(expires_at_dt.timestamp())
+        expires_at_timestamp = convert_to_unix_timestamp(expires_at_dt)
         return expires_at_timestamp, expires_at_dt
     
     @staticmethod
@@ -88,7 +77,7 @@ class FileService:
         
         # Calculate creation and expiration timestamps
         current_time = datetime.utcnow()
-        created_at_timestamp = int(current_time.timestamp())
+        created_at_timestamp = convert_to_unix_timestamp(current_time)
         expires_at_timestamp, expires_at_dt = FileService._calculate_expiration(
             current_time, expires_after_seconds
         )
@@ -168,8 +157,8 @@ class FileService:
             FileObject(
                 id=result.get("id"),
                 bytes=result.get("bytes"),
-                created_at=FileService._convert_timestamp(result.get("created_at")),
-                expires_at=FileService._convert_timestamp(result.get("expires_at")),
+                created_at=convert_to_unix_timestamp(result.get("created_at")),
+                expires_at=convert_to_unix_timestamp(result.get("expires_at")),
                 filename=result.get("metadata", {}).get("filename"),
                 purpose=result.get("purpose")
             )
@@ -207,8 +196,8 @@ class FileService:
         return FileObject(
             id=result.get("id"),
             bytes=result.get("bytes"),
-            created_at=FileService._convert_timestamp(result.get("created_at")),
-            expires_at=FileService._convert_timestamp(result.get("expires_at")),
+            created_at=convert_to_unix_timestamp(result.get("created_at")),
+            expires_at=convert_to_unix_timestamp(result.get("expires_at")),
             filename=result.get("metadata", {}).get("filename"),
             purpose=result.get("purpose")
         )
