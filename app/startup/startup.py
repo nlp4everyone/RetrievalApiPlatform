@@ -42,10 +42,10 @@ async def init_embed_model() -> AsyncOpenAI:
 
     try:
         await embed_model.embeddings.create(model = DENSE_MODEL_NAME, input = ["Hello"])
-        SystemLogger.warning("[STARTUP] Dense embedding service ready")
-    except:
-        # Response
-        SystemLogger.error("[STARTUP] Init dense embedding service failed")
+        SystemLogger.success("[STARTUP] Dense embedding service ready")
+    except Exception as e:
+        SystemLogger.error(f"[STARTUP] Init dense embedding service failed: {e!r}")
+        raise
     return embed_model
 
 async def get_dense_embedding(texts: List[str]) -> List[List[float]]:
@@ -135,19 +135,28 @@ def init_minio() -> MinioService:
                 raise e
     return minio_service
 
-def init_qdrant() -> QdrantService:
+async def init_qdrant() -> QdrantService:
     """
     Initialize Qdrant vector database service.
 
     Creates and configures a QdrantService instance for vector storage
-    and retrieval operations.
+    and retrieval operations, and verifies connectivity.
 
     Returns:
         QdrantService: Configured Qdrant service instance
+
+    Raises:
+        Exception: If Qdrant is not reachable
     """
     global qdrant_service
     # Init connection
     qdrant_service = QdrantService(url = QDRANT_URL, api_key = QDRANT_API_KEY)
+    try:
+        await qdrant_service._check_connection()
+        SystemLogger.success("[STARTUP] Qdrant connection established")
+    except Exception as e:
+        SystemLogger.error(f"[STARTUP] Qdrant connection failed: {e!r}")
+        raise
     return qdrant_service
 
 def get_embed_model() -> AsyncOpenAI:
@@ -220,10 +229,14 @@ async def wait_for_postgres(create_pool_func,
     for attempt in range(1, retries + 1):
         try:
             await create_pool_func
-            SystemLogger.warning(f"[STARTUP] PostgreSQL connection established (attempt {attempt}/{retries})")
+            SystemLogger.success(f"[STARTUP] PostgreSQL connection established (attempt {attempt}/{retries})")
             return
         except (ConnectionRefusedError, PostgresError) as e:
             last_exc = e
             SystemLogger.error(f"[STARTUP] PostgreSQL connection failed (attempt {attempt}/{retries}): {e!r}")
             if attempt < retries:
                 await asyncio.sleep(delay)
+    # Exhausted every retry - surface the last failure instead of silently
+    # continuing as if Postgres were reachable.
+    SystemLogger.error(f"[STARTUP] PostgreSQL unreachable after {retries} attempts")
+    raise last_exc

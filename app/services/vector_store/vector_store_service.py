@@ -29,6 +29,9 @@ from app.exceptions.postgres import PostgresConnectionException
 # Logger
 from loggers import SystemLogger
 
+# Request context
+from app.core.request_context import request_id_ctx
+
 # TaskIQ worker
 from taskiq_worker import process_vector_store_files
 
@@ -204,9 +207,12 @@ class VectorStoreService:
                 file_ids=request.file_ids,
                 chunking_strategy=chunking_strategy,
                 chunk_size=chunk_size,
-                chunk_overlap=chunk_overlap
+                chunk_overlap=chunk_overlap,
+                request_id=request_id_ctx.get()
             )
-            
+
+            SystemLogger.info(f"Vector store created: {vectorstore_id} ({nums_in_progress_file} file(s) queued)")
+
             # Build and return response object
             return VectorStoreObject(
                 id=vectorstore_id,
@@ -401,6 +407,8 @@ class VectorStoreService:
                 client=qdrant_service.client
             )
             await qdrant_vector_store.delete_collection()
+
+            SystemLogger.info(f"Vector store deleted: {vector_store_id}")
 
             # Return deletion confirmation
             return VectorStoreDeletion(

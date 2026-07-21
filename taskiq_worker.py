@@ -27,6 +27,8 @@ from app.services.chunking.chonkie_chunker import (ChonkieChunkingService,
 from app.core.config import *
 # Logging system
 from loggers import SystemLogger
+# Request correlation ID
+from app.core.request_context import request_id_ctx
 # Utility functions
 from app.utils.io import async_temp_file
 # Standard library components
@@ -64,7 +66,7 @@ async def initialize_services():
     # Minio service
     minio_service = init_minio()
     # Qdrant service
-    qdrant_service = init_qdrant()
+    qdrant_service = await init_qdrant()
 
     # Embedding model
     await init_embed_model()
@@ -121,7 +123,8 @@ async def process_vector_store_files(vectorstore_id: str,
                                      file_ids: list[str],
                                      chunking_strategy: str,
                                      chunk_size: Optional[int] = None,
-                                     chunk_overlap: Optional[int] = None):
+                                     chunk_overlap: Optional[int] = None,
+                                     request_id: str = "-"):
     """
     Background task to process and store files in a vector store.
 
@@ -132,11 +135,15 @@ async def process_vector_store_files(vectorstore_id: str,
         chunking_strategy (str): Strategy for text chunking ("auto" or "static")
         chunk_size (Optional[int]): Size of text chunks for static strategy
         chunk_overlap (Optional[int]): Overlap between chunks for static strategy
+        request_id (str): ID of the HTTP request that enqueued this task, so
+                          worker logs can be correlated with the originating request
 
     Note:
         Currently supports single file processing. Multiple file support
         is planned for future implementation.
     """
+    token = request_id_ctx.set(request_id)
+    SystemLogger.info(f"[WORKER] Start processing vector store {vectorstore_id} (files: {file_ids})")
     try:
         # Step 1: Verify file existence in PostgreSQL database
         existing_files = await PostgresFileStore.check_existing_files(pool = postgres_service.pool,
@@ -251,7 +258,10 @@ async def process_vector_store_files(vectorstore_id: str,
                                          status = UploadingStatus.COMPLETED,
                                          usage_bytes = usage_bytes,
                                          last_active_at = datetime.utcnow())
+        SystemLogger.success(f"[WORKER] Vector store {vectorstore_id} processing completed")
     except Exception as e:
         # Log any unexpected errors during processing
         SystemLogger.error(f"[WORKER] Error in process_vector_store_files: {str(e)}")
         raise  # Re-raise to allow TaskIQ to handle the failure
+    finally:
+        request_id_ctx.reset(token)

@@ -4,8 +4,6 @@ from fastapi.security import APIKeyHeader
 # Config
 from app.core.config import FASTAPI_API_KEY
 from app.exceptions.auth import *
-# Logger
-from loggers import SystemLogger
 
 api_key_header = APIKeyHeader(name = "Authorization", auto_error=False)
 

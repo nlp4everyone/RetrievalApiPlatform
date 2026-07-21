@@ -1,6 +1,4 @@
 # Inherit
-import logging
-
 from ..base import BaseTextParser
 # Main component
 from llama_parse import LlamaParse

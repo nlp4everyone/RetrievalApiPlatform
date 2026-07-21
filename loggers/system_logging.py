@@ -1,12 +1,17 @@
 import sys
 from loguru import logger
 from app.core.config import settings
+from app.core.request_context import request_id_ctx
 
 # Remove existing handlers
 logger.remove()
+# Default extra for log lines emitted outside any request/task context
+# (startup, worker init, etc.)
+logger.configure(extra={"request_id": "-"})
 # Custom log
 general_format = "<level>{level}</level> | {level.icon} | " \
                  "{time:YYYY-MM-DD HH:mm:ss} | " \
+                 "{extra[request_id]} | " \
                  "{file.name}:{line} - " \
                  "<level>{message}</level>"
 
@@ -34,35 +39,41 @@ logger.level("WARNING", color="<yellow>") # Yellow background
 logger.level("ERROR", color="<red>")   # Red background
 depth = 1
 
+def _bound():
+    # Attach the current request/task's ID (set by RequestIDMiddleware or the
+    # TaskIQ worker) to this log line, so it can be grepped across the whole
+    # request -> service -> worker path.
+    return logger.opt(depth = depth).bind(request_id = request_id_ctx.get())
+
 class SystemLogger:
     @staticmethod
     def info(message :str,
              *args,
              **kwargs):
-        logger.opt(depth = depth).info(message,
-                                       *args,
-                                       **kwargs)
+        _bound().info(message,
+                      *args,
+                      **kwargs)
 
     @staticmethod
     def success(message: str,
                 *args,
                 **kwargs):
-        logger.opt(depth = depth).success(message,
-                                          *args,
-                                          **kwargs)
+        _bound().success(message,
+                         *args,
+                         **kwargs)
 
     @staticmethod
     def warning(message: str,
                 *args,
                 **kwargs):
-        logger.opt(depth = depth).warning(message,
-                                          *args,
-                                          **kwargs)
+        _bound().warning(message,
+                         *args,
+                         **kwargs)
 
     @staticmethod
     def error(message: str,
               *args,
               **kwargs):
-        logger.opt(depth = depth).error(message,
-                                        *args,
-                                        **kwargs)
+        _bound().error(message,
+                       *args,
+                       **kwargs)

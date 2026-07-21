@@ -23,8 +23,8 @@ class MinioService:
         try:
             # Check list buckets
             self._client.list_buckets()
-        except:
-            SystemLogger.error(f"Failed to connect to Minio")
+        except Exception as e:
+            SystemLogger.error(f"Failed to connect to Minio: {e!r}")
 
     @property
     def client(self) -> Minio:

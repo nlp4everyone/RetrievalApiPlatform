@@ -11,6 +11,8 @@ from .router import (file_router,
 # Exception
 from .exceptions import AppBaseException
 from .exceptions.handlers import common_exception_handler
+# Middleware
+from .middleware.request_id import RequestIDMiddleware
 # Config
 from .core.config.storage import API_VERSION
 from .core.config import settings
@@ -44,6 +46,10 @@ tags_metadata = [
 ]
 # Initialize FastAPI application with OpenAPI tags
 app = FastAPI(openapi_tags = tags_metadata)
+
+# Tag every request with a correlation ID (X-Request-Id), echoed back to the
+# client and bound to all logs emitted while handling that request
+app.add_middleware(RequestIDMiddleware)
 
 # Register API Routes
 # Add file router for file upload and management operations
@@ -96,7 +102,7 @@ async def startup_event():
     await postgres_client._create_table()
     SystemLogger.info("[APP] ✅ Postgres ready")
     # Init qdrant
-    init_qdrant()
+    await init_qdrant()
     SystemLogger.info("[APP] ✅ Qdrant ready")
     # Init Minio
     init_minio()
