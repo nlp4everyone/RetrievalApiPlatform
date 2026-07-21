@@ -27,14 +27,12 @@ dependencies = [
     "taskiq-redis==1.1.0",
     
     # Config
-    "toml==0.10.2",
+    "pyyaml==6.0.3",
     
     # Text splitter
     "langchain-text-splitters==0.3.11",
     "chonkie==1.4.2",
     
-    # Token counter
-    "tiktoken==0.11.0",
     
     # Read lib
     "langchain-undatasio==1.0.1",
@@ -43,7 +41,6 @@ dependencies = [
     
     # PostgreSQL
     "asyncpg==0.29.0",
-    "psycopg[binary]>=3.2",
     
     # ML and Monitoring
     "mlflow-skinny==3.1.4",

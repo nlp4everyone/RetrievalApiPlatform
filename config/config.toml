@@ -1,9 +1,0 @@
-[api]
-FASTAPI_API_KEY = "token"
-
-[storage]
-UPLOADED_FILE_BUCKET = "uploaded-files"
-MAX_FILE_SIZE = 100
-
-[redis]
-REDIS_URL = "redis://redis:6379"
