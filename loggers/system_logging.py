@@ -1,50 +1,67 @@
-import sys
+import sys, logging
 from loguru import logger
 from app.core.config import settings
 from app.core.request_context import request_id_ctx
 
 # Remove existing handlers
 logger.remove()
-# Default extra for log lines emitted outside any request/task context
-# (startup, worker init, etc.)
+# Default request_id for logs outside any request/task context
 logger.configure(extra={"request_id": "-"})
-# Custom log
 general_format = "<level>{level}</level> | {level.icon} | " \
                  "{time:YYYY-MM-DD HH:mm:ss} | " \
                  "{extra[request_id]} | " \
                  "{file.name}:{line} - " \
                  "<level>{message}</level>"
 
-# LOG_FORMAT="auto" (default) picks console for a real terminal and JSON otherwise,
-# so a plain TTY still gets colorized human-readable lines while docker logs / a log
-# aggregator gets structured JSON with no ANSI codes. Set LOG_FORMAT explicitly to
-# override the guess (e.g. JSON logs while running docker compose locally, or console
-# logs in a piped CI shell).
+# "auto" (default): console on a real TTY, JSON otherwise. Set LOG_FORMAT to override.
 if settings.LOG_FORMAT == "auto":
     _use_json = not sys.stderr.isatty()
 else:
     _use_json = settings.LOG_FORMAT == "json"
 
-# Add a single handler that captures all logs
 logger.add(sys.stderr,
           format = general_format,
           level = settings.LOG_LEVEL,
           colorize = not _use_json,
           serialize = _use_json)
 
-# Level color
-logger.level("INFO", color="<blue>")   # Green background
+logger.level("INFO", color="<blue>")
 logger.level("SUCCESS", color="<green>")
-logger.level("WARNING", color="<yellow>") # Yellow background
-logger.level("ERROR", color="<red>")   # Red background
+logger.level("WARNING", color="<yellow>")
+logger.level("ERROR", color="<red>")
 depth = 1
 
+class InterceptHandler(logging.Handler):
+    """Redirects stdlib `logging` records (uvicorn's access/error logs) into loguru."""
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            level = logger.level(record.levelname).name
+        except ValueError:
+            level = record.levelno
+
+        # Walk past logging's own internal frames so loguru attributes the
+        # line to the real caller (e.g. uvicorn) instead of logging/__init__.py.
+        frame = sys._getframe(1)
+        frame_depth = 1
+        while frame is not None and frame.f_code.co_filename == logging.__file__:
+            frame = frame.f_back
+            frame_depth += 1
+
+        logger.opt(depth = frame_depth, exception = record.exc_info).bind(
+            request_id = request_id_ctx.get()
+        ).log(level, record.getMessage())
+
+# Route uvicorn's own loggers through loguru instead of their default handlers.
+for _uvicorn_logger_name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+    _uvicorn_logger = logging.getLogger(_uvicorn_logger_name)
+    _uvicorn_logger.handlers = [InterceptHandler()]
+    _uvicorn_logger.propagate = False
+    # Set explicitly - don't rely on uvicorn's own dictConfig having run first.
+    _uvicorn_logger.setLevel(settings.LOG_LEVEL)
+
 def _bound(exception: bool = False):
-    # Attach the current request/task's ID (set by RequestIDMiddleware or the
-    # TaskIQ worker) to this log line, so it can be grepped across the whole
-    # request -> service -> worker path.
-    # exception=True attaches the full traceback of the exception currently
-    # being handled (must be called from inside an `except` block).
+    # Binds request_id for correlation; exception=True attaches the current
+    # traceback (call from inside an `except` block).
     return logger.opt(depth = depth, exception = exception).bind(request_id = request_id_ctx.get())
 
 class SystemLogger:

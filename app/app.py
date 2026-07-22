@@ -17,10 +17,9 @@ from .middleware.request_id import RequestIDMiddleware
 from .core.config.storage import API_VERSION
 from .core.config import settings
 # Components
-import time, logging
+import time, logging, re
 # Logger
 from loggers import SystemLogger
-logging.getLogger("uvicorn.error").propagate = False
 
 # Silence successful /health probe pings; still log them when they fail
 class HealthCheckLogFilter(logging.Filter):
@@ -31,6 +30,29 @@ class HealthCheckLogFilter(logging.Filter):
         return not (path == "/health" and 200 <= status_code < 300)
 
 logging.getLogger("uvicorn.access").addFilter(HealthCheckLogFilter())
+
+# Silence successful (2xx) access log lines for high-frequency list/retrieve/
+# modify calls - they're already logged at DEBUG/INFO by SystemLogger in the
+# service layer. Failures still show up here for debugging. create/delete/
+# search stay visible on the access log regardless of status.
+_QUIET_ACCESS_ROUTES = (
+    ("GET", re.compile(rf"^/{API_VERSION}/vector_stores(\?.*)?$")),        # list
+    ("GET", re.compile(rf"^/{API_VERSION}/vector_stores/[^/]+(\?.*)?$")),  # retrieve
+    ("POST", re.compile(rf"^/{API_VERSION}/vector_stores/[^/]+(\?.*)?$")), # modify
+    ("GET", re.compile(rf"^/{API_VERSION}/files(\?.*)?$")),                # list
+    ("GET", re.compile(rf"^/{API_VERSION}/files/[^/]+(\?.*)?$")),          # retrieve
+)
+
+class QuietAccessLogFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        if len(record.args) < 5:
+            return True
+        _, method, path, _, status_code = record.args
+        if not (200 <= status_code < 300):
+            return True
+        return not any(method == m and pattern.match(path) for m, pattern in _QUIET_ACCESS_ROUTES)
+
+logging.getLogger("uvicorn.access").addFilter(QuietAccessLogFilter())
 
 
 # Define OpenAPI tags for API documentation

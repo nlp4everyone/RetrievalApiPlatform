@@ -6,7 +6,6 @@ services:
       context: ..
       dockerfile: docker/Dockerfile
     environment:
-      - DISABLE_UVICORN_PROPAGATION=true
       - NUM_WORKERS=${NUM_WORKERS:-1}
       - QDRANT_API_KEY=${QDRANT_API_KEY}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
