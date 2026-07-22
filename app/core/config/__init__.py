@@ -5,7 +5,7 @@ load_dotenv()
 
 # Import all configuration modules
 from .database import *
-from .mlflow import *
+from .langfuse import *
 from .models import *
 from .storage import *
 from .api import *

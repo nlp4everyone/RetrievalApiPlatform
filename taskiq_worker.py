@@ -25,6 +25,8 @@ from app.services.chunking.chonkie_chunker import (ChonkieChunkingService,
                                                    ChonkieChunkingConfig)
 # Application configuration
 from app.core.config import *
+# Tracing
+from app.core.tracing import init_tracing, traced_span
 # Logging system
 from loggers import SystemLogger
 # Request correlation ID
@@ -58,6 +60,9 @@ async def initialize_services():
 
     if _services_initialized:
         return
+
+    # Tracing (Langfuse via OpenTelemetry OTLP)
+    init_tracing()
 
     # Postgres Service
     postgres_service = init_postgres()
@@ -119,7 +124,8 @@ async def worker_shutdown(state: TaskiqState) -> None:
 
 async def _embed_and_upload_chunks(qdrant_vector_store: AsyncQdrantVectorStore,
                                    chunked_texts: list,
-                                   source_file_id: str) -> int:
+                                   source_file_id: str,
+                                   vectorstore_id: str) -> int:
     """Embed and upsert chunks to Qdrant in fixed-size batches.
 
     The first batch runs alone so it creates the collection before concurrent
@@ -132,26 +138,53 @@ async def _embed_and_upload_chunks(qdrant_vector_store: AsyncQdrantVectorStore,
         return 0
 
     async def _embed_and_insert_batch(batch_texts: list) -> int:
-        batch_embeddings = await get_dense_embedding(batch_texts)
+        with traced_span(
+            "embedding",
+            attributes={
+                "gen_ai.request.model": DENSE_MODEL_NAME,
+                "embedding.batch_size": len(batch_texts),
+            },
+        ) as embed_span:
+            batch_embeddings = await get_dense_embedding(batch_texts)
+            embed_span.set_attribute("embedding.dims", len(batch_embeddings[0]))
+
         batch_documents = [Document(page_content = text,
                                     metadata = {"source": source_file_id}) for text in batch_texts]
-        await qdrant_vector_store.insert_documents(documents = batch_documents,
-                                                   embeddings = batch_embeddings,
-                                                   upload_batch_size = EMBEDDING_UPLOAD_BATCH_SIZE)
+
+        with traced_span(
+            "upsert",
+            attributes={
+                "db.system": "qdrant",
+                "db.collection.name": vectorstore_id,
+                "db.operation": "upsert",
+                "upsert.batch_size": len(batch_documents),
+            },
+        ):
+            await qdrant_vector_store.insert_documents(documents = batch_documents,
+                                                       embeddings = batch_embeddings,
+                                                       upload_batch_size = EMBEDDING_UPLOAD_BATCH_SIZE)
         return len(batch_documents)
 
-    total_inserted = await _embed_and_insert_batch(text_batches[0])
+    with traced_span(
+        f"/v1/vector_stores/{vectorstore_id}/add_documents",
+        attributes={
+            "db.system": "qdrant",
+            "db.collection.name": vectorstore_id,
+            "vector_store.chunks_count": len(chunked_texts),
+        },
+    ):
+        total_inserted = await _embed_and_insert_batch(text_batches[0])
 
-    remaining_batches = text_batches[1:]
-    if remaining_batches:
-        semaphore = asyncio.Semaphore(EMBEDDING_BATCH_CONCURRENCY)
+        remaining_batches = text_batches[1:]
+        if remaining_batches:
+            semaphore = asyncio.Semaphore(EMBEDDING_BATCH_CONCURRENCY)
 
-        async def _bounded_batch(batch_texts: list) -> int:
-            async with semaphore:
-                return await _embed_and_insert_batch(batch_texts)
+            async def _bounded_batch(batch_texts: list) -> int:
+                async with semaphore:
+                    return await _embed_and_insert_batch(batch_texts)
 
-        batch_counts = await asyncio.gather(*[_bounded_batch(batch) for batch in remaining_batches])
-        total_inserted += sum(batch_counts)
+            batch_counts = await asyncio.gather(*[_bounded_batch(batch) for batch in remaining_batches])
+            total_inserted += sum(batch_counts)
 
     return total_inserted
 
@@ -271,7 +304,8 @@ async def process_vector_store_files(vectorstore_id: str,
 
                     total_inserted = await _embed_and_upload_chunks(qdrant_vector_store = qdrant_vector_store,
                                                                     chunked_texts = chunked_texts,
-                                                                    source_file_id = file_ids[0])
+                                                                    source_file_id = file_ids[0],
+                                                                    vectorstore_id = vectorstore_id)
                     SystemLogger.info(f"[WORKER] Successfully inserted {total_inserted} documents to Qdrant collection: {vectorstore_id}")
                 except Exception as chunking_error:
                     SystemLogger.error(f"[WORKER] Failed during chunking or document insertion: {str(chunking_error)}")

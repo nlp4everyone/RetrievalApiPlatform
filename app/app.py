@@ -16,6 +16,8 @@ from .middleware.request_id import RequestIDMiddleware
 # Config
 from .core.config.storage import API_VERSION
 from .core.config import settings
+# Tracing
+from .core.tracing import init_tracing
 # Components
 import time, logging, re
 # Logger
@@ -108,6 +110,10 @@ async def startup_event():
     
     # Start
     start = time.perf_counter()
+
+    # Init tracing (Langfuse via OpenTelemetry OTLP)
+    init_tracing()
+    SystemLogger.info("[APP] ✅ Tracing ready")
 
     # Init embed model
     await init_embed_model()

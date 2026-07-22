@@ -1,7 +1,7 @@
 from typing import Optional
 from datetime import datetime, timezone, timedelta
 from fastapi import HTTPException, status
-import asyncpg, socket, mlflow
+import asyncpg, socket, json
 
 # Schemas
 from app.schemas.vector_store import *
@@ -38,10 +38,9 @@ from taskiq_worker import process_vector_store_files
 
 # Qdrant component
 from qdrant_client import models
-from mlflow.entities import SpanType, SpanEvent
 
-# Enable logging
-mlflow.config.enable_async_logging()
+# Tracing
+from app.core.tracing import traced_span
 
 
 class VectorStoreService:
@@ -503,15 +502,20 @@ class VectorStoreService:
         )
 
         try:
-            with mlflow.start_span(name="/v1/vector_stores/{vector_store_id}/search", span_type=SpanType.UNKNOWN) as span:
-                # Set inputs
-                span.set_inputs({"search_request": search_request.model_dump()})
-
+            with traced_span(
+                f"/v1/vector_stores/{vector_store_id}/search",
+                attributes={
+                    "db.system": "qdrant",
+                    "db.collection.name": vector_store_id,
+                    "vector_store.api_key": api_key,
+                    "vector_store.max_num_results": search_request.max_num_results,
+                },
+            ):
                 qdrant_vector_store = AsyncQdrantVectorStore(
                     collection_name=vector_store_id,
                     client=qdrant_service.client
                 )
-                
+
                 # Convert filters to Qdrant format if provided
                 qdrant_filter = None
                 # if search_request.filters:
@@ -529,31 +533,32 @@ class VectorStoreService:
                 queries = [search_request.query] if isinstance(search_request.query, str) else search_request.query[:1]
 
                 # Embedding span
-                with mlflow.start_span(name="embedding", span_type=SpanType.EMBEDDING) as span:
-                    # Set inputs
-                    span.set_inputs({"queries_batch_size": len(queries)})
-                    # Set attribute
-                    span.set_attributes({"embedding_model_name": DENSE_MODEL_NAME})
+                with traced_span(
+                    "embedding",
+                    attributes={
+                        "gen_ai.request.model": DENSE_MODEL_NAME,
+                        "embedding.queries_batch_size": len(queries),
+                    },
+                ) as embed_span:
                     # Embed the queries
                     queries_vectors = await get_dense_embedding(queries)
                     # Define embedding dims
                     embedding_dims = len(queries_vectors[0])
                     embedding_batch_size = len(queries_vectors)
-                    # Set output
-                    span.set_outputs({
-                        "embedding_batch_size": embedding_batch_size,
-                        "embedding_dims": embedding_dims
-                    })
+                    # Set output attributes
+                    embed_span.set_attribute("embedding.batch_size", embedding_batch_size)
+                    embed_span.set_attribute("embedding.dims", embedding_dims)
 
                 # Retrieval span
-                with mlflow.start_span(name="retrieve", span_type=SpanType.RETRIEVER) as span:
-                    # Set inputs
-                    span.set_inputs({
-                        "embedding_batch_size": embedding_batch_size,
-                        "embedding_dims": embedding_dims,
-                        "max_num_results": search_request.max_num_results
-                    })
-
+                with traced_span(
+                    "retrieve",
+                    attributes={
+                        "db.operation": "query_points",
+                        "embedding.batch_size": embedding_batch_size,
+                        "embedding.dims": embedding_dims,
+                        "vector_store.max_num_results": search_request.max_num_results,
+                    },
+                ) as retrieve_span:
                     # Check if vector store collection exists in Qdrant
                     vector_store_existence = await qdrant_service.client.collection_exists(
                         collection_name=vector_store_id
@@ -565,7 +570,7 @@ class VectorStoreService:
                         data = []
                         displayed_results = []
                         # Log event for monitoring
-                        span.add_event(event=SpanEvent(name="Vector store collection not found"))
+                        retrieve_span.add_event("vector_store_collection_not_found")
                     else:
                         # Vector store exists - perform search
                         retrieved_results = await qdrant_vector_store.retrieve(
@@ -574,35 +579,20 @@ class VectorStoreService:
                             limit=search_request.max_num_results
                         )
 
-                        # Extract search results for logging/display
-                        displayed_results = []
-                        for point in retrieved_results[0].points:
-                            displayed_results.append({
-                                "chunk_id": point.id,
-                                "score": point.score,
-                                "metadata": point.payload.get("metadata")
-                            })
+                        # chunk_id + score only for tracing - no metadata/content
+                        displayed_results = [
+                            {"chunk_id": point.id, "score": point.score}
+                            for point in retrieved_results[0].points
+                        ]
 
                         # Convert results to API response format
                         data = convert_query_response_to_search_results(retrieved_results)
 
-                    # Set attribute
-                    span.set_attributes({
-                        "vector_store_type": "qdrant",
-                        "vector_store_id": vector_store_id
-                    })
-                    # Set output
-                    span.set_outputs({"results": displayed_results})
+                    # Set output attributes
+                    retrieve_span.set_attribute("retrieve.result_count", len(displayed_results))
+                    if displayed_results:
+                        retrieve_span.set_attribute("retrieve.results", json.dumps(displayed_results))
 
-                    # Add tag
-                    mlflow.update_current_trace(tags={
-                        "vector_store_id": vector_store_id,
-                        "token": api_key
-                    })
-                
-                # Update state
-                mlflow.flush_async_logging()
-                
                 # Return search response
                 return VectorStoreSearchResponse(
                     search_query=search_request.query,
