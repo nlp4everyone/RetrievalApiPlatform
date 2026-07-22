@@ -66,7 +66,10 @@ class MinioFileStore:
 
         except S3Error as e:
             # Log upload failure with specific error details
-            SystemLogger.error(f"Failed when trying to upload file: {file_name}")
+            SystemLogger.error(f"Failed when trying to upload file: {file_name}: {e}", exc_info=True)
+            raise
+        except Exception as e:
+            SystemLogger.error(f"Unexpected error when trying to upload file: {file_name}: {e}", exc_info=True)
             raise
 
     @staticmethod
@@ -91,7 +94,10 @@ class MinioFileStore:
             return {"deleted": True, "bucket": bucket_name, "path": file_path}
         except S3Error as e:
             # Log deletion failure with specific error details
-            SystemLogger.error(f"Failed when trying to delete file: {file_path} in bucket {bucket_name}")
+            SystemLogger.error(f"Failed when trying to delete file: {file_path} in bucket {bucket_name}: {e}", exc_info=True)
+            raise
+        except Exception as e:
+            SystemLogger.error(f"Unexpected error when trying to delete file: {file_path} in bucket {bucket_name}: {e}", exc_info=True)
             raise
 
     @staticmethod
@@ -113,14 +119,25 @@ class MinioFileStore:
         Note:
             Properly cleans up network resources in finally block
         """
-        # Get object from Minio in a thread pool to avoid blocking the event loop
-        response = await asyncio.to_thread(minio_client.get_object, bucket_name, file_path)
+        try:
+            # Get object from Minio in a thread pool to avoid blocking the event loop
+            response = await asyncio.to_thread(minio_client.get_object, bucket_name, file_path)
+        except S3Error as e:
+            SystemLogger.error(f"Failed when trying to open file: {file_path} in bucket {bucket_name}: {e}", exc_info=True)
+            raise
+        except Exception as e:
+            SystemLogger.error(f"Unexpected error when trying to open file: {file_path} in bucket {bucket_name}: {e}", exc_info=True)
+            raise
+
         try:
             # Read the file content from the response stream
             return response.read()
         except S3Error as e:
             # Log download failure with specific error details
-            SystemLogger.error(f"Failed when trying to download file: {file_path} in bucket {bucket_name}")
+            SystemLogger.error(f"Failed when trying to download file: {file_path} in bucket {bucket_name}: {e}", exc_info=True)
+            raise
+        except Exception as e:
+            SystemLogger.error(f"Unexpected error when trying to download file: {file_path} in bucket {bucket_name}: {e}", exc_info=True)
             raise
         finally:
             # Always clean up network connections and resources to prevent leaks
