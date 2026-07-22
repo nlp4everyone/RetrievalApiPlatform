@@ -10,4 +10,5 @@ from .models import *
 from .storage import *
 from .api import *
 from .redis import *
+from .embedding import *
 from .settings import settings

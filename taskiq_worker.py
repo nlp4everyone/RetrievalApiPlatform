@@ -40,11 +40,6 @@ import inspect, asyncio
 result_backend = RedisAsyncResultBackend(redis_url=REDIS_URL)
 broker = RedisStreamBroker(url=REDIS_URL).with_result_backend(result_backend)
 
-# Chunks embedded/upserted per round-trip - bounds peak memory regardless of file size
-EMBEDDING_UPLOAD_BATCH_SIZE = 16
-# Batches allowed to run concurrently - peak memory stays ~SIZE * CONCURRENCY, not file-sized
-EMBEDDING_BATCH_CONCURRENCY = 4
-
 # Global services (will be initialized lazily)
 postgres_service: Optional[any] = None
 minio_service: Optional[any] = None

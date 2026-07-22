@@ -15,3 +15,7 @@ mlflow:
 
 models:
   dense_model_name: Qwen/Qwen3-Embedding-0.6B
+
+embedding:
+  upload_batch_size: 16
+  batch_concurrency: 4
