@@ -8,20 +8,13 @@ from app.db.qdrant import QdrantService
 from asyncpg import PostgresError
 # Config
 from app.core.config import *
+# Tracing
+from app.core.tracing import init_tracing
 # Other component
-import requests, time, asyncio, mlflow, re, os, asyncpg
+import requests, time, asyncio, asyncpg
 from typing import List
 # Logger
 from loggers import SystemLogger
-
-# Set MLflow params
-mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
-mlflow.set_experiment(MLFLOW_EXPERIMENT_NAME)
-# Correct MLFlow and Minio for logging messages
-os.environ["AWS_ACCESS_KEY_ID"] = MINIO_ROOT_USER
-os.environ["AWS_SECRET_ACCESS_KEY"] = MINIO_ROOT_PASSWORD
-os.environ["MLFLOW_S3_ENDPOINT_URL"] = MLFLOW_S3_ENDPOINT_URL
-os.environ["MLFLOW_DEFAULT_ARTIFACT_ROOT"] = MLFLOW_DEFAULT_ARTIFACT_ROOT
 
 async def init_embed_model() -> AsyncOpenAI:
     """
@@ -85,43 +78,20 @@ def init_minio() -> MinioService:
     """
     Initialize MinIO object storage service.
 
-    Creates a MinioService instance and ensures required buckets exist:
-    - MLflow bucket (extracted from MLFLOW_DEFAULT_ARTIFACT_ROOT)
-    - Uploaded file bucket (from UPLOADED_FILE_BUCKET config)
+    Creates a MinioService instance and ensures the uploaded file bucket
+    (from UPLOADED_FILE_BUCKET config) exists.
 
     Returns:
         MinioService: Configured MinIO service instance
 
     Raises:
-        ValueError: If MLFLOW_DEFAULT_ARTIFACT_ROOT format is invalid
         Exception: If bucket creation fails (except when bucket already exists)
     """
     global minio_service
-    # Define url
-    minio_endpoint_url = MLFLOW_S3_ENDPOINT_URL.replace("http://","")
-    # Get bucket name
-    match = re.search(r'^s3://([^/]+)/', MLFLOW_DEFAULT_ARTIFACT_ROOT)
-
-    # Raise exception when not found
-    if not match:
-        raise ValueError(f"MLFLOW_DEFAULT_ARTIFACT_ROOT with incorrect format: {MLFLOW_DEFAULT_ARTIFACT_ROOT}")
-    bucket_name = match.group(1)
-
     # Init connection
-    minio_service = MinioService(endpoint_url = minio_endpoint_url,
+    minio_service = MinioService(endpoint_url = MINIO_ENDPOINT_URL.replace("http://",""),
                                  access_key = MINIO_ROOT_USER,
                                  secret_key = MINIO_ROOT_PASSWORD)
-
-    # Create bucket for mlflow
-    if not minio_service.client.bucket_exists(bucket_name):
-        try:
-            minio_service.client.make_bucket(bucket_name)
-            SystemLogger.success(f"Create Minio bucker for MLflow ({bucket_name}) done!")
-        except Exception as e:
-            if "BucketAlreadyOwnedByYou" in str(e):
-                SystemLogger.info(f"Minio bucket for MLflow ({bucket_name}) already exists")
-            else:
-                raise e
 
     # Create bucket for Uploaded File
     if not minio_service.client.bucket_exists(UPLOADED_FILE_BUCKET):

@@ -8,6 +8,7 @@ storage_config = yaml_config.get_section("storage")
 # Minio configuration
 MINIO_ROOT_USER = settings.MINIO_ROOT_USER
 MINIO_ROOT_PASSWORD = settings.MINIO_ROOT_PASSWORD
+MINIO_ENDPOINT_URL = settings.MINIO_ENDPOINT_URL
 MINIO_API_PORT = settings.MINIO_API_PORT
 MINIO_CONSOLE_PORT = settings.MINIO_CONSOLE_PORT
 

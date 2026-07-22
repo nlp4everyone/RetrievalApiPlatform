@@ -41,21 +41,20 @@ class Settings(BaseSettings):
     # MinIO Config
     MINIO_ROOT_USER: str = Field(..., description="MinIO root user")
     MINIO_ROOT_PASSWORD: str = Field(..., description="MinIO root password")
+    MINIO_ENDPOINT_URL: str = Field(..., description="MinIO endpoint URL")
     MINIO_API_PORT: int = 9000
     MINIO_CONSOLE_PORT: int = 9001
-    
+
     # Qdrant Config
     QDRANT_URL: str = Field(..., description="Qdrant server URL")
     QDRANT_API_KEY: str = Field(..., description="Qdrant API key")
     QDRANT_PORT: int = 6333
-    
-    # MLFlow Config
-    MLFLOW_TRACKING_URI: str = Field(..., description="MLflow tracking URI")
-    MLFLOW_EXPERIMENT_NAME: str = "Experiment"
-    MLFLOW_DEFAULT_ARTIFACT_ROOT: str = "s3://mlflow/artifacts"
-    MLFLOW_S3_ENDPOINT_URL: str = Field(..., description="MLflow S3 endpoint URL")
-    MLFLOW_PORT: int = 5000
-    
+
+    # Langfuse Config (tracing, exported via OpenTelemetry OTLP)
+    LANGFUSE_PUBLIC_KEY: str = Field(..., description="Langfuse public key")
+    LANGFUSE_SECRET_KEY: str = Field(..., description="Langfuse secret key")
+    LANGFUSE_BASE_URL: str = Field(..., description="Self-hosted Langfuse base URL")
+
     # Redis Config
     REDIS_PORT: int = 6379
     
@@ -70,8 +69,8 @@ class Settings(BaseSettings):
             raise ValueError(f'API version must start with "v", got: {v}')
         return v
     
-    @field_validator('NUM_WORKERS', 'POSTGRES_PORT', 'MINIO_API_PORT', 'MINIO_CONSOLE_PORT', 
-                    'QDRANT_PORT', 'MLFLOW_PORT', 'REDIS_PORT', 'FASTAPI_PORT')
+    @field_validator('NUM_WORKERS', 'POSTGRES_PORT', 'MINIO_API_PORT', 'MINIO_CONSOLE_PORT',
+                    'QDRANT_PORT', 'REDIS_PORT', 'FASTAPI_PORT')
     @classmethod
     def validate_positive_ports(cls, v):
         """Validate that port numbers are positive."""
@@ -80,7 +79,7 @@ class Settings(BaseSettings):
         return v
     
     @field_validator('SERVING_API_KEY', 'FASTAPI_API_KEY', 'POSTGRES_PASSWORD',
-                    'MINIO_ROOT_PASSWORD', 'QDRANT_API_KEY')
+                    'MINIO_ROOT_PASSWORD', 'QDRANT_API_KEY', 'LANGFUSE_SECRET_KEY')
     @classmethod
     def validate_required_secrets(cls, v):
         """Validate that required secrets are not empty."""
