@@ -18,6 +18,11 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 2g
 
   redis:
     image: redis:7
@@ -30,6 +35,11 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512m
 
   qdrant:
     image: qdrant/qdrant:v1.16
@@ -48,6 +58,16 @@ services:
       timeout: 10s
       retries: 3
       start_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 3g
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   postgres_data:

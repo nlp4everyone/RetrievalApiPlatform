@@ -44,6 +44,16 @@ services:
       timeout: 3s
       retries: 10
       start_period: 5s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1g
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   minio:
     image: minio/minio:RELEASE.2025-07-23T15-54-02Z
@@ -65,6 +75,11 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 2g
 
 volumes:
   minio_data:

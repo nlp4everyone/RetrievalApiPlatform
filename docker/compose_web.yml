@@ -28,6 +28,16 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 2g
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   worker:
     build:
@@ -50,3 +60,13 @@ services:
         condition: service_healthy
       mlflow:
         condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 4g
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
