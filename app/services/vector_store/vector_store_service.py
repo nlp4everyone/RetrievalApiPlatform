@@ -24,6 +24,7 @@ from app.utils.vector_store.utils import (convert_query_response_to_search_resul
 from app.utils.datetime_utils import convert_to_unix_timestamp
 
 # Exceptions
+from app.exceptions import AppBaseException
 from app.exceptions.postgres import PostgresConnectionException
 
 # Logger
@@ -233,9 +234,17 @@ class VectorStoreService:
                 usage_bytes=0
             )
         except (asyncpg.PostgresError, socket.gaierror) as e:
-            SystemLogger.error(e)
+            SystemLogger.error(f"Postgres connection failed while creating vector store: {e}", exc_info=True)
             raise PostgresConnectionException()
-    
+        except AppBaseException:
+            raise
+        except Exception as e:
+            SystemLogger.error(f"Error creating vector store: {e}", exc_info=True)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Error creating vector store: {str(e)}"
+            )
+
     @staticmethod
     async def list(api_key: str,
                    query_object: VectorStoreQueryRequest) -> ListVectorStoreObject:
@@ -271,6 +280,8 @@ class VectorStoreService:
                 vector_store = VectorStoreService._build_vector_store_object(record)
                 vector_stores.append(vector_store)
 
+            SystemLogger.debug(f"Listed {len(vector_stores)} vector store(s)")
+
             # Return paginated response
             return ListVectorStoreObject(
                 data=vector_stores,
@@ -278,11 +289,19 @@ class VectorStoreService:
                 last_id=result["last_id"],
                 has_more=result["has_more"]
             )
-            
+
         except (asyncpg.PostgresError, socket.gaierror) as e:
-            SystemLogger.error(e)
+            SystemLogger.error(f"Postgres connection failed while listing vector stores: {e}", exc_info=True)
             raise PostgresConnectionException()
-    
+        except AppBaseException:
+            raise
+        except Exception as e:
+            SystemLogger.error(f"Error listing vector stores: {e}", exc_info=True)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Error listing vector stores: {str(e)}"
+            )
+
     @staticmethod
     async def get(vector_store_id: str,
                   api_key: str) -> VectorStoreObject:
@@ -312,13 +331,23 @@ class VectorStoreService:
                 api_key=api_key
             )
 
+            SystemLogger.debug(f"Vector store retrieved: {vector_store_id}")
+
             # Build and return vector store object
             return VectorStoreService._build_vector_store_object(record)
 
         except (asyncpg.PostgresError, socket.gaierror) as e:
-            SystemLogger.error(e)
+            SystemLogger.error(f"Postgres connection failed while getting vector store {vector_store_id}: {e}", exc_info=True)
             raise PostgresConnectionException()
-    
+        except AppBaseException:
+            raise
+        except Exception as e:
+            SystemLogger.error(f"Error getting vector store {vector_store_id}: {e}", exc_info=True)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Error getting vector store: {str(e)}"
+            )
+
     @staticmethod
     async def modify(vector_store_id: str,
                      request: VectorStoreModifyRequest,
@@ -352,13 +381,23 @@ class VectorStoreService:
                 metadata=request.metadata
             )
 
+            SystemLogger.info(f"Vector store modified: {vector_store_id}")
+
             # Build and return updated vector store object
             return VectorStoreService._build_vector_store_object(record)
 
         except (asyncpg.PostgresError, socket.gaierror) as e:
-            SystemLogger.error(e)
+            SystemLogger.error(f"Postgres connection failed while modifying vector store {vector_store_id}: {e}", exc_info=True)
             raise PostgresConnectionException()
-    
+        except AppBaseException:
+            raise
+        except Exception as e:
+            SystemLogger.error(f"Error modifying vector store {vector_store_id}: {e}", exc_info=True)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Error modifying vector store: {str(e)}"
+            )
+
     @staticmethod
     async def delete(vector_store_id: str,
                      api_key: str) -> VectorStoreDeletion:
@@ -417,10 +456,12 @@ class VectorStoreService:
                 deleted=True
             )
         except (asyncpg.PostgresError, socket.gaierror) as e:
-            SystemLogger.error(e)
+            SystemLogger.error(f"Postgres connection failed while deleting vector store {vector_store_id}: {e}", exc_info=True)
             raise PostgresConnectionException()
+        except AppBaseException:
+            raise
         except Exception as e:
-            SystemLogger.error(f"Error deleting vector store: {str(e)}")
+            SystemLogger.error(f"Error deleting vector store {vector_store_id}: {e}", exc_info=True)
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Error deleting vector store: {str(e)}"
@@ -570,10 +611,12 @@ class VectorStoreService:
                 )
 
         except (asyncpg.PostgresError, socket.gaierror) as e:
-            SystemLogger.error(e)
+            SystemLogger.error(f"Postgres connection failed while searching vector store {vector_store_id}: {e}", exc_info=True)
             raise PostgresConnectionException()
+        except AppBaseException:
+            raise
         except Exception as e:
-            SystemLogger.error(e)
+            SystemLogger.error(f"Error searching vector store {vector_store_id}: {e}", exc_info=True)
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Error searching vector store: {str(e)}"

@@ -9,6 +9,8 @@ services:
       - DISABLE_UVICORN_PROPAGATION=true
       - NUM_WORKERS=${NUM_WORKERS:-1}
       - QDRANT_API_KEY=${QDRANT_API_KEY}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - LOG_FORMAT=${LOG_FORMAT:-json}
     ports:
       - "${FASTAPI_PORT:-8005}:8005"
     depends_on:
@@ -40,6 +42,8 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       GIT_PYTHON_REFRESH: "quiet"
       QDRANT_API_KEY: ${QDRANT_API_KEY}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_FORMAT: ${LOG_FORMAT:-json}
     depends_on:
       postgres:
         condition: service_healthy

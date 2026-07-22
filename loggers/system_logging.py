@@ -39,13 +39,23 @@ logger.level("WARNING", color="<yellow>") # Yellow background
 logger.level("ERROR", color="<red>")   # Red background
 depth = 1
 
-def _bound():
+def _bound(exception: bool = False):
     # Attach the current request/task's ID (set by RequestIDMiddleware or the
     # TaskIQ worker) to this log line, so it can be grepped across the whole
     # request -> service -> worker path.
-    return logger.opt(depth = depth).bind(request_id = request_id_ctx.get())
+    # exception=True attaches the full traceback of the exception currently
+    # being handled (must be called from inside an `except` block).
+    return logger.opt(depth = depth, exception = exception).bind(request_id = request_id_ctx.get())
 
 class SystemLogger:
+    @staticmethod
+    def debug(message :str,
+              *args,
+              **kwargs):
+        _bound().debug(message,
+                       *args,
+                       **kwargs)
+
     @staticmethod
     def info(message :str,
              *args,
@@ -73,7 +83,8 @@ class SystemLogger:
     @staticmethod
     def error(message: str,
               *args,
+              exc_info: bool = False,
               **kwargs):
-        _bound().error(message,
-                       *args,
-                       **kwargs)
+        _bound(exception = exc_info).error(message,
+                                           *args,
+                                           **kwargs)
