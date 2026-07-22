@@ -261,9 +261,11 @@ class AsyncQdrantVectorStore:
                                      vector = {embedding_model_name: dense_embeddings[i]},
                                      payload = payloads[i]) for i in range(len(dense_embeddings))]
 
-        # Upload points
-        await self._client.upsert(collection_name = self._collection_name,
-                                  points = points)
+        # Batch upserts to bound request size instead of one giant call
+        for batch_start in range(0, len(points), batch_size):
+            batch = points[batch_start:batch_start + batch_size]
+            await self._client.upsert(collection_name = self._collection_name,
+                                      points = batch)
 
     async def insert_documents(self,
                                documents: Sequence[Document],
