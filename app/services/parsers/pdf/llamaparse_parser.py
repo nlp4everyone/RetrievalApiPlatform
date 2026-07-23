@@ -7,8 +7,10 @@ from app.core.config import LLAMAPARSE_API_KEY
 # Object
 from llama_index.core.schema import Document
 from llama_cloud_services.parse.utils import ResultType
+# Utils
+from app.utils.io import async_temp_file
 # Typing
-from typing import List, Tuple
+from typing import List
 
 # Validate API key availability at import time
 # This ensures configuration issues are caught early
@@ -49,28 +51,30 @@ class LlamaParseParser(BaseTextParser):
                                   **kwargs)
 
     async def parse(self,
-                    file_input :str,
+                    file_bytes :bytes,
                     lazy_load :bool = False) -> str:
         """Parse PDF file and extract text content.
-        
+
         This method processes PDF documents using LlamaParse service and returns
         the extracted text content in the specified format (default: Markdown).
-        
+
         Args:
-            file_input (str): Path to the PDF file to be parsed
+            file_bytes (bytes): Raw bytes of the PDF file to be parsed
             lazy_load (bool): Enable lazy loading mode. Currently not supported.
                            Defaults to False.
-        
+
         Returns:
             str: Extracted text content from the PDF document
         """
         # Validate lazy loading parameter
         if lazy_load:
             raise ValueError("Not support lazy load")
-            
-        # Parse document asynchronously using LlamaParse service
-        documents :List[Document] = await self._parser.aload_data(file_input)
-        
+
+        # Write to a temp file since LlamaParse expects a file path
+        async with async_temp_file(file_bytes, suffix=".pdf") as path:
+            # Parse document asynchronously using LlamaParse service
+            documents :List[Document] = await self._parser.aload_data(path)
+
         # Extract text content from all documents and join with newlines
         content = "\n".join([doc.text_resource.text for doc in documents])
         return content

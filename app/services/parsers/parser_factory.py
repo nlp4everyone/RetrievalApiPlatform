@@ -2,38 +2,36 @@
 from .base import BaseTextParser
 # Parser
 from .text_parser import AsyncTextParser
-from .pdf import UnDatasIOPDFParser, LlamaParseParser
-# Schema
-from app.schemas.file.types import FileFormat
+from .pdf import LlamaParseParser
 # Typing
-from typing import Tuple, Union
+from typing import Dict, Optional, Type
 
 class ParserFactory:
-    @staticmethod
-    def get(file_type: str) -> Union[Tuple[FileFormat,BaseTextParser],Tuple[None,None]]:
-        """Get appropriate parser for the given file type.
-        
+    _registry: Dict[str, Type[BaseTextParser]] = {
+        ".txt": AsyncTextParser,
+        ".md": AsyncTextParser,
+        ".pdf": LlamaParseParser,
+    }
+    _instances: Dict[str, BaseTextParser] = {}
+
+    @classmethod
+    def get(cls, file_type: str) -> Optional[BaseTextParser]:
+        """Get the parser instance registered for the given file type.
+
         Args:
             file_type (str): File extension including the dot (e.g., ".pdf", ".txt")
-        
+
         Returns:
-            Union[Tuple[FileFormat, BaseTextParser], Tuple[None, None]]: 
-                - Tuple of (FileFormat, parser_instance) if supported
-                - Tuple of (None, None) if file type is not supported
-        
+            Optional[BaseTextParser]: The parser instance if supported, else None.
+
         Note:
-            File type comparison is case-insensitive.
+            File type comparison is case-insensitive. Parser instances are
+            cached and reused across calls.
         """
         file_type = file_type.lower()
-        # Apply case
-        if file_type in (".txt", ".md"):
-            # Text format - use async text parser for plain text and markdown files
-            return FileFormat.TEXT, AsyncTextParser()
-        elif file_type == ".pdf":
-            # PDF format - use LlamaParse parser for PDF documents
-            return FileFormat.PDF, LlamaParseParser()
-        # elif file_type == "docx":
-        #     return DocxParser()
-        else:
-            # Unsupported file type
-            return None,None
+        parser_cls = cls._registry.get(file_type)
+        if parser_cls is None:
+            return None
+        if file_type not in cls._instances:
+            cls._instances[file_type] = parser_cls()
+        return cls._instances[file_type]

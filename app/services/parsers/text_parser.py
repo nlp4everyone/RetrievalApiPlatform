@@ -6,8 +6,8 @@ class TextParser(BaseTextParser):
     def __init__(self, encoding: str = "utf-8"):
         self.encoding = encoding
 
-    def parse(self, file_input: bytes) -> str:
-        return file_input.decode(self.encoding, errors="ignore")
+    def parse(self, file_bytes: bytes) -> str:
+        return file_bytes.decode(self.encoding, errors="ignore")
 
 
 class AsyncTextParser(BaseTextParser):
@@ -16,8 +16,8 @@ class AsyncTextParser(BaseTextParser):
         # Parser
         self._parser = TextParser()
 
-    async def parse(self, file_input: bytes) -> str:
+    async def parse(self, file_bytes: bytes) -> str:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(self.executor,
-                                        self._parser.parse,
-                                        file_input)
+                                          self._parser.parse,
+                                          file_bytes)
