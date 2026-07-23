@@ -8,21 +8,15 @@ from app.startup import (init_postgres,
                          init_qdrant)
 # Database services
 from app.db.postgres import PostgresVectorStore, PostgresFileStore
-# MinIO object storage service
-from app.db.minio import MinioFileStore
 # Qdrant vector database service
 from app.db.qdrant import AsyncQdrantVectorStore
 # Data schemas and types
-from app.schemas.file.types import FileFormat, UploadingStatus
+from app.schemas.file.types import UploadingStatus
 # Type hints
 from typing import Optional
-# Text parsing services
-from app.services.parsers import ParserFactory
-# Text chunking services
-from app.services.chunking.chonkie_chunker import (ChonkieChunkingService,
-                                                   ChonkieChunkingConfig)
-# Vector store ingest pipeline (embed + upsert)
+# Vector store ingest pipeline (embed + upsert, file load + chunk)
 from app.services.ingest.ingest_pipeline import embed_and_upload_chunks
+from app.services.ingest.file_loader import load_and_chunk_file
 # Application configuration
 from app.core.config import *
 # Tracing
@@ -31,10 +25,7 @@ from app.core.tracing import init_tracing
 from loggers import SystemLogger
 # Request correlation ID
 from app.core.request_context import request_id_ctx
-# Utility functions
-from app.utils.io import async_temp_file
 # Standard library components
-from pathlib import Path
 from datetime import datetime
 import inspect
 
@@ -123,6 +114,15 @@ async def worker_shutdown(state: TaskiqState) -> None:
                 close_fn()       # Sync close method
 
 
+async def _mark_failed(vectorstore_id: str, api_key: str, usage_bytes: int) -> None:
+    await PostgresVectorStore.update(pool = postgres_service.pool,
+                                     vector_store_id = vectorstore_id,
+                                     api_key = api_key,
+                                     status = UploadingStatus.FAILED,
+                                     usage_bytes = usage_bytes,
+                                     last_active_at = datetime.utcnow())
+
+
 @broker.task
 async def process_vector_store_files(vectorstore_id: str,
                                      api_key :str,
@@ -150,92 +150,34 @@ async def process_vector_store_files(vectorstore_id: str,
     """
     token = request_id_ctx.set(request_id)
     SystemLogger.info(f"[WORKER] Start processing vector store {vectorstore_id} (files: {file_ids})")
+    usage_bytes = 0
     try:
-        # Step 1: Verify file existence in PostgreSQL database
-        existing_files = await PostgresFileStore.check_existing_files(pool = postgres_service.pool,
-                                                                      file_ids = file_ids)
+        # Step 1: Verify which requested files actually exist
+        existing_file_ids = await PostgresFileStore.check_existing_files(pool = postgres_service.pool,
+                                                                         file_ids = file_ids)
 
-        # Step 2: Prepare metadata and usage statistics
-        if len(existing_files) == 0:
-            # No files found - initialize empty values
-            existing_file_ids = []
-            usage_bytes = 0
-        else:
-            # Files found - collect metadata and calculate usage
-            existing_file_ids = existing_files
+        if existing_file_ids:
             usage_bytes = await PostgresFileStore.get_total_bytes(pool = postgres_service.pool,
                                                                   file_ids = file_ids)
-
-            # Step 3: Retrieve file metadata for processing
             files_metadata = await PostgresFileStore.get_metadata_for_files(pool = postgres_service.pool,
                                                                             file_ids = existing_file_ids)
 
-            # Step 4: Process file content (currently supports single file)
+            # Step 2: Load, parse, and chunk file content (single-file support only)
             # TODO: Implement multiple file processing in future version
+            chunked_texts = []
             if len(files_metadata) == 1:
-                # Extract file extension to determine appropriate parser
-                file_ext = Path(files_metadata[0].get("filename")).suffix
-                # Get parser factory instance for this file type
-                current_file_format, parser = ParserFactory.get(file_type = file_ext)
-                # Validate parser availability
-                if current_file_format is None or parser is None:
-                    # Update vector store status to FAILED
-                    await PostgresVectorStore.update(pool = postgres_service.pool,
-                                                     vector_store_id = vectorstore_id,
-                                                     api_key = api_key,
-                                                     status = UploadingStatus.FAILED,
-                                                     usage_bytes = usage_bytes,
-                                                     last_active_at = datetime.utcnow())
-                    # Raise exception for unsupported format
-                    raise ValueError(f"Unsupported file format: {file_ext}")
-
-                # Step 5: Download file from MinIO storage
-                file_bytes = await MinioFileStore.download_file(minio_client = minio_service.client,
-                                                                bucket_name = files_metadata[0].get("minio_bucket"),
-                                                                file_path = files_metadata[0].get("minio_path"))
-                
-                # Step 6: Parse file content based on format
                 try:
-                    if current_file_format == FileFormat.TEXT:
-                        # Direct text parsing for plain text files
-                        file_content = await parser.parse(file_input = file_bytes)
-                        SystemLogger.info(f"[WORKER] Successfully parsed text file: {files_metadata[0].get('filename')}")
-                    elif current_file_format == FileFormat.PDF:
-                        # PDF parsing requires temporary file handling
-                        async with async_temp_file(file_bytes, suffix=".pdf") as path:
-                            file_content = await parser.parse(file_input = path)
-                        SystemLogger.info(f"[WORKER] Successfully parsed PDF file: {files_metadata[0].get('filename')}")
-                except Exception as parse_error:
-                    SystemLogger.error(f"[WORKER] Failed to parse file {files_metadata[0].get('filename')}: {str(parse_error)}")
-                    # Update vector store status to FAILED due to parsing error
-                    await PostgresVectorStore.update(pool = postgres_service.pool,
-                                                     vector_store_id = vectorstore_id,
-                                                     api_key = api_key,
-                                                     status = UploadingStatus.FAILED,
-                                                     usage_bytes = usage_bytes,
-                                                     last_active_at = datetime.utcnow())
-                    # Re-raise the exception to propagate error
+                    chunked_texts = await load_and_chunk_file(minio_service.client, files_metadata[0], chunk_size)
+                except Exception as load_error:
+                    SystemLogger.error(f"[WORKER] Failed to load/parse file {files_metadata[0].get('filename')}: {str(load_error)}")
+                    await _mark_failed(vectorstore_id, api_key, usage_bytes)
                     raise
-            # Placeholder for multiple file processing (TODO: Implement in future)
-            elif len(files_metadata) > 1:
-                file_content = ""  # Multiple files not yet supported
-            else:
-                file_content = ""  # No files to process
 
-            # Step 7: Text chunking and vectorization
-            # Supports both automatic and static chunking strategies
-            if chunking_strategy in ["auto","static"]:
+            # Step 3: Embed chunks and upload them to Qdrant
+            if chunking_strategy in ["auto", "static"] and chunked_texts:
                 try:
-                    # Initialize chunking service with specified configuration
-                    chunking_service = ChonkieChunkingService(config = ChonkieChunkingConfig(chunk_size = chunk_size))
-                    # Split text into manageable chunks for embedding
-                    chunked_texts = chunking_service.split_text(text = file_content)
-
-                    # Step 8: Store documents in Qdrant vector database
-                    # Initialize vector store with collection name matching vectorstore_id
                     qdrant_vector_store = AsyncQdrantVectorStore(collection_name = vectorstore_id,
                                                                  client = qdrant_service.client)
-
                     total_inserted = await embed_and_upload_chunks(qdrant_vector_store = qdrant_vector_store,
                                                                     chunked_texts = chunked_texts,
                                                                     source_file_id = file_ids[0],
@@ -244,17 +186,10 @@ async def process_vector_store_files(vectorstore_id: str,
                     SystemLogger.info(f"[WORKER] Successfully inserted {total_inserted} documents to Qdrant collection: {vectorstore_id}")
                 except Exception as chunking_error:
                     SystemLogger.error(f"[WORKER] Failed during chunking or document insertion: {str(chunking_error)}")
-                    # Update vector store status to FAILED due to chunking/vectorization error
-                    await PostgresVectorStore.update(pool = postgres_service.pool,
-                                                     vector_store_id = vectorstore_id,
-                                                     api_key = api_key,
-                                                     status = UploadingStatus.FAILED,
-                                                     usage_bytes = usage_bytes,
-                                                     last_active_at = datetime.utcnow())
-                    # Re-raise the exception to propagate error
+                    await _mark_failed(vectorstore_id, api_key, usage_bytes)
                     raise
 
-        # Step 9: Update vector store status to COMPLETED on successful processing
+        # Step 4: Mark vector store as completed
         await PostgresVectorStore.update(pool = postgres_service.pool,
                                          vector_store_id = vectorstore_id,
                                          api_key = api_key,
