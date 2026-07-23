@@ -522,6 +522,7 @@ class VectorStoreService:
                                          "langfuse.trace.input": json.dumps({
                                              "query": search_request.query,
                                              "max_num_results": search_request.max_num_results})}) as search_span:
+                search_span.set_attribute("vector_store.id", vector_store_id)
 
                 # NOTE: only the first query is used when a list is given.
                 queries = [search_request.query] if isinstance(search_request.query, str) else search_request.query[:1]
@@ -537,7 +538,7 @@ class VectorStoreService:
                     embedding_dims = len(queries_vectors[0])
                     embedding_batch_size = len(queries_vectors)
                     # Set output attributes
-                    embed_span.set_attribute("embedding.batch_size", embedding_batch_size)
+                    embed_span.set_attribute("embedding.num_queries", embedding_batch_size)
                     embed_span.set_attribute("embedding.model", DENSE_MODEL_NAME)
                     embed_span.set_attribute("embedding.dims", embedding_dims)
 
@@ -546,11 +547,13 @@ class VectorStoreService:
                                  attributes={"langfuse.observation.type": "retriever",
                                              "langfuse.observation.metadata.vector_store_id": vector_store_id,
                                              "langfuse.observation.metadata.max_num_results": search_request.max_num_results}) as retrieve_span:
+                    retrieve_span.set_attribute("vector_store.id", vector_store_id)
+                    retrieve_span.set_attribute("vector_store.type", "qdrant")
                     # Check if vector store collection exists in Qdrant
                     vector_store_existence = await qdrant_service.client.collection_exists(
                         collection_name=vector_store_id
                     )
-                    retrieve_span.set_attribute("langfuse.observation.metadata.collection_exists", vector_store_existence)
+                    retrieve_span.set_attribute("vector_store.collection_exists", vector_store_existence)
                     retrieve_span.set_attribute("embedding.dims", embedding_dims)
 
                     # Handle case when vector store doesn't exist
