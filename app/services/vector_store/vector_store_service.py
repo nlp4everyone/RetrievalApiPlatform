@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Any, Optional
 from datetime import datetime, timezone, timedelta
 from fastapi import HTTPException, status
 import asyncpg, socket, json
@@ -87,7 +87,7 @@ class VectorStoreService:
         return None
     
     @staticmethod
-    def _build_vector_store_object(record: dict) -> VectorStoreObject:
+    def _build_vector_store_object(record: dict[str, Any]) -> VectorStoreObject:
         """
         Build VectorStoreObject from database record.
         

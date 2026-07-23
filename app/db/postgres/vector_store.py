@@ -1,5 +1,5 @@
 # Typing
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 # Exception
 from app.exceptions.vector_store import VectorStoreNotFoundException
 # Other component
@@ -7,7 +7,8 @@ import asyncpg, json
 
 class PostgresVectorStore:
     @staticmethod
-    def _normalize_jsonb_fields(record: dict, keys: tuple) -> dict:
+    def _normalize_jsonb_fields(record: Dict[str, Any], 
+                                keys: Tuple[str, ...]) -> Dict[str, Any]:
         """Normalize JSONB fields from database record.
         
         Args:
@@ -29,7 +30,7 @@ class PostgresVectorStore:
     @staticmethod
     async def _check_vector_store_existence(pool: asyncpg.Pool,
                                             vector_store_id: str,
-                                            api_key: str):
+                                            api_key: str) -> None:
         """
         Private helper method to verify vector store exists.
         

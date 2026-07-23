@@ -1,4 +1,5 @@
 import uuid
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from app.core.request_context import request_id_ctx
 
 REQUEST_ID_HEADER = b"x-request-id"
@@ -16,10 +17,13 @@ class RequestIDMiddleware:
     Wrapping `send` directly keeps the contextvar bound for the whole
     request/response lifecycle, including that final send.
     """
-    def __init__(self, app):
+    def __init__(self, app: ASGIApp) -> None:
         self.app = app
 
-    async def __call__(self, scope, receive, send):
+    async def __call__(self, 
+                       scope: Scope, 
+                       receive: Receive, 
+                       send: Send) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
@@ -30,7 +34,7 @@ class RequestIDMiddleware:
         client_request_id = headers.get(REQUEST_ID_HEADER)
         request_id = client_request_id.decode() if client_request_id else f"req_{uuid.uuid4().hex}"
 
-        async def send_wrapper(message):
+        async def send_wrapper(message: Message) -> None:
             if message["type"] == "http.response.start":
                 response_headers = message.setdefault("headers", [])
                 response_headers.append((REQUEST_ID_HEADER, request_id.encode()))

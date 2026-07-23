@@ -12,7 +12,7 @@ class AppBaseException(Exception):
     def __init__(self,
                  status_code: int,
                  response: BaseResponse,
-                 log_message: Optional[str] = None):
+                 log_message: Optional[str] = None) -> None:
         self.status_code = status_code
         self.response = response
         # What gets written to server logs. Defaults to the client-facing message,
@@ -24,9 +24,9 @@ class WrongPrefixException(AppBaseException):
     def __init__(self,
                  input :str,
                  type: str = "invalid_request_error",
-                 params: str = None,
-                 prefix :str = None,
-                 code: Any = "invalid_value"):
+                 params: Optional[str] = None,
+                 prefix :Optional[str] = None,
+                 code: Any = "invalid_value") -> None:
         # Split input type
         prefix = params.split("_")[0] if prefix is None else prefix
         # Inherit

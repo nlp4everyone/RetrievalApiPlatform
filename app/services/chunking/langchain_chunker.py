@@ -15,7 +15,8 @@ from app.schemas.chunking import (ChunkingStrategy,
 class LangchainChunkingService:
     """Service for splitting text into chunks."""
     
-    def __init__(self, config: Optional[LangchainChunkingConfig] = None):
+    def __init__(self, 
+                 config: Optional[LangchainChunkingConfig] = None) -> None:
         """Initialize with optional configuration.
         
         Args:

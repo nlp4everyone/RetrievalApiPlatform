@@ -12,7 +12,8 @@ from app.schemas.chunking import (ChunkingStrategy,
 class ChonkieChunkingService:
     """Service for splitting text into chunks using Chonkie's RecursiveChunker."""
     
-    def __init__(self, config: Optional[ChonkieChunkingConfig] = None):
+    def __init__(self, 
+                 config: Optional[ChonkieChunkingConfig] = None) -> None:
         """Initialize with optional configuration.
         
         Args:

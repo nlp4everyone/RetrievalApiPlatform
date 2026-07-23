@@ -1,3 +1,5 @@
+from typing import Any
+
 from minio import Minio
 from loggers import SystemLogger
 
@@ -7,7 +9,7 @@ class MinioService:
                  access_key :str,
                  secret_key :str,
                  secure :bool = False,
-                 **kwargs):
+                 **kwargs: Any) -> None:
         # Config
         self.__endpoint_url = endpoint_url
         self.__access_key = access_key

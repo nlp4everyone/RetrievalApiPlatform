@@ -1,12 +1,13 @@
 import os
 import yaml
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 
 class YamlConfigLoader:
     """Handles loading and accessing YAML configuration files."""
     
-    def __init__(self, config_path: str = None):
+    def __init__(self, 
+                 config_path: Optional[str] = None) -> None:
         """
         Initialize the YAML config loader.
         

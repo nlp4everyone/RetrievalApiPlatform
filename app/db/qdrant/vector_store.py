@@ -3,7 +3,7 @@ from qdrant_client import AsyncQdrantClient
 # LangChain Document
 from langchain_core.documents import Document
 # Other components
-from typing import Optional, List, Sequence, Literal, Union
+from typing import Any, Optional, List, Sequence, Literal, Union
 # Qdrant components
 from qdrant_client import models
 # Embedding type
@@ -53,7 +53,7 @@ class AsyncQdrantVectorStore:
         self._collection_name = collection_name
 
     async def _create_collection(self,
-                                 dense_vectors_config: Union[models.VectorParams, dict],
+                                 dense_vectors_config: Union[models.VectorParams, dict[str, models.VectorParams]],
                                  sparse_vectors_config: Optional[dict[str, models.SparseVectorParams]] = None,
                                  shard_number: int = 2,
                                  quantization_mode: Literal['binary', 'scalar', 'product', 'none'] = "scalar",
@@ -116,7 +116,7 @@ class AsyncQdrantVectorStore:
             raise Exception(f"Failed to delete collection {self._collection_name}: {str(e)}")
 
     @staticmethod
-    def _convert_documents_to_payloads(documents: Sequence[Document]) -> list[dict]:
+    def _convert_documents_to_payloads(documents: Sequence[Document]) -> list[dict[str, Any]]:
         """
         Construct Qdrant payloads from LangChain Document objects.
 
@@ -129,7 +129,7 @@ class AsyncQdrantVectorStore:
         if not documents:
             raise ValueError("Documents list is empty")
 
-        payloads: list[dict] = []
+        payloads: list[dict[str, Any]] = []
 
         for doc in documents:
             payloads.append({
@@ -145,7 +145,7 @@ class AsyncQdrantVectorStore:
                                    model: str,
                                    distance: models.Distance,
                                    on_disk: bool,
-                                   datatype: models.Datatype = models.Datatype.FLOAT16) -> dict:
+                                   datatype: models.Datatype = models.Datatype.FLOAT16) -> dict[str, models.VectorParams]:
         """
         Generate configuration for dense vector storage in Qdrant.
 
@@ -181,7 +181,7 @@ class AsyncQdrantVectorStore:
 
     @staticmethod
     def _get_quantization_config(quantization_mode: Literal['binary', 'scalar', 'product', 'none'] = "scalar",
-                                 always_ram: bool = True):
+                                 always_ram: bool = True) -> Union[models.ScalarQuantization, models.BinaryQuantization, models.ProductQuantization]:
         """
         Get quantization config with mode
         :param quantization_mode: Include scalar, binary and product.
@@ -205,7 +205,7 @@ class AsyncQdrantVectorStore:
                 binary=models.BinaryQuantizationConfig(
                     always_ram=always_ram,
                 ),
-            ),
+            )
         else:
             # Product quantization mode
             quantization_config = models.ProductQuantization(
@@ -218,7 +218,7 @@ class AsyncQdrantVectorStore:
 
     async def _insert_points(self,
                            dense_embeddings: list[list[float]],
-                           payloads: list[dict],
+                           payloads: list[dict[str, Any]],
                            embedding_model_name: str,
                            point_ids: Optional[list[str]] = None,
                            batch_size: int = 16,
@@ -269,7 +269,7 @@ class AsyncQdrantVectorStore:
 
     async def insert_documents(self,
                                documents: Sequence[Document],
-                               embeddings: Optional[List[Embedding]],
+                               embeddings: List[Embedding],
                                upload_batch_size: int = 16,
                                upload_parallel: int = 1) -> None:
         """

@@ -8,7 +8,7 @@ class FileSizeLimitExceededException(AppBaseException):
                  current_size :Union[int,float],
                  type: str = "invalid_request_error",
                  params: Any = None,
-                 code: Any = None):
+                 code: Any = None) -> None:
         super().__init__(status_code = status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                          response = BaseResponse(message = f"File too large. Maximum allowed size is {max_size} MB, got {current_size:.2f} MB.",
                                                  type = type,
@@ -20,7 +20,7 @@ class FileNotFoundException(AppBaseException):
                  file_id :str,
                  type: str = "invalid_request_error",
                  params: Any = "id",
-                 code: Any = None):
+                 code: Any = None) -> None:
         super().__init__(status_code = status.HTTP_404_NOT_FOUND,
                          response = BaseResponse(message = f"No such File object: {file_id}",
                                                  type = type,

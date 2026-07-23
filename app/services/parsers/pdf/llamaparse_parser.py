@@ -10,7 +10,7 @@ from llama_cloud_services.parse.utils import ResultType
 # Utils
 from app.utils.io import async_temp_file
 # Typing
-from typing import List
+from typing import Any, List
 
 # Validate API key availability at import time
 # This ensures configuration issues are caught early
@@ -24,7 +24,7 @@ class LlamaParseParser(BaseTextParser):
                  num_worker :int = 1,
                  result_type :ResultType = ResultType.MD,
                  verbose :bool = True,
-                 **kwargs):
+                 **kwargs: Any) -> None:
         """Initialize the LlamaParse PDF parser.
         
         Args:

@@ -10,7 +10,7 @@ from app.core.tracing import traced_span
 
 
 async def embed_and_insert_batch(qdrant_vector_store: AsyncQdrantVectorStore,
-                                 batch_texts: list,
+                                 batch_texts: list[str],
                                  source_file_id: str,
                                  vectorstore_id: str) -> int:
     """Embed one batch of chunks and upsert it to Qdrant."""
@@ -42,7 +42,7 @@ async def embed_and_insert_batch(qdrant_vector_store: AsyncQdrantVectorStore,
 
 async def embed_and_insert_batch_bounded(semaphore: asyncio.Semaphore,
                                          qdrant_vector_store: AsyncQdrantVectorStore,
-                                         batch_texts: list,
+                                         batch_texts: list[str],
                                          source_file_id: str,
                                          vectorstore_id: str) -> int:
     """Same as embed_and_insert_batch, capped by a concurrency semaphore."""
@@ -51,7 +51,7 @@ async def embed_and_insert_batch_bounded(semaphore: asyncio.Semaphore,
 
 
 async def embed_and_upload_chunks(qdrant_vector_store: AsyncQdrantVectorStore,
-                                  chunked_texts: list,
+                                  chunked_texts: list[str],
                                   source_file_id: str,
                                   vectorstore_id: str,
                                   api_key: str) -> int:

@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Any, Optional
 from datetime import datetime, timedelta
 from fastapi import UploadFile, HTTPException, status
 import asyncpg, socket
@@ -255,7 +255,7 @@ class FileService:
     
     @staticmethod
     async def delete_file(file_id: str,
-                          api_key: str):
+                          api_key: str) -> dict[str, Any]:
         """
         Delete a file from both PostgreSQL metadata and MinIO storage.
         

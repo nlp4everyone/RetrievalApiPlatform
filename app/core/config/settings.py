@@ -63,25 +63,25 @@ class Settings(BaseSettings):
     
     @field_validator('API_VERSION')
     @classmethod
-    def validate_api_version(cls, v):
+    def validate_api_version(cls, v: str) -> str:
         """Validate API version format."""
         if not v.startswith('v'):
             raise ValueError(f'API version must start with "v", got: {v}')
         return v
-    
+
     @field_validator('NUM_WORKERS', 'POSTGRES_PORT', 'MINIO_API_PORT', 'MINIO_CONSOLE_PORT',
                     'QDRANT_PORT', 'REDIS_PORT', 'FASTAPI_PORT')
     @classmethod
-    def validate_positive_ports(cls, v):
+    def validate_positive_ports(cls, v: int) -> int:
         """Validate that port numbers are positive."""
         if v <= 0:
             raise ValueError(f'Port must be positive, got: {v}')
         return v
-    
+
     @field_validator('SERVING_API_KEY', 'FASTAPI_API_KEY', 'POSTGRES_PASSWORD',
                     'MINIO_ROOT_PASSWORD', 'QDRANT_API_KEY', 'LANGFUSE_SECRET_KEY')
     @classmethod
-    def validate_required_secrets(cls, v):
+    def validate_required_secrets(cls, v: str) -> str:
         """Validate that required secrets are not empty."""
         if not v or v.strip() == "":
             raise ValueError('Required secret cannot be empty')
@@ -89,7 +89,7 @@ class Settings(BaseSettings):
 
     @field_validator('LOG_LEVEL')
     @classmethod
-    def validate_log_level(cls, v):
+    def validate_log_level(cls, v: str) -> str:
         """Validate that log level is one supported by loguru."""
         allowed = {"TRACE", "DEBUG", "INFO", "SUCCESS", "WARNING", "ERROR", "CRITICAL"}
         normalized = v.upper()
@@ -99,7 +99,7 @@ class Settings(BaseSettings):
 
     @field_validator('LOG_FORMAT')
     @classmethod
-    def validate_log_format(cls, v):
+    def validate_log_format(cls, v: str) -> str:
         """Validate that log format is a supported mode."""
         allowed = {"auto", "console", "json"}
         normalized = v.lower()

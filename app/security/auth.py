@@ -1,6 +1,8 @@
 # FastAPI Components
 from fastapi import Depends
 from fastapi.security import APIKeyHeader
+# Typing
+from typing import Optional
 # Config
 from app.core.config import FASTAPI_API_KEY
 from app.exceptions.auth import *
@@ -8,7 +10,7 @@ from app.exceptions.auth import *
 api_key_header = APIKeyHeader(name = "Authorization", auto_error=False)
 
 # Verify function
-def verify_api_key(api_key: str = Depends(api_key_header)):
+def verify_api_key(api_key: Optional[str] = Depends(api_key_header)) -> str:
     # Validate Authorization header
     if not api_key or not api_key.startswith("Bearer "):
         raise BearerMissingException()

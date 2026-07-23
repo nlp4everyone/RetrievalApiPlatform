@@ -1,5 +1,5 @@
 # Typing
-from typing import List, Dict, Sequence, Any
+from typing import List, Dict, Optional, Sequence, Any
 from datetime import datetime
 # Exceptions
 from app.exceptions.file import FileNotFoundException
@@ -31,9 +31,9 @@ class PostgresFileStore:
                           bytes: int,
                           purpose: str,
                           created_at: datetime,
-                          expires_at: datetime = None,
-                          content_type: str = None,
-                          metadata: dict = None):
+                          expires_at: Optional[datetime] = None,
+                          content_type: Optional[str] = None,
+                          metadata: Optional[Dict[str, Any]] = None) -> None:
         """
         Insert a new file record into the database.
         
@@ -80,10 +80,10 @@ class PostgresFileStore:
     @staticmethod
     async def list_files(pool: asyncpg.Pool,
                          api_key: str,
-                         after: str = None,
+                         after: Optional[str] = None,
                          limit: int = 10000,
                          order: str = "desc",
-                         purpose: str = None):
+                         purpose: Optional[str] = None) -> List[Dict[str, Any]]:
         """
         List files for an API key with optional pagination and filtering.
         
@@ -170,7 +170,7 @@ class PostgresFileStore:
 
     @staticmethod
     async def get_file_by_id(pool: asyncpg.Pool,
-                             file_id: str) -> dict:
+                             file_id: str) -> Dict[str, Any]:
         """
         Retrieve a single file by its ID.
         
@@ -202,7 +202,7 @@ class PostgresFileStore:
     @staticmethod
     async def delete_file_by_id(pool: asyncpg.Pool,
                                 file_id: str,
-                                api_key: str) -> dict:
+                                api_key: str) -> Dict[str, Any]:
         """
         Delete a file by its ID and API key.
         
@@ -266,7 +266,7 @@ class PostgresFileStore:
 
     @staticmethod
     async def get_metadata_for_files(pool: asyncpg.Pool,
-                                     file_ids: Sequence[str]) -> List[Dict]:
+                                     file_ids: Sequence[str]) -> List[Dict[str, Any]]:
         """
         Retrieve metadata for multiple files by their IDs.
         
@@ -297,7 +297,8 @@ class PostgresFileStore:
                 return [PostgresFileStore._parse_json_field(row["metadata"]) for row in rows if row["metadata"] is not None]
 
     @staticmethod
-    async def get_total_bytes(pool: asyncpg.Pool, file_ids: [str]) -> int:
+    async def get_total_bytes(pool: asyncpg.Pool, 
+                              file_ids: Sequence[str]) -> int:
         """
         Calculate the total storage size for the given list of file IDs.
         

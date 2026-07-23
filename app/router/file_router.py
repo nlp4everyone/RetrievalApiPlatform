@@ -23,7 +23,7 @@ async def upload_file(purpose: FilePurposes = Form(..., description="The intende
                       file: UploadFile = Depends(validate_file),
                       expires_after_anchor: Optional[str] = Form(None, alias="expires_after[anchor]", description="Anchor point for expiration time calculation"),
                       expires_after_seconds: Optional[int] = Form(None, alias="expires_after[seconds]", description="Number of seconds after which the file will expire"),
-                      api_key: str = Depends(verify_api_key)):
+                      api_key: str = Depends(verify_api_key)) -> FileObject:
     """
     ## Upload a file that can be used across various endpoints.
 
@@ -40,7 +40,7 @@ async def upload_file(purpose: FilePurposes = Form(..., description="The intende
 
 @file_router.get("/files", response_model = FileListResponse)
 async def list_files(query: FileQueryRequest = Depends(),
-                     api_key: str = Depends(verify_api_key)):
+                     api_key: str = Depends(verify_api_key)) -> FileListResponse:
     """
     ## Returns a list of files.
 

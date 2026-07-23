@@ -177,7 +177,7 @@ def get_qdrant_service() -> QdrantService:
     """
     return qdrant_service
 
-async def wait_for_postgres(create_pool_func,
+async def wait_for_postgres(pool: asyncpg.Pool,
                             retries: int = 5,
                             delay: float = 0.5) -> None:
     """
@@ -187,7 +187,7 @@ async def wait_for_postgres(create_pool_func,
     retry logic and exponential backoff.
 
     Args:
-        create_pool_func: Async function to create the connection pool
+        pool: The PostgreSQL connection pool to wait on
         retries (int): Maximum number of connection attempts (default: 5)
         delay (float): Delay between retries in seconds (default: 0.5)
 
@@ -198,7 +198,7 @@ async def wait_for_postgres(create_pool_func,
     last_exc = None
     for attempt in range(1, retries + 1):
         try:
-            await create_pool_func
+            await pool
             SystemLogger.success(f"[STARTUP] PostgreSQL connection established (attempt {attempt}/{retries})")
             return
         except (ConnectionRefusedError, PostgresError) as e:

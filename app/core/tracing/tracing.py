@@ -6,7 +6,7 @@ lives only here, so pointing the app at a different OTLP-compatible backend
 """
 import base64
 from contextlib import contextmanager
-from typing import Iterator, Optional
+from typing import Any, Iterator, Optional
 
 from opentelemetry import trace
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
@@ -51,7 +51,7 @@ def _get_tracer() -> trace.Tracer:
 
 
 @contextmanager
-def traced_span(name: str, attributes: Optional[dict] = None) -> Iterator[Span]:
+def traced_span(name: str, attributes: Optional[dict[str, Any]] = None) -> Iterator[Span]:
     """Start a span; records exceptions and sets OK/ERROR status on exit."""
     with _get_tracer().start_as_current_span(name, attributes=attributes or {}) as span:
         try:

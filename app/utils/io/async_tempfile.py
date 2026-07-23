@@ -1,11 +1,12 @@
 from contextlib import asynccontextmanager
+from typing import AsyncIterator
 # Other components
 import tempfile, aiofiles, os
 
 @asynccontextmanager
 async def async_temp_file(file_bytes: bytes,
                           *,
-                          suffix: str = ""):
+                          suffix: str = "") -> AsyncIterator[str]:
     """
     Create an async context manager for temporary file handling.
     

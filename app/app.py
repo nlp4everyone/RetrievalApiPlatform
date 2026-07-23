@@ -89,13 +89,13 @@ app.include_router(vector_store_router,
 app.add_exception_handler(AppBaseException, common_exception_handler)
 
 @app.get("/health", include_in_schema=False)
-async def health():
+async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 # Application Startup Event
 # Initializes all required services and dependencies
 @app.on_event("startup")
-async def startup_event():
+async def startup_event() -> None:
     SystemLogger.info("[APP] Starting application warm up...")
     
     # Validate configuration at startup

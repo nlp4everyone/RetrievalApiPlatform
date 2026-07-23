@@ -1,3 +1,5 @@
+from typing import Any
+
 import asyncpg
 # Import schema and index
 from .schema.database_schema import *
@@ -21,7 +23,7 @@ class PostgresClient:
                  host :str,
                  port :int = 5432,
                  min_size :int = 5,
-                 max_size :int = 10):
+                 max_size :int = 10) -> None:
         """
         Initialize PostgreSQL client with connection parameters.
 
@@ -47,7 +49,7 @@ class PostgresClient:
         self._pool = None
 
     async def _create_pool(self,
-                           **kwargs) -> asyncpg.Pool:
+                           **kwargs: Any) -> asyncpg.Pool:
         """
         Create and initialize the asyncpg connection pool.
 
@@ -82,7 +84,7 @@ class PostgresClient:
         """
         return self._pool
 
-    async def close(self):
+    async def close(self) -> None:
         """
         Close the connection pool and clean up resources.
 
@@ -91,7 +93,7 @@ class PostgresClient:
         if self._pool:
             await self._pool.close()
 
-    async def _create_table(self):
+    async def _create_table(self) -> None:
         """
         Create all necessary database tables and indexes.
 

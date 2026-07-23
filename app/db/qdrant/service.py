@@ -1,7 +1,7 @@
 # Qdrant
 from qdrant_client import AsyncQdrantClient
 # Typing
-from typing import Optional
+from typing import Any, Optional
 
 class QdrantService:
     def __init__(
@@ -9,8 +9,8 @@ class QdrantService:
         url: str = "http://localhost:6333",
         api_key: Optional[str] = None,
         timeout: float = 10.0,
-        **kwargs,
-    ):
+        **kwargs: Any,
+    ) -> None:
         # Config
         self.__url = url
         self.__api_key = api_key

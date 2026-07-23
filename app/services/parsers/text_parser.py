@@ -2,8 +2,10 @@ from .base import BaseTextParser
 from concurrent.futures import ThreadPoolExecutor
 import asyncio
 
-class TextParser(BaseTextParser):
-    def __init__(self, encoding: str = "utf-8"):
+class TextParser:
+    """Synchronous decoder used internally by AsyncTextParser; not a BaseTextParser."""
+
+    def __init__(self, encoding: str = "utf-8") -> None:
         self.encoding = encoding
 
     def parse(self, file_bytes: bytes) -> str:
@@ -11,7 +13,7 @@ class TextParser(BaseTextParser):
 
 
 class AsyncTextParser(BaseTextParser):
-    def __init__(self, max_workers: int = 4):
+    def __init__(self, max_workers: int = 4) -> None:
         self.executor = ThreadPoolExecutor(max_workers=max_workers)
         # Parser
         self._parser = TextParser()
