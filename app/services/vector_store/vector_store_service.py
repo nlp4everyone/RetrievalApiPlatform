@@ -501,45 +501,36 @@ class VectorStoreService:
             api_key=api_key
         )
 
+        # TODO: filters not applied yet - _normalize_qdrant_filter is not implemented.
+        qdrant_filter = None
+        # if search_request.filters:
+        #     qdrant_filter = _normalize_qdrant_filter(search_request.filters)
+
+        # TODO: not passed into retrieve() below - ranking_options has no effect yet.
+        search_params = models.SearchParams(
+            quantization=models.QuantizationSearchParams(
+                ignore=search_request.ranking_options.ranker == "none" if search_request.ranking_options else False,
+                rescore=search_request.ranking_options.ranker == "auto" if search_request.ranking_options else True,
+            )
+        ) if search_request.ranking_options else None
+
         try:
-            with traced_span(
-                f"/v1/vector_stores/{vector_store_id}/search",
-                attributes={
-                    "db.system": "qdrant",
-                    "db.collection.name": vector_store_id,
-                    "vector_store.api_key": api_key,
-                    "vector_store.max_num_results": search_request.max_num_results,
-                },
-            ):
-                qdrant_vector_store = AsyncQdrantVectorStore(
-                    collection_name=vector_store_id,
-                    client=qdrant_service.client
-                )
+            with traced_span(name=f"/v1/vector_stores/{vector_store_id}/search",
+                             attributes={"langfuse.user.id": api_key,
+                                         "langfuse.trace.tags": ["vector_store_search"],
+                                         "langfuse.trace.metadata.vector_store_id": vector_store_id,
+                                         "langfuse.trace.input": json.dumps({
+                                             "query": search_request.query,
+                                             "max_num_results": search_request.max_num_results})}) as search_span:
 
-                # Convert filters to Qdrant format if provided
-                qdrant_filter = None
-                # if search_request.filters:
-                #     qdrant_filter = _normalize_qdrant_filter(search_request.filters)
-
-                # Prepare search parameters
-                search_params = models.SearchParams(
-                    quantization=models.QuantizationSearchParams(
-                        ignore=search_request.ranking_options.ranker == "none" if search_request.ranking_options else False,
-                        rescore=search_request.ranking_options.ranker == "auto" if search_request.ranking_options else True,
-                    )
-                ) if search_request.ranking_options else None
-
-                # Normalize query to list format - handle both single string and list inputs
+                # NOTE: only the first query is used when a list is given.
                 queries = [search_request.query] if isinstance(search_request.query, str) else search_request.query[:1]
 
                 # Embedding span
-                with traced_span(
-                    "embedding",
-                    attributes={
-                        "gen_ai.request.model": DENSE_MODEL_NAME,
-                        "embedding.queries_batch_size": len(queries),
-                    },
-                ) as embed_span:
+                with traced_span(name="embedding",
+                                 attributes={"langfuse.observation.type": "embedding",
+                                             "langfuse.observation.input": json.dumps({
+                                                 "query": search_request.query})}) as embed_span:
                     # Embed the queries
                     queries_vectors = await get_dense_embedding(queries)
                     # Define embedding dims
@@ -547,22 +538,20 @@ class VectorStoreService:
                     embedding_batch_size = len(queries_vectors)
                     # Set output attributes
                     embed_span.set_attribute("embedding.batch_size", embedding_batch_size)
+                    embed_span.set_attribute("embedding.model", DENSE_MODEL_NAME)
                     embed_span.set_attribute("embedding.dims", embedding_dims)
 
                 # Retrieval span
-                with traced_span(
-                    "retrieve",
-                    attributes={
-                        "db.operation": "query_points",
-                        "embedding.batch_size": embedding_batch_size,
-                        "embedding.dims": embedding_dims,
-                        "vector_store.max_num_results": search_request.max_num_results,
-                    },
-                ) as retrieve_span:
+                with traced_span(name="retrieve",
+                                 attributes={"langfuse.observation.type": "retriever",
+                                             "langfuse.observation.metadata.vector_store_id": vector_store_id,
+                                             "langfuse.observation.metadata.max_num_results": search_request.max_num_results}) as retrieve_span:
                     # Check if vector store collection exists in Qdrant
                     vector_store_existence = await qdrant_service.client.collection_exists(
                         collection_name=vector_store_id
                     )
+                    retrieve_span.set_attribute("langfuse.observation.metadata.collection_exists", vector_store_existence)
+                    retrieve_span.set_attribute("embedding.dims", embedding_dims)
 
                     # Handle case when vector store doesn't exist
                     if not vector_store_existence:
@@ -573,6 +562,11 @@ class VectorStoreService:
                         retrieve_span.add_event("vector_store_collection_not_found")
                     else:
                         # Vector store exists - perform search
+                        qdrant_vector_store = AsyncQdrantVectorStore(
+                            collection_name=vector_store_id,
+                            client=qdrant_service.client
+                        )
+                        # TODO: pass search_params/score_threshold once wired (see TODO above)
                         retrieved_results = await qdrant_vector_store.retrieve(
                             query_vectors=queries_vectors,
                             query_filter=qdrant_filter,
