@@ -1,5 +1,5 @@
 # Import types
-from .types import VectorStoreType
+from .types import SearchType, VectorStoreType
 
 # Import request models
 from .requests import (
@@ -26,6 +26,7 @@ from .responses import (
 __all__ = [
     # Types
     'VectorStoreType',
+    'SearchType',
     
     # Request models
     'VectorStoreCreateRequest',
