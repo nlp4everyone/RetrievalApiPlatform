@@ -26,6 +26,10 @@ class Settings(BaseSettings):
     # External API Keys
     UNDATASIO_API_KEY: Optional[str] = Field(None, description="Undatasio API key")
     LLAMAPARSE_API_KEY: Optional[str] = Field(None, description="LlamaParse API key")
+
+    # Parsing provider selection for PDFs. Plain-text formats always use the
+    # in-process decoder, so only PDF has a backend worth choosing.
+    PDF_PARSER_PROVIDER: str = "llamaparse"
     
     # Model Config
     DENSE_MODEL_NAME: str = "Qwen/Qwen3-Embedding-0.6B"
@@ -36,6 +40,9 @@ class Settings(BaseSettings):
     EMBEDDING_PROVIDER: str = "openai"
     TEI_EMBEDDING_URL: str = "http://localhost:8100"
     TEI_API_KEY: Optional[str] = Field(None, description="API key for the TEI embedding service")
+
+    # Chunking provider selection: "chonkie" or "langchain"
+    CHUNKING_PROVIDER: str = "chonkie"
     
     # Postgres Config
     POSTGRES_USER: str = Field(..., description="PostgreSQL username")
@@ -51,10 +58,19 @@ class Settings(BaseSettings):
     MINIO_API_PORT: int = 9000
     MINIO_CONSOLE_PORT: int = 9001
 
+    # Vector store provider selection: "qdrant" or "milvus" (milvus not implemented yet).
+    # Only affects newly created vector stores - existing ones are read back with
+    # the provider recorded on their database row.
+    VECTOR_STORE_PROVIDER: str = "qdrant"
+
     # Qdrant Config
     QDRANT_URL: str = Field(..., description="Qdrant server URL")
     QDRANT_API_KEY: str = Field(..., description="Qdrant API key")
     QDRANT_PORT: int = 6333
+
+    # Milvus Config (unused until the Milvus backend is implemented)
+    MILVUS_URI: str = "http://localhost:19530"
+    MILVUS_TOKEN: Optional[str] = Field(None, description="Milvus auth token")
 
     # Langfuse Config (tracing, exported via OpenTelemetry OTLP)
     LANGFUSE_PUBLIC_KEY: str = Field(..., description="Langfuse public key")
@@ -111,6 +127,36 @@ class Settings(BaseSettings):
         normalized = v.lower()
         if normalized not in allowed:
             raise ValueError(f'EMBEDDING_PROVIDER must be one of {sorted(allowed)}, got: {v}')
+        return normalized
+
+    @field_validator('CHUNKING_PROVIDER')
+    @classmethod
+    def validate_chunking_provider(cls, v: str) -> str:
+        """Validate that the chunking provider is one this app knows how to build."""
+        allowed = {"chonkie", "langchain"}
+        normalized = v.lower()
+        if normalized not in allowed:
+            raise ValueError(f'CHUNKING_PROVIDER must be one of {sorted(allowed)}, got: {v}')
+        return normalized
+
+    @field_validator('PDF_PARSER_PROVIDER')
+    @classmethod
+    def validate_pdf_parser_provider(cls, v: str) -> str:
+        """Validate that the PDF parser provider is one this app knows how to build."""
+        allowed = {"llamaparse"}
+        normalized = v.lower()
+        if normalized not in allowed:
+            raise ValueError(f'PDF_PARSER_PROVIDER must be one of {sorted(allowed)}, got: {v}')
+        return normalized
+
+    @field_validator('VECTOR_STORE_PROVIDER')
+    @classmethod
+    def validate_vector_store_provider(cls, v: str) -> str:
+        """Validate that the vector store provider is one this app knows how to build."""
+        allowed = {"qdrant", "milvus"}
+        normalized = v.lower()
+        if normalized not in allowed:
+            raise ValueError(f'VECTOR_STORE_PROVIDER must be one of {sorted(allowed)}, got: {v}')
         return normalized
 
     @field_validator('LOG_FORMAT')

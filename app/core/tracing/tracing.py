@@ -16,6 +16,7 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.trace import Span, Status, StatusCode
 
 from app.core.config import LANGFUSE_BASE_URL, LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY
+from app.core.tracing.propagation import TraceCarrier, extract_trace_context
 
 _SERVICE_NAME = "retrieval_service"
 _tracer: Optional[trace.Tracer] = None
@@ -50,10 +51,40 @@ def _get_tracer() -> trace.Tracer:
     return _tracer
 
 
+def set_span_attributes(span: Span, attributes: Optional[dict[str, Any]]) -> None:
+    """Set several attributes at once, skipping None values.
+
+    OpenTelemetry rejects None attribute values, and callers that report
+    optional metrics would otherwise need a guard around every one of them.
+
+    Args:
+        span: Span to annotate
+        attributes: Attribute names mapped to values; None values are dropped
+    """
+    if not attributes:
+        return
+    for key, value in attributes.items():
+        if value is not None:
+            span.set_attribute(key, value)
+
+
 @contextmanager
-def traced_span(name: str, attributes: Optional[dict[str, Any]] = None) -> Iterator[Span]:
-    """Start a span; records exceptions and sets OK/ERROR status on exit."""
-    with _get_tracer().start_as_current_span(name, attributes=attributes or {}) as span:
+def traced_span(name: str,
+                attributes: Optional[dict[str, Any]] = None,
+                parent_carrier: Optional[TraceCarrier] = None) -> Iterator[Span]:
+    """Start a span; records exceptions and sets OK/ERROR status on exit.
+
+    Args:
+        name: Span name, shown as the observation name in Langfuse
+        attributes: Attributes set when the span opens
+        parent_carrier: W3C trace context from another process. When given, the
+            span joins that trace instead of starting a new one - used by the
+            TaskIQ worker to attach ingestion to the HTTP request that queued it.
+    """
+    parent_context = extract_trace_context(parent_carrier)
+    with _get_tracer().start_as_current_span(name,
+                                             context=parent_context,
+                                             attributes=attributes or {}) as span:
         try:
             yield span
             span.set_status(Status(StatusCode.OK))

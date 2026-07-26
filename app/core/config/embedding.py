@@ -10,6 +10,9 @@ EMBEDDING_UPLOAD_BATCH_SIZE = embedding_config.get("upload_batch_size")
 # Batches allowed to run concurrently - peak memory stays ~SIZE * CONCURRENCY, not file-sized
 EMBEDDING_BATCH_CONCURRENCY = embedding_config.get("batch_concurrency")
 
+# Chunking provider selection ("chonkie" or "langchain")
+CHUNKING_PROVIDER = settings.CHUNKING_PROVIDER
+
 # Embedding provider selection ("openai" or "tei") and TEI-specific connection config
 EMBEDDING_PROVIDER = settings.EMBEDDING_PROVIDER
 TEI_EMBEDDING_URL = settings.TEI_EMBEDDING_URL

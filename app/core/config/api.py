@@ -9,3 +9,6 @@ FASTAPI_API_KEY = settings.FASTAPI_API_KEY
 # External API Keys
 UNDATASIO_API_KEY = settings.UNDATASIO_API_KEY
 LLAMAPARSE_API_KEY = settings.LLAMAPARSE_API_KEY
+
+# Parsing provider selection ("llamaparse")
+PDF_PARSER_PROVIDER = settings.PDF_PARSER_PROVIDER
