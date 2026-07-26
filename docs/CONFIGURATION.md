@@ -24,6 +24,9 @@ Required settings (no default — startup fails fast if missing/empty): `SERVING
 | `LOG_LEVEL` | `INFO` | `TRACE`\|`DEBUG`\|`INFO`\|`SUCCESS`\|`WARNING`\|`ERROR`\|`CRITICAL` |
 | `LOG_FORMAT` | `auto` | `auto` (detect TTY) \| `console` (colorized) \| `json` (structured, for Docker/prod) |
 | `VLLM_DENSE_EMBEDDING_URL` | `http://172.17.0.1:8100/v1` | OpenAI-compatible embedding endpoint (e.g. vLLM serving the dense model) |
+| `EMBEDDING_PROVIDER` | `openai` | `openai` (OpenAI-compatible endpoint, `VLLM_DENSE_EMBEDDING_URL`) \| `tei` (raw HTTP request to a Text Embeddings Inference `/embed` endpoint, `TEI_EMBEDDING_URL`) |
+| `TEI_EMBEDDING_URL` | `http://localhost:8100` | Base URL of the TEI embedding service; used only when `EMBEDDING_PROVIDER=tei` |
+| `TEI_API_KEY` | — | Bearer token for the TEI embedding service; used only when `EMBEDDING_PROVIDER=tei` |
 | `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` / `POSTGRES_HOST` | — (required) | Postgres connection |
 | `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` | — (required) | MinIO credentials |
 | `MINIO_ENDPOINT_URL` | — (required) | MinIO endpoint, e.g. `http://minio:9000` |

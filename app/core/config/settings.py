@@ -30,6 +30,12 @@ class Settings(BaseSettings):
     # Model Config
     DENSE_MODEL_NAME: str = "Qwen/Qwen3-Embedding-0.6B"
     VLLM_DENSE_EMBEDDING_URL: str = "http://172.17.0.1:8100/v1"
+
+    # Embedding provider selection: "openai" (OpenAI-compatible endpoint, e.g. vLLM)
+    # or "tei" (raw HTTP request to a Text Embeddings Inference /embed endpoint)
+    EMBEDDING_PROVIDER: str = "openai"
+    TEI_EMBEDDING_URL: str = "http://localhost:8100"
+    TEI_API_KEY: Optional[str] = Field(None, description="API key for the TEI embedding service")
     
     # Postgres Config
     POSTGRES_USER: str = Field(..., description="PostgreSQL username")
@@ -95,6 +101,16 @@ class Settings(BaseSettings):
         normalized = v.upper()
         if normalized not in allowed:
             raise ValueError(f'LOG_LEVEL must be one of {sorted(allowed)}, got: {v}')
+        return normalized
+
+    @field_validator('EMBEDDING_PROVIDER')
+    @classmethod
+    def validate_embedding_provider(cls, v: str) -> str:
+        """Validate that the embedding provider is one this app knows how to build."""
+        allowed = {"openai", "tei"}
+        normalized = v.lower()
+        if normalized not in allowed:
+            raise ValueError(f'EMBEDDING_PROVIDER must be one of {sorted(allowed)}, got: {v}')
         return normalized
 
     @field_validator('LOG_FORMAT')

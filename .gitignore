@@ -21,3 +21,5 @@ app/services/parsers/pdf/__pycache__/
 # uv
 .uv_cache
 requirements/
+
+.claude
