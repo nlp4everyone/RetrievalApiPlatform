@@ -8,18 +8,17 @@ from app.schemas.vector_store import *
 from app.schemas.vector_store.requests import *
 from app.schemas.vector_store.responses import *
 from app.schemas.file.types import UploadingStatus
+from app.schemas.vector_store.types import SearchType
 
 # DB
 from app.db.postgres import PostgresVectorStore
-from app.db.qdrant import AsyncQdrantVectorStore
-from app.startup import get_postgres_pool, get_qdrant_service, get_dense_embedding
-
-# Config
-from app.core.config import DENSE_MODEL_NAME
+from app.db.vector_store import VectorStoreFactory
+from app.startup import get_postgres_pool, get_dense_embedding
 
 # Helper
 from app.utils.key_generator import generate_vectorstore_id
-from app.utils.vector_store.utils import (convert_query_response_to_search_results,
+from app.utils.vector_store.utils import (convert_retrieved_chunks_to_search_results,
+                                          normalize_search_filter,
                                           validate_vector_store_prefix)
 from app.utils.datetime_utils import convert_to_unix_timestamp
 
@@ -36,11 +35,20 @@ from app.core.request_context import request_id_ctx
 # TaskIQ worker
 from taskiq_worker import process_vector_store_files
 
-# Qdrant component
-from qdrant_client import models
+# Retrieval pipeline
+from app.pipelines.retrieval import RetrievalContext, build_retrieval_pipeline
 
 # Tracing
-from app.core.tracing import traced_span
+from app.core.tracing import (OBSERVATION_TYPE,
+                              ObservationType,
+                              TRACE_INPUT,
+                              TRACE_TAGS,
+                              TRACE_USER_ID,
+                              inject_trace_context,
+                              observation_metadata,
+                              set_span_attributes,
+                              traced_span,
+                              trace_metadata)
 
 
 class VectorStoreService:
@@ -150,88 +158,121 @@ class VectorStoreService:
         # Get PostgreSQL connection pool
         postgres_pool = get_postgres_pool()
 
+        # Backend new vector stores are created on
+        provider = VectorStoreFactory.default_provider()
+
         try:
-            # Calculate expiration time and policy if specified
-            expires_at = None
-            expires_after = None
-            if request.expires_after is not None:
-                # Convert days to seconds for storage
-                expires_after = timedelta(days=request.expires_after.days).total_seconds()
-                # Calculate absolute expiration timestamp
-                expires_at = created_at + timedelta(days=request.expires_after.days)
+            # Root span of the whole ingestion trace. Ingestion itself runs in the
+            # TaskIQ worker, which joins this trace via the injected trace context
+            # below - so the trace-level attributes have to be set here, on the
+            # root span, not in the worker where Langfuse would ignore them.
+            with traced_span(name="POST /v1/vector_stores",
+                             attributes={TRACE_USER_ID: api_key,
+                                         TRACE_TAGS: ["vector_store_ingestion"],
+                                         TRACE_INPUT: json.dumps({
+                                             "name": request.name,
+                                             "file_ids": request.file_ids}),
+                                         OBSERVATION_TYPE: ObservationType.SPAN,
+                                         **trace_metadata(vector_store_id=vectorstore_id,
+                                                          request_id=request_id_ctx.get(),
+                                                          vector_store_type=str(provider))}) as trace_span:
+                # Calculate expiration time and policy if specified
+                expires_at = None
+                expires_after = None
+                if request.expires_after is not None:
+                    # Convert days to seconds for storage
+                    expires_after = timedelta(days=request.expires_after.days).total_seconds()
+                    # Calculate absolute expiration timestamp
+                    expires_at = created_at + timedelta(days=request.expires_after.days)
 
-            # Count files that will be processed
-            nums_in_progress_file = 0
-            if request.file_ids is not None:
-                nums_in_progress_file = len(request.file_ids)
+                # Count files that will be processed
+                nums_in_progress_file = 0
+                if request.file_ids is not None:
+                    nums_in_progress_file = len(request.file_ids)
 
-            # Save vector store metadata to PostgreSQL database
-            record = await PostgresVectorStore.create(
-                pool=postgres_pool,
-                id=vectorstore_id,
-                api_key=api_key,
-                name=request.name,
-                description=request.description,
-                created_at=created_at,
-                last_active_at=created_at,
-                status=UploadingStatus.IN_PROGRESS,
-                usage_bytes=0,
-                metadata=request.metadata,
-                expires_at=expires_at,
-                expires_after=expires_after,
-                chunking_strategy=request.chunking_strategy.model_dump() if request.chunking_strategy else None,
-                vector_store_type=VectorStoreType.QDRANT
-            )
+                # Save vector store metadata to PostgreSQL database
+                with traced_span(name="create_record",
+                                 attributes={OBSERVATION_TYPE: ObservationType.SPAN}):
+                    record = await PostgresVectorStore.create(
+                        pool=postgres_pool,
+                        id=vectorstore_id,
+                        api_key=api_key,
+                        name=request.name,
+                        description=request.description,
+                        created_at=created_at,
+                        last_active_at=created_at,
+                        status=UploadingStatus.IN_PROGRESS,
+                        usage_bytes=0,
+                        metadata=request.metadata,
+                        expires_at=expires_at,
+                        expires_after=expires_after,
+                        chunking_strategy=request.chunking_strategy.model_dump() if request.chunking_strategy else None,
+                        vector_store_type=provider
+                    )
 
-            # Determine chunking strategy parameters
-            # Default to auto chunking if no strategy specified
-            if request.chunking_strategy is None:
-                chunking_strategy = "auto"
-                chunk_size = 800
-                chunk_overlap = 400
-            # Use static chunking parameters if specified
-            elif request.chunking_strategy.type == "static":
-                chunking_strategy = "static"
-                chunk_size = request.chunking_strategy.static.max_chunk_size_tokens
-                chunk_overlap = request.chunking_strategy.static.chunk_overlap_tokens
-            # Use fuse chunking as fallback
-            else:
-                chunking_strategy = "fuse"
-                chunk_size = 800
-                chunk_overlap = 400
+                # Determine chunking strategy parameters
+                # Default to auto chunking if no strategy specified
+                if request.chunking_strategy is None:
+                    chunking_strategy = "auto"
+                    chunk_size = 800
+                    chunk_overlap = 400
+                # Use static chunking parameters if specified
+                elif request.chunking_strategy.type == "static":
+                    chunking_strategy = "static"
+                    chunk_size = request.chunking_strategy.static.max_chunk_size_tokens
+                    chunk_overlap = request.chunking_strategy.static.chunk_overlap_tokens
+                # Use fuse chunking as fallback
+                else:
+                    chunking_strategy = "fuse"
+                    chunk_size = 800
+                    chunk_overlap = 400
 
-            # Start background processing of files using TaskIQ worker
-            await process_vector_store_files.kiq(
-                vectorstore_id=vectorstore_id,
-                api_key=api_key,
-                file_ids=request.file_ids,
-                chunking_strategy=chunking_strategy,
-                chunk_size=chunk_size,
-                chunk_overlap=chunk_overlap,
-                request_id=request_id_ctx.get()
-            )
+                # Start background processing of files using TaskIQ worker
+                with traced_span(name="enqueue_ingestion",
+                                 attributes={OBSERVATION_TYPE: ObservationType.SPAN,
+                                             **observation_metadata(chunking_strategy=chunking_strategy,
+                                                                    chunk_size=chunk_size,
+                                                                    num_files=nums_in_progress_file)}):
+                    await process_vector_store_files.kiq(
+                        vectorstore_id=vectorstore_id,
+                        api_key=api_key,
+                        file_ids=request.file_ids,
+                        chunking_strategy=chunking_strategy,
+                        chunk_size=chunk_size,
+                        chunk_overlap=chunk_overlap,
+                        request_id=request_id_ctx.get(),
+                        # Carries this trace into the worker process
+                        trace_context=inject_trace_context(),
+                        vector_store_type=str(provider)
+                    )
 
-            SystemLogger.info(f"Vector store created: {vectorstore_id} ({nums_in_progress_file} file(s) queued)")
+                SystemLogger.info(f"Vector store created: {vectorstore_id} ({nums_in_progress_file} file(s) queued)")
 
-            # Build and return response object
-            return VectorStoreObject(
-                id=vectorstore_id,
-                name=request.name,
-                created_at=convert_to_unix_timestamp(created_at),
-                last_active_at=convert_to_unix_timestamp(created_at),
-                expires_at=convert_to_unix_timestamp(record.get("expires_at")),
-                expires_after=VectorStoreExpiresAfter(
-                    days=timedelta(seconds=int(expires_after)).days,
-                    anchor="last_active_at"
-                ) if expires_after is not None else None,
-                file_counts=VectorStoreFileCounts(
-                    in_progress=nums_in_progress_file,
-                    total=nums_in_progress_file
-                ),
-                metadata=record.get("metadata"),
-                status="in_progress",
-                usage_bytes=0
-            )
+                set_span_attributes(trace_span, {
+                    "vector_store.id": vectorstore_id,
+                    "vector_store.type": str(provider),
+                    "vector_store.num_files_queued": nums_in_progress_file,
+                })
+
+                # Build and return response object
+                return VectorStoreObject(
+                    id=vectorstore_id,
+                    name=request.name,
+                    created_at=convert_to_unix_timestamp(created_at),
+                    last_active_at=convert_to_unix_timestamp(created_at),
+                    expires_at=convert_to_unix_timestamp(record.get("expires_at")),
+                    expires_after=VectorStoreExpiresAfter(
+                        days=timedelta(seconds=int(expires_after)).days,
+                        anchor="last_active_at"
+                    ) if expires_after is not None else None,
+                    file_counts=VectorStoreFileCounts(
+                        in_progress=nums_in_progress_file,
+                        total=nums_in_progress_file
+                    ),
+                    metadata=record.get("metadata"),
+                    status="in_progress",
+                    usage_bytes=0
+                )
         except (asyncpg.PostgresError, socket.gaierror) as e:
             SystemLogger.error(f"Postgres connection failed while creating vector store: {e}", exc_info=True)
             raise PostgresConnectionException()
@@ -422,10 +463,11 @@ class VectorStoreService:
         validate_vector_store_prefix(vector_store_id)
         
         postgres_pool = get_postgres_pool()
-        qdrant_service = get_qdrant_service()
 
-        # Check vector store existence
-        await PostgresVectorStore._check_vector_store_existence(
+        # Read the record (raises if missing) - its vector_store_type tells us
+        # which backend actually holds the collection, which may differ from the
+        # currently configured provider
+        record = await PostgresVectorStore.get_by_id(
             pool=postgres_pool,
             vector_store_id=vector_store_id,
             api_key=api_key
@@ -438,13 +480,13 @@ class VectorStoreService:
                 vector_store_id=vector_store_id,
                 api_key=api_key
             )
-            
-            # Delete the actual vector collection from Qdrant
-            qdrant_vector_store = AsyncQdrantVectorStore(
+
+            # Delete the actual vector collection from its backend
+            vector_store = VectorStoreFactory.get_store(
                 collection_name=vector_store_id,
-                client=qdrant_service.client
+                provider=record.get("vector_store_type")
             )
-            await qdrant_vector_store.delete_collection()
+            await vector_store.delete_collection()
 
             SystemLogger.info(f"Vector store deleted: {vector_store_id}")
 
@@ -469,126 +511,86 @@ class VectorStoreService:
     @staticmethod
     async def search(vector_store_id: str,
                      search_request: VectorStoreSearchRequest,
-                     api_key: str) -> VectorStoreSearchResponse:
+                     api_key: str,
+                     search_type: SearchType = SearchType.DENSE) -> VectorStoreSearchResponse:
         """
         Search a vector store for relevant chunks based on a query.
-        
-        This method handles the complete search workflow including MLflow tracing,
-        embedding generation, Qdrant retrieval, and result formatting.
-        
+
+        This method handles the complete search workflow including tracing,
+        embedding generation, vector store retrieval, and result formatting.
+
         Args:
             vector_store_id: ID of the vector store to search in
             search_request: Search request with query, filters, max_num_results, ranking_options
             api_key: API key for ownership validation
-            
+            search_type: How the query is answered - dense vector search by
+                default; keyword and hybrid become available once a BM25
+                retriever exists
+
         Returns:
             VectorStoreSearchResponse containing search results
-            
+
         Raises:
             PostgresConnectionException: If database connection fails
             HTTPException: If search operation fails
         """
         # Validate vector store id
         validate_vector_store_prefix(vector_store_id)
-        
-        qdrant_service = get_qdrant_service()
+
         postgres_pool = get_postgres_pool()
 
-        # Check vector store existence
-        await PostgresVectorStore._check_vector_store_existence(
+        # Read the record (raises if missing) - vector_store_type says which
+        # backend holds the collection
+        record = await PostgresVectorStore.get_by_id(
             pool=postgres_pool,
             vector_store_id=vector_store_id,
             api_key=api_key
         )
+        provider = record.get("vector_store_type")
 
-        # TODO: filters not applied yet - _normalize_qdrant_filter is not implemented.
-        qdrant_filter = None
-        # if search_request.filters:
-        #     qdrant_filter = _normalize_qdrant_filter(search_request.filters)
+        # Translate the request filter into the backend-neutral form; each
+        # backend renders it into its own filter language
+        neutral_filter = normalize_search_filter(search_request.filters)
 
-        # TODO: not passed into retrieve() below - ranking_options has no effect yet.
-        search_params = models.SearchParams(
-            quantization=models.QuantizationSearchParams(
-                ignore=search_request.ranking_options.ranker == "none" if search_request.ranking_options else False,
-                rescore=search_request.ranking_options.ranker == "auto" if search_request.ranking_options else True,
-            )
-        ) if search_request.ranking_options else None
+        # NOTE: only the first query is used when a list is given.
+        query = (search_request.query if isinstance(search_request.query, str)
+                 else search_request.query[0])
+
+        # TODO: ranking_options has no effect yet - quantization rescore and
+        # score_threshold still need to be surfaced on the vector store contract.
 
         try:
-            with traced_span(name=f"/v1/vector_stores/{vector_store_id}/search",
-                             attributes={"langfuse.user.id": api_key,
-                                         "langfuse.trace.tags": ["vector_store_search"],
-                                         "langfuse.trace.metadata.vector_store_id": vector_store_id,
-                                         "langfuse.trace.input": json.dumps({
+            # Root span of the search trace. The pipeline runs inside it and
+            # emits one observation per stage, so the trace-level attributes
+            # belong here, on the root span, where the api_key is known.
+            with traced_span(name=f"POST /v1/vector_stores/{vector_store_id}/search",
+                             attributes={TRACE_USER_ID: api_key,
+                                         TRACE_TAGS: ["vector_store_search"],
+                                         TRACE_INPUT: json.dumps({
                                              "query": search_request.query,
-                                             "max_num_results": search_request.max_num_results})}) as search_span:
-                search_span.set_attribute("vector_store.id", vector_store_id)
+                                             "max_num_results": search_request.max_num_results}),
+                                         OBSERVATION_TYPE: ObservationType.SPAN,
+                                         **trace_metadata(vector_store_id=vector_store_id,
+                                                          vector_store_type=str(provider),
+                                                          search_type=str(search_type))}) as search_span:
+                set_span_attributes(search_span, {"vector_store.id": vector_store_id,
+                                                  "search.type": str(search_type)})
 
-                # NOTE: only the first query is used when a list is given.
-                queries = [search_request.query] if isinstance(search_request.query, str) else search_request.query[:1]
+                vector_store = VectorStoreFactory.get_store(collection_name=vector_store_id,
+                                                            provider=provider)
+                pipeline = build_retrieval_pipeline(vector_store=vector_store,
+                                                    embed_fn=get_dense_embedding,
+                                                    search_type=search_type)
 
-                # Embedding span
-                with traced_span(name="embedding",
-                                 attributes={"langfuse.observation.type": "embedding",
-                                             "langfuse.observation.input": json.dumps({
-                                                 "query": search_request.query})}) as embed_span:
-                    # Embed the queries
-                    queries_vectors = await get_dense_embedding(queries)
-                    # Define embedding dims
-                    embedding_dims = len(queries_vectors[0])
-                    embedding_batch_size = len(queries_vectors)
-                    # Set output attributes
-                    embed_span.set_attribute("embedding.num_queries", embedding_batch_size)
-                    embed_span.set_attribute("embedding.model", DENSE_MODEL_NAME)
-                    embed_span.set_attribute("embedding.dims", embedding_dims)
+                context = RetrievalContext(vector_store_id=vector_store_id,
+                                           api_key=api_key,
+                                           query=query,
+                                           limit=search_request.max_num_results,
+                                           filters=neutral_filter)
+                await pipeline.run(context)
 
-                # Retrieval span
-                with traced_span(name="retrieve",
-                                 attributes={"langfuse.observation.type": "retriever",
-                                             "langfuse.observation.metadata.vector_store_id": vector_store_id,
-                                             "langfuse.observation.metadata.max_num_results": search_request.max_num_results}) as retrieve_span:
-                    retrieve_span.set_attribute("vector_store.id", vector_store_id)
-                    retrieve_span.set_attribute("vector_store.type", "qdrant")
-                    # Check if vector store collection exists in Qdrant
-                    vector_store_existence = await qdrant_service.client.collection_exists(
-                        collection_name=vector_store_id
-                    )
-                    retrieve_span.set_attribute("vector_store.collection_exists", vector_store_existence)
-                    retrieve_span.set_attribute("embedding.dims", embedding_dims)
-
-                    # Handle case when vector store doesn't exist
-                    if not vector_store_existence:
-                        # Return empty results when vector store is not found
-                        data = []
-                        displayed_results = []
-                        # Log event for monitoring
-                        retrieve_span.add_event("vector_store_collection_not_found")
-                    else:
-                        # Vector store exists - perform search
-                        qdrant_vector_store = AsyncQdrantVectorStore(
-                            collection_name=vector_store_id,
-                            client=qdrant_service.client
-                        )
-                        # TODO: pass search_params/score_threshold once wired (see TODO above)
-                        retrieved_results = await qdrant_vector_store.retrieve(
-                            query_vectors=queries_vectors,
-                            query_filter=qdrant_filter,
-                            limit=search_request.max_num_results
-                        )
-
-                        # chunk_id + score only for tracing - no metadata/content
-                        displayed_results = [
-                            {"chunk_id": point.id, "score": point.score}
-                            for point in retrieved_results[0].points
-                        ]
-
-                        # Convert results to API response format
-                        data = convert_query_response_to_search_results(retrieved_results)
-
-                    # Set output attributes
-                    retrieve_span.set_attribute("retrieve.result_count", len(displayed_results))
-                    if displayed_results:
-                        retrieve_span.set_attribute("retrieve.results", json.dumps(displayed_results))
+                # Convert results to API response format
+                data = convert_retrieved_chunks_to_search_results(context.results)
 
                 # Return search response
                 return VectorStoreSearchResponse(
