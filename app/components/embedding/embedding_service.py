@@ -1,7 +1,7 @@
 # Inherit
 from .base import BaseEmbeddingProvider
-from .openai_provider import OpenAIEmbeddingProvider
-from .tei_provider import TEIEmbeddingProvider
+from .provider.openai_provider import OpenAIEmbeddingProvider
+from .provider.tei_provider import TEIEmbeddingProvider
 # Config
 from app.core.config import (EMBEDDING_PROVIDER,
                              VLLM_DENSE_EMBEDDING_URL,

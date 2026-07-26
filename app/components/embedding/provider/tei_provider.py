@@ -1,5 +1,5 @@
 # Inherit
-from .base import BaseEmbeddingProvider
+from ..base import BaseEmbeddingProvider
 # Other component
 import httpx
 # Typing

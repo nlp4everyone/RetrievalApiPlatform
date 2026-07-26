@@ -1,5 +1,5 @@
 # Inherit
-from .base import BaseEmbeddingProvider
+from ..base import BaseEmbeddingProvider
 # OpenAI client
 from openai import AsyncOpenAI
 # Typing
