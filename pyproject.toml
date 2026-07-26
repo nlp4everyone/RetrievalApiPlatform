@@ -52,6 +52,9 @@ dependencies = [
     
     # Vector Store
     "qdrant-client==1.16.0",
+
+    # HTTP client (TEI embedding provider)
+    "httpx>=0.27.0",
 ]
 
 [project.optional-dependencies]

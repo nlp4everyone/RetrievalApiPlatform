@@ -1,5 +1,5 @@
-# OpenAI client
-from openai import AsyncOpenAI
+# Embedding
+from app.services.embedding import EmbeddingService
 # DB
 from app.db.postgres import PostgresClient
 from app.db.minio import MinioService
@@ -16,25 +16,25 @@ from typing import List
 # Logger
 from loggers import SystemLogger
 
-async def init_embed_model() -> AsyncOpenAI:
+async def init_embed_model() -> EmbeddingService:
     """
-    Initialize and test the dense embedding model service.
+    Initialize and test the dense embedding service.
 
-    Creates an AsyncOpenAI client configured for the vLLM dense embedding
-    service and tests connectivity with a sample embedding.
+    Builds the EmbeddingService for the provider selected via
+    EMBEDDING_PROVIDER (OpenAI-compatible endpoint or raw TEI /embed
+    request) and tests connectivity with a sample embedding.
 
     Returns:
-        AsyncOpenAI: Configured embedding client instance
+        EmbeddingService: Configured embedding service instance
 
     Raises:
         Exception: If embedding service is not reachable or fails to respond
     """
     global embed_model
-    embed_model = AsyncOpenAI(base_url = VLLM_DENSE_EMBEDDING_URL,
-                              api_key = SERVING_API_KEY)
+    embed_model = EmbeddingService.from_settings()
 
     try:
-        await embed_model.embeddings.create(model = DENSE_MODEL_NAME, input = ["Hello"])
+        await embed_model.check_connection()
         SystemLogger.success("[STARTUP] Dense embedding service ready")
     except Exception as e:
         SystemLogger.error(f"[STARTUP] Init dense embedding service failed: {e!r}")
@@ -43,7 +43,7 @@ async def init_embed_model() -> AsyncOpenAI:
 
 async def get_dense_embedding(texts: List[str]) -> List[List[float]]:
     """
-    Generate dense embedding vectors for a list of texts via the vLLM service.
+    Generate dense embedding vectors for a list of texts via the configured embedding service.
 
     Args:
         texts (List[str]): Texts to embed
@@ -51,8 +51,7 @@ async def get_dense_embedding(texts: List[str]) -> List[List[float]]:
     Returns:
         List[List[float]]: Embedding vector for each input text
     """
-    response = await embed_model.embeddings.create(model = DENSE_MODEL_NAME, input = texts)
-    return [item.embedding for item in response.data]
+    return await embed_model.embed(texts)
 
 def init_postgres() -> PostgresClient:
     """
@@ -129,15 +128,15 @@ async def init_qdrant() -> QdrantService:
         raise
     return qdrant_service
 
-def get_embed_model() -> AsyncOpenAI:
+def get_embed_model() -> EmbeddingService:
     """
-    Get the global embedding model instance.
+    Get the global embedding service instance.
 
     Returns:
-        AsyncOpenAI: The initialized embedding client
+        EmbeddingService: The initialized embedding service
 
     Raises:
-        AttributeError: If embedding model has not been initialized
+        AttributeError: If embedding service has not been initialized
     """
     return embed_model
 
