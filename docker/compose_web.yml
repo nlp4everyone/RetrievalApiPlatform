@@ -45,7 +45,7 @@ services:
       dockerfile: docker/Dockerfile
     container_name: taskiq_worker
     restart: always
-    command: uv run taskiq worker taskiq_worker:broker
+    command: uv run taskiq worker app.tasks.broker:broker
     environment:
       REDIS_URL: redis://redis:${REDIS_PORT:-6379}/0
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}

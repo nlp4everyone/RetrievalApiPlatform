@@ -25,6 +25,7 @@ from app.utils.datetime_utils import convert_to_unix_timestamp
 # Exceptions
 from app.exceptions import AppBaseException
 from app.exceptions.postgres import PostgresConnectionException
+from app.exceptions.vector_store import UnsupportedMultipleFilesException
 
 # Logger
 from loggers import SystemLogger
@@ -33,7 +34,7 @@ from loggers import SystemLogger
 from app.core.request_context import request_id_ctx
 
 # TaskIQ worker
-from taskiq_worker import process_vector_store_files
+from app.tasks import ingest_vector_store_files
 
 # Retrieval pipeline
 from app.pipelines.retrieval import RetrievalContext, build_retrieval_pipeline
@@ -146,8 +147,13 @@ class VectorStoreService:
             VectorStoreObject containing created vector store metadata
             
         Raises:
+            UnsupportedMultipleFilesException: If more than one file_id is given
             PostgresConnectionException: If database connection fails
         """
+        # Single-file ingestion only; reject upfront instead of polling into a store that never finishes.
+        if request.file_ids is not None and len(request.file_ids) > 1:
+            raise UnsupportedMultipleFilesException(num_files = len(request.file_ids))
+
         # Get current time in UTC for timestamps
         current_time = datetime.now(timezone.utc)
         created_at = current_time
@@ -233,7 +239,7 @@ class VectorStoreService:
                                              **observation_metadata(chunking_strategy=chunking_strategy,
                                                                     chunk_size=chunk_size,
                                                                     num_files=nums_in_progress_file)}):
-                    await process_vector_store_files.kiq(
+                    await ingest_vector_store_files.kiq(
                         vectorstore_id=vectorstore_id,
                         api_key=api_key,
                         file_ids=request.file_ids,
