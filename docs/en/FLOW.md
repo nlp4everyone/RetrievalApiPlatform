@@ -1,17 +1,21 @@
 # Detailed processing flow
 
 > This document describes exactly what happens at each step of the pipeline — function names, variable names, and each gate's logic. For developers who need a deep understanding or are debugging the system.
-> Scope: file creation (upload), vector store creation (async ingest), and search.
+> Scope: file creation (upload), vector store creation (async ingestion), and search.
 
 ## Component diagram
 
 ```text
-App Startup  (FastAPI "startup" event, app/app.py)
+App Startup  (FastAPI "startup" event, app/app.py → app/startup.py)
         ├── init_tracing()                OpenTelemetry TracerProvider → export OTLP to Langfuse
-        ├── init_embed_model()             AsyncOpenAI client → vLLM dense embedding, test call embeddings.create(["Hello"])
+        ├── init_embed_model()             EmbeddingService.from_settings() → check_connection()
         ├── init_postgres() + wait_for_postgres()   create pool, retry 5x / 0.5s, then _create_table()
-        ├── init_qdrant()                  QdrantService._check_connection()
+        ├── init_vector_store()            connection for VECTOR_STORE_PROVIDER → check_connection()
+        │                                  → VectorStoreFactory.register_connection(provider, conn)
         └── init_minio()                   MinioService, create UPLOADED_FILE_BUCKET if missing
+
+Worker Startup  (TaskIQ WORKER_STARTUP, app/tasks/broker.py::_initialize_services)
+        └── the same five inits, plus init_parsing_service()   ← runs once, guarded by _initialized
 
 Client  (OpenAI SDK / HTTP client)
         │  multipart/form-data (upload) or JSON
@@ -23,7 +27,7 @@ FastAPI HTTP Gateway
 
 ① POST /v1/files   (multipart: purpose, file, expires_after)
         │
-        ├── validate_file  (FastAPI dependency, runs BEFORE the handler)
+        ├── validate_file  (app/api/dependencies.py, runs BEFORE the handler)
         │       validate_file_type()   content_type ∉ ALLOWED_MIME_TYPES, ext ∉ ALLOWED_EXTENSIONS,
         │                              or MIME_TYPE_MAPPING[content_type] != ext  → 415
         │       validate_file_size()   (file.size / 1MB) > MAX_FILE_SIZE (100)?  → FileSizeLimitExceededException (413)
@@ -41,85 +45,171 @@ FastAPI HTTP Gateway
                       NO automatic cleanup mechanism (no compensating transaction/rollback)
                 success → returns FileObject (created_at/expires_at as Unix timestamps)
 
-② POST /v1/vector_stores   {name, file_ids, chunking_strategy} → async ingest
+② POST /v1/vector_stores   {name, file_ids, chunking_strategy} → async ingestion
         ▼
     VectorStoreService.create(request, api_key)
+        ├── len(request.file_ids) > 1 ?  → UnsupportedMultipleFilesException (400)
+        │       ⓘ single-file ingestion only, rejected upfront rather than letting the caller
+        │         poll a store that would never finish
         ├── generate_vectorstore_id()       → "vs-{32 hex}"
-        ├── PostgresVectorStore.create(status=UploadingStatus.IN_PROGRESS, usage_bytes=0, ...)
-        ├── Resolve chunking_strategy + chunk_size/chunk_overlap:
-        │       request.chunking_strategy is None                     → "auto"   (chunk_size=800, chunk_overlap=400)
-        │       request.chunking_strategy.type == "static"             → "static" (chunk_size/overlap from request.static)
-        │       request.chunking_strategy.type == "auto" (sent explicitly) → falls into else → "fuse" (chunk_size=800, overlap=400)
-        │           ⚠ "fuse" is not in ("auto","static") so the Worker will SKIP the embed/upsert step —
-        │             the file still gets parsed + chunked but NEVER makes it into Qdrant, even though status still reports "completed".
-        │             Only happens when the client explicitly sends {"type": "auto"} instead of omitting chunking_strategy.
-        ├── process_vector_store_files.kiq(vectorstore_id, api_key, file_ids, chunking_strategy, chunk_size, chunk_overlap,
-        │                                  request_id=request_id_ctx.get())   ← enqueued onto the Redis stream broker (TaskIQ)
-        └── return VectorStoreObject(status="in_progress")   ← response returned immediately, does NOT wait for ingest to finish
+        ├── provider = VectorStoreFactory.default_provider()      ← from VECTOR_STORE_PROVIDER
+        │
+        ├── traced_span("POST /v1/vector_stores")   ROOT span of the ingestion trace
+        │       trace attributes (user_id, tags, input, metadata) MUST be set here, not in the
+        │       worker — the worker joins this trace and Langfuse ignores trace-level attributes
+        │       set on a non-root span
+        │
+        │       ├── traced_span("create_record")
+        │       │       PostgresVectorStore.create(status=IN_PROGRESS, usage_bytes=0,
+        │       │                                  vector_store_type=provider, ...)
+        │       │
+        │       ├── Resolve chunking_strategy + chunk_size/chunk_overlap:
+        │       │       request.chunking_strategy is None                     → "auto"   (800 / 400)
+        │       │       request.chunking_strategy.type == "static"             → "static" (from request.static)
+        │       │       request.chunking_strategy.type == "auto" (sent explicitly) → falls into else → "fuse" (800 / 400)
+        │       │           ⚠ "fuse" is not in ("auto","static"), so IngestionService SKIPS the pipeline —
+        │       │             the store is still marked "completed" while nothing was ever indexed.
+        │       │             Only happens when the client explicitly sends {"type": "auto"}
+        │       │             instead of omitting chunking_strategy.
+        │       │
+        │       └── traced_span("enqueue_ingestion")
+        │               ingest_vector_store_files.kiq(vectorstore_id, api_key, file_ids,
+        │                                             chunking_strategy, chunk_size, chunk_overlap,
+        │                                             request_id=request_id_ctx.get(),
+        │                                             trace_context=inject_trace_context(),   ← W3C traceparent
+        │                                             vector_store_type=str(provider))
+        │                                                    ↳ onto the Redis stream broker (TaskIQ)
+        │
+        └── return VectorStoreObject(status="in_progress")   ← returned immediately, does NOT wait for ingestion
 
-        Note: runs on the separate taskiq_worker.py process, outside the HTTP request/response lifecycle
+        Note: runs on the separate taskiq_worker process, outside the HTTP request/response lifecycle
         ▼
-    process_vector_store_files(vectorstore_id, api_key, file_ids, chunking_strategy, chunk_size, chunk_overlap, request_id)
-        │  request_id_ctx.set(request_id)   ← re-bind the ContextVar inside the worker process (see Request correlation)
+    app/tasks/ingestion_task.py::ingest_vector_store_files(...)
+        │  request_id_ctx.set(request_id)   ← re-bind the ContextVar inside the worker process
+        │  delegate to IngestionService, log + re-raise on failure, reset the contextvar
+        ▼
+    IngestionService.ingest_vector_store_files(...)
         │
         ├──▶ Step 1: PostgresFileStore.check_existing_files(file_ids) → existing_file_ids
-        │       existing_file_ids empty?  → usage_bytes stays 0, skip Steps 2-3, jump straight to Step 4 (status=COMPLETED)
-        │       otherwise → get_total_bytes(file_ids) → usage_bytes ; get_metadata_for_files(existing_file_ids) → files_metadata
+        │       empty?  → usage_bytes stays 0, skip Steps 2-3, jump to Step 4 (status=COMPLETED)
+        │       else → get_total_bytes(file_ids) → usage_bytes
+        │              get_metadata_for_files(existing_file_ids) → files_metadata
         │
-        ├──▶ Step 2: len(files_metadata) == 1 ?   ← only supports exactly ONE file (TODO: multi-file processing)
-        │       NO (0 or >1)  → chunked_texts = []  (extra/multiple files are silently skipped, no warning logged)
-        │       YES → load_and_chunk_file(minio_client, files_metadata[0], chunk_size)
-        │               ParserFactory.get(ext)    .txt/.md → AsyncTextParser | .pdf → LlamaParseParser
-        │                   no parser for this ext?  → ValueError("Unsupported file format")
-        │               MinioFileStore.download_file(bucket, path) → file_bytes (None → ValueError)
-        │               parser.parse(file_bytes) → text
-        │               ChonkieChunkingService(chunk_size).split_text(text) → chunked_texts
-        │               error at any step? → _mark_failed(vectorstore_id, api_key, usage_bytes) [status=FAILED] → re-raise
+        ├──▶ Step 2: len(files_metadata) == 1 ?   ← second line of defense behind the API-level check
+        │       NO (0 or >1) → log error → _mark_failed(status=FAILED) → raise ValueError
+        │                      (deliberately NOT reported as "completed" on an empty store)
         │
-        ├──▶ Step 3: chunking_strategy in ["auto","static"] AND chunked_texts non-empty?
-        │       NO  → embed/upsert is skipped entirely (see ⚠ "fuse" above)
-        │       YES → embed_and_upload_chunks(qdrant_vector_store, chunked_texts, source_file_id=file_ids[0], vectorstore_id, api_key)
-        │               split into batches of EMBEDDING_UPLOAD_BATCH_SIZE (16)
-        │               traced_span("/v1/vector_stores")   ← Langfuse trace wrapping the whole ingest
-        │               first batch runs ALONE first  ← creates the Qdrant collection before any race
-        │                       get_dense_embedding(batch) → Document(page_content, metadata={"source": file_id})
-        │                       → qdrant_vector_store.insert_documents(documents, embeddings, upload_batch_size)
-        │               remaining batches run concurrently (asyncio.gather), capped by asyncio.Semaphore(EMBEDDING_BATCH_CONCURRENCY=4)
-        │               error at any step? → _mark_failed(...) [status=FAILED] → re-raise
+        ├──▶ Step 3: chunking_strategy in ("auto","static") ?
+        │       NO  → pipeline skipped entirely (see ⚠ "fuse" above)
+        │       YES → _ingest_single_file(...)
+        │               vector_store = VectorStoreFactory.get_store(collection_name=vectorstore_id,
+        │                                                           provider=vector_store_type)
+        │               pipeline = build_ingestion_pipeline(minio_client, vector_store, embed_fn=get_dense_embedding,
+        │                                                   parsing_service, chunking_strategy, chunk_size, chunk_overlap)
+        │               context  = IngestionContext(vector_store_id, api_key, file_id, file_metadata, ...)
+        │               await pipeline.run(context, parent_carrier=trace_context)
+        │                                                   ↳ nests every stage inside the HTTP request's trace
         │
-        └──▶ Step 4: PostgresVectorStore.update(status=UploadingStatus.COMPLETED, usage_bytes, last_active_at=now())
+        │               ┌── IngestionPipeline stages (one Langfuse observation each) ────────────┐
+        │               │                                                                        │
+        │               │  download   MinioFileStore → context.raw_bytes                         │
+        │               │             bucket/path read from context.file_metadata                │
+        │               │                                                                        │
+        │               │  parse      ParsingService.parse(raw_bytes, context.file_extension)    │
+        │               │             → context.text                                             │
+        │               │             .txt/.md → TextProvider  |  .pdf → PDF_PARSER_PROVIDER     │
+        │               │             unmapped extension → ValueError("Unsupported file format") │
+        │               │                                                                        │
+        │               │  chunk      ChunkingService.split_text(text) → context.chunks          │
+        │               │             provider from CHUNKING_PROVIDER, size/overlap per request  │
+        │               │                                                                        │
+        │               │  embed      chunks → batches of EMBEDDING_UPLOAD_BATCH_SIZE (16)       │
+        │               │             asyncio.gather bounded by Semaphore(BATCH_CONCURRENCY=4)   │
+        │               │             → context.embeddings         [ObservationType.EMBEDDING]   │
+        │               │                                                                        │
+        │               │  index      vector_store.ensure_collection(...) ONCE, up front         │
+        │               │             then all insert_documents batches concurrently             │
+        │               │             (no first-batch-alone race: creation is not in the         │
+        │               │              insert path any more)  → context.num_inserted             │
+        │               │                                                                        │
+        │               └────────────────────────────────────────────────────────────────────────┘
+        │
+        │               any stage raises? → remaining stages do not run → the span records the error
+        │                                 → IngestionService catches → _mark_failed(status=FAILED) → re-raise
+        │
+        └──▶ Step 4: PostgresVectorStore.update(status=COMPLETED, usage_bytes, last_active_at=now())
 
 ③ POST /v1/vector_stores/{id}/search   {query, max_num_results, filters, ranking_options}
         ▼
-    VectorStoreService.search(vector_store_id, search_request, api_key)
+    VectorStoreService.search(vector_store_id, search_request, api_key, search_type=SearchType.DENSE)
         ├── validate_vector_store_prefix(id)    no "vs" prefix?  → WrongPrefixVectorstoreException
-        ├── PostgresVectorStore._check_vector_store_existence(id, api_key)   not found? → VectorStoreNotFoundException
+        ├── PostgresVectorStore.get_by_id(id, api_key)   not found? → VectorStoreNotFoundException
+        │       provider = record["vector_store_type"]   ← the backend this collection actually lives on
         │
-        │  qdrant_filter = None   ← TODO: search_request.filters is NOT applied (_normalize_qdrant_filter not implemented)
-        │  search_params is built from ranking_options but is NOT passed into retrieve() below  ← has no effect yet
+        ├── neutral_filter = normalize_search_filter(search_request.filters)
+        │       ComparisonFilter → FieldCondition(key, FilterOperator, value)
+        │       CompoundFilter   → FilterGroup(FilterCombinator, [...])
+        │       each backend renders this tree itself (to_qdrant_filter / to_milvus_expression)
         │
-        ├── traced_span("/v1/vector_stores/{id}/search")   root Langfuse trace (langfuse.trace.input={query, max_num_results})
-        │       queries = [query] if str, else query[:1]
-        │           ⚠ if query is a List[str], ONLY the first element is used — the rest are dropped
+        │  query = search_request.query if str, else search_request.query[0]
+        │      ⚠ if query is a List[str], ONLY the first element is used — the rest are dropped
+        │  ⓘ TODO: ranking_options still has no effect — score_threshold and quantization rescore
+        │     are not yet surfaced on the vector store contract
         │
-        │       traced_span("embedding")
-        │               get_dense_embedding(queries) → queries_vectors
-        │               embed_span: embedding.num_queries, embedding.model, embedding.dims
+        ├── traced_span("POST /v1/vector_stores/{id}/search")   ROOT span
+        │       trace attributes: user_id=api_key, tags=["vector_store_search"],
+        │                         input={query, max_num_results}, metadata={vector_store_id,
+        │                         vector_store_type, search_type}
         │
-        │       traced_span("retrieve")
-        │               qdrant_service.client.collection_exists(vector_store_id)?
-        │                   NO  → data=[]  (e.g. still ingesting, or ingest failed before the collection was created — see ⚠ "fuse" in step ②)
-        │                   YES → qdrant_vector_store.retrieve(query_vectors=queries_vectors, query_filter=qdrant_filter, limit=max_num_results)
-        │                         convert_query_response_to_search_results(retrieved_results)
-        │                               payload["page_content"] → non-empty lines joined with " " (strips extra whitespace/newlines)
-        │                               payload["metadata"] → SearchResult.attributes
+        │       vector_store = VectorStoreFactory.get_store(collection_name=id, provider=provider)
+        │       pipeline     = build_retrieval_pipeline(vector_store, embed_fn=get_dense_embedding, search_type)
+        │              └── _build_plan(search_type):
+        │                      SearchType.DENSE → [DenseRetriever], PassthroughFusion
+        │                      anything else    → ValueError("Unsupported search type")
+        │       context      = RetrievalContext(vector_store_id, api_key, query, limit=max_num_results,
+        │                                       filters=neutral_filter)
+        │       await pipeline.run(context)      ← no parent_carrier: already inside this request's span
+        │
+        │       ┌── RetrievalPipeline stages (one Langfuse observation each) ──────────────────┐
+        │       │                                                                              │
+        │       │  embed_query   embed_fn([query]) → context.dense_vector                      │
+        │       │                                            [ObservationType.EMBEDDING]       │
+        │       │                                                                              │
+        │       │  retrieve      every retriever runs concurrently (asyncio.gather)            │
+        │       │                → context.candidates = {retriever.name: [RetrievedChunk]}     │
+        │       │                DenseRetriever: collection_exists()? NO → []                  │
+        │       │                    (store row can exist before ingestion created the         │
+        │       │                     collection — empty result, not an error)                 │
+        │       │                                            [ObservationType.RETRIEVER]       │
+        │       │                                                                              │
+        │       │  fuse          fusion.fuse(candidates, limit) → context.results              │
+        │       │                PassthroughFusion: >1 candidate list → ValueError             │
+        │       │                    (adding a retriever forces choosing a real fusion)        │
+        │       │                emits_span() == False when there is nothing to fuse           │
+        │       │                                                                              │
+        │       └──────────────────────────────────────────────────────────────────────────────┘
+        │
+        │       data = convert_retrieved_chunks_to_search_results(context.results)
         │
         └── return VectorStoreSearchResponse(search_query, data, has_more = len(data) >= max_num_results)
 
-        Note: `filters` and `ranking_options` are accepted by the schema but not yet applied to the Qdrant query
-              (see [Design Decisions](DESIGN_DECISIONS.md)).
-
-Worker Shutdown  (TaskIQ WORKER_SHUTDOWN event, taskiq_worker.py)
-        ├── postgres_service.close()          closes the asyncpg pool
-        └── qdrant_service.client.close()     sync or async, checked via inspect.iscoroutinefunction
+Worker Shutdown  (TaskIQ WORKER_SHUTDOWN, app/tasks/broker.py)
+        ├── get_postgres_client().close()        closes the asyncpg pool
+        └── VectorStoreFactory.close_all()       closes every registered vector store connection
 ```
+
+## Where the tracing comes from
+
+Stages never open spans. `Pipeline.run()` does, and it is the only thing that does:
+
+```text
+traced_span(pipeline.name, root_attributes(context), parent_carrier)
+    for stage in stages:
+        traced = stage.emits_span(context)          ← decided BEFORE run(), can inspect prior output
+        with traced_span(stage.name, {OBSERVATION_TYPE: stage.observation_type}) if traced else nullcontext():
+            await stage.run(context)
+            set_span_attributes(span, stage.span_attributes(context))   ← read AFTER run() succeeded
+    set_span_attributes(pipeline_span, result_attributes(context))
+```
+
+A stage reporting `emits_span() == False` still runs — it just stays out of the trace, so a step that was a no-op on this particular run adds no noise. This is why the trace shape stays correct when stages are added, removed, or reordered.

@@ -1,30 +1,44 @@
 # Detailed Components
 
-## Router layer (`app/router/`)
+## API layer (`app/api/`)
 
-### `file_router.py` — tag "File"
+Everything that exists only because this app is served over HTTP. Nothing outside this package imports it, and `app.components`/`app.pipelines` never reach up here — which is what lets the TaskIQ worker run without FastAPI in its path.
+
+### `router/file_router.py` — tag "File"
 
 All endpoints require `Depends(verify_api_key)`.
 
 | Method | Path | Handler | Notes |
 |---|---|---|---|
-| POST | `/v1/files` | `upload_file` | Form fields `purpose`, `file` (via `Depends(validate_file)`), `expires_after[anchor|seconds]` |
+| POST | `/v1/files` | `upload_file` | Form fields `purpose`, `file` (via `Depends(validate_file)`), `expires_after[anchor \| seconds]` |
 | GET | `/v1/files` | `list_files` | Query via `FileQueryRequest` (extends `PaginationParams`) |
 | GET | `/v1/files/{file_id}` | `get_file_by_id` | — |
 | DELETE | `/v1/files/{file_id}` | `delete_file` | Returns `FileDeletedResponse` |
 
-### `vector_store_router.py` — tag "Vector Stores"
+### `router/vector_store_router.py` — tag "Vector Stores"
 
 | Method | Path | Handler | Notes |
 |---|---|---|---|
-| POST | `/v1/vector_stores` | `create_vector_store` | Body `VectorStoreCreateRequest`; enqueues the ingest job |
+| POST | `/v1/vector_stores` | `create_vector_store` | Body `VectorStoreCreateRequest`; enqueues the ingestion job. More than one `file_id` → 400 |
 | GET | `/v1/vector_stores` | `list_vector_stores` | Query `VectorStoreQueryRequest` |
 | GET | `/v1/vector_stores/{id}` | `get_vector_store` | — |
 | POST | `/v1/vector_stores/{id}` | `modify_vector_store` | OpenAI-style: update uses POST, not PATCH |
 | DELETE | `/v1/vector_stores/{id}` | `delete_vector_store` | — |
-| POST | `/v1/vector_stores/{id}/search` | `search_vector_store` | Body `VectorStoreSearchRequest`; `filters`/`ranking_options` accepted but not yet applied |
+| POST | `/v1/vector_stores/{id}/search` | `search_vector_store` | Body `VectorStoreSearchRequest`; `filters` applied, `ranking_options` not yet |
 
-`app/app.py` also defines `GET /health` (excluded from OpenAPI schema), registers `RequestIDMiddleware`, the global `AppBaseException` handler, and a startup event that brings up tracing → embed model → Postgres (pool + `wait_for_postgres` + table creation) → Qdrant → MinIO, in that order.
+### `dependencies.py`
+
+`validate_file_size` (rejects over `MAX_FILE_SIZE` MB), `validate_file_type` (checks MIME + extension + their consistency via `MIME_TYPE_MAPPING`), composed as `validate_file` — used as `Depends(validate_file)` on the upload endpoint.
+
+### `security.py`
+
+`verify_api_key` requires an `Authorization: Bearer <token>` header, compares the token against the single configured `FASTAPI_API_KEY`, and returns the token as `api_key` — which is then used to scope Postgres rows. Because there is exactly one valid token, this is effectively single-tenant auth even though the schema is shaped for multi-tenant ownership (see [Design Decisions](DESIGN_DECISIONS.md)).
+
+### `middleware.py`
+
+`RequestIDMiddleware` is a raw ASGI middleware (not `BaseHTTPMiddleware` — that would reset the contextvar before uvicorn's access logger fires). It reuses a client-supplied `X-Request-Id` header if present, else generates `req_{uuid4().hex}`, binds it to `request_id_ctx` (a `contextvars.ContextVar` in `app/core/request_context.py`) for the request's duration, and echoes it back on the response. The same ID is passed into `ingest_vector_store_files.kiq(...)` and re-bound inside the worker task, so a single request ID threads through HTTP logs and the async ingestion job that request triggered.
+
+`app/app.py` also defines `GET /health` (excluded from OpenAPI schema), registers `RequestIDMiddleware`, the global `AppBaseException` handler, and a startup event that brings up tracing → embed model → Postgres (pool + `wait_for_postgres` + table creation) → vector store → MinIO, in that order.
 
 ## Service layer (`app/services/`)
 
@@ -34,98 +48,152 @@ Static methods `upload_file`, `list_files`, `get_file_by_id`, `delete_file`. Upl
 
 ### `VectorStoreService` (`vector_store/vector_store_service.py`)
 
-Static methods `create`, `list`, `get`, `modify`, `delete`, `search`. Composes `PostgresVectorStore` (metadata/status), `AsyncQdrantVectorStore` (vectors), TaskIQ (`process_vector_store_files.kiq(...)` enqueued from `create`), and `traced_span` for tracing. `search()` embeds the query text and calls `AsyncQdrantVectorStore.retrieve` directly — it does **not** go through the ingest pipeline; that path is TaskIQ-worker-only.
+Static methods `create`, `list`, `get`, `modify`, `delete`, `search`.
 
-### Ingest pipeline (`services/ingest/`)
+- `create` rejects more than one `file_id` before touching the database (`UnsupportedMultipleFilesException`, 400 — "reject upfront instead of polling into a store that never finishes"), writes the Postgres row with the provider it was created with, then enqueues `ingest_vector_store_files.kiq(...)` together with `request_id` and `inject_trace_context()`.
+- `search` reads the row to learn its `vector_store_type`, converts `search_request.filters` into the backend-neutral tree via `normalize_search_filter`, opens the root trace span, and runs a `RetrievalPipeline` in-process. Results come back as `RetrievedChunk` and are converted to the API shape by `convert_retrieved_chunks_to_search_results`.
+- Both paths resolve their store through `VectorStoreFactory.get_store(collection_name, provider)` — passing the provider recorded on the row, so collections created under an older `VECTOR_STORE_PROVIDER` keep working.
 
-- `file_loader.py::load_and_chunk_file(minio_client, file_metadata, chunk_size)` — resolves a parser via `ParserFactory.get(file_ext)`, downloads bytes from MinIO, parses to text, chunks via `ChonkieChunkingService`.
-- `ingest_pipeline.py::embed_and_upload_chunks` (and `embed_and_insert_batch[_bounded]`) — embeds chunk batches and upserts into `AsyncQdrantVectorStore.insert_documents`. Runs the first batch alone (avoids a collection-creation race), then remaining batches concurrently, bounded by `EMBEDDING_BATCH_CONCURRENCY`.
+### `IngestionService` (`ingestion/ingestion_service.py`)
 
-Composition: **Router → Service → (DB clients / TaskIQ enqueue) → Worker task → file_loader (parser + chunker) → ingest_pipeline (embed + upsert) → Qdrant**.
+The background task's business logic, deliberately free of any TaskIQ import so it can be called and tested without a running broker. `ingest_vector_store_files(...)`:
 
-### Parsers (`services/parsers/`)
+1. `PostgresFileStore.check_existing_files` — if none of the referenced files still exist, skip straight to marking the store `completed` with `usage_bytes=0`
+2. Fetch `get_total_bytes` + `get_metadata_for_files`
+3. Guard: exactly one file, else log, `_mark_failed`, and raise — a second line of defense behind the API-level rejection, so an empty store is never reported `completed`
+4. `_ingest_single_file` builds the pipeline via `build_ingestion_pipeline(...)` and runs it against an `IngestionContext`, passing `trace_context` as the parent carrier
+5. Mark `completed` with `usage_bytes`; any failure marks `failed` and re-raises
 
-`BaseTextParser(ABC)` defines one abstract method: `async parse(file_bytes: bytes) -> str` — the interface is unified around raw bytes in, text out (the earlier UndatasIO-based parser has been fully removed).
+## Pipeline layer (`app/pipelines/`)
 
-`ParserFactory` registry, keyed by lowercased extension, instances cached per extension:
+### The framework (`base.py`, `pipeline.py`)
 
-| Extension | Parser | Notes |
+`BaseStage[ContextT]` is the contract: a `name` (the span name), an `observation_type`, an `async run(context)`, plus two optional hooks — `emits_span(context)` (decided *before* `run`, so it can inspect what earlier stages produced; returning `False` still runs the stage, it just keeps a no-op out of the trace) and `span_attributes(context)` (read *after* `run` succeeded).
+
+`Pipeline[ContextT]` runs the stages in order under a single parent span and is **the only place that opens spans**. Stages never import the tracing module. Subclasses override `root_attributes()` (set before any stage) and `result_attributes()` (set after all stages succeed). `run(context, parent_carrier)` accepts a `TraceCarrier` so a pipeline started from a queued job appears inside the trace of the request that queued it.
+
+The payoff: the trace shape is a property of the pipeline, and it stays correct when stages are added, removed, or reordered.
+
+### Ingestion (`pipelines/ingestion/`)
+
+`IngestionContext` is one mutable dataclass threaded through every stage — inputs (`vector_store_id`, `file_id`, `file_metadata`, chunking params), progressively filled results (`raw_bytes` → `text` → `chunks` → `embeddings` → `num_inserted`), and a free-form `metrics` dict for numbers that belong on a span but not in pipeline state. Convenience properties (`filename`, `file_extension`, `storage_bucket`, `storage_path`) read out of `file_metadata`.
+
+| Stage | Does | Span notes |
 |---|---|---|
-| `.txt`, `.md` | `AsyncTextParser` | Decodes bytes (`errors="ignore"`) in a thread pool |
-| `.pdf` | `LlamaParseParser` | Wraps `llama_parse.LlamaParse` (Markdown output); writes to a temp file since LlamaParse needs a path |
+| `DownloadStage` | Fetches bytes from MinIO | — |
+| `ParseStage` | `ParsingService.parse(bytes, ext)` → text | records the provider that handled it |
+| `ChunkStage` | `ChunkingService.split_text(text)` → chunks | — |
+| `EmbedStage` | Batches chunks, embeds concurrently | `ObservationType.EMBEDDING`; reports `num_batches`, `batch_size` |
+| `IndexStage` | `ensure_collection()` once, then concurrent `insert_documents` batches | reports whether the collection was created, `num_batches` |
 
-Note the mismatch: upload-time `ALLOWED_EXTENSIONS` also allows `.docx`, `.csv`, `.json`, and images — those can be **uploaded** as Files but have no registered parser, so ingesting them raises `ValueError("Unsupported file format: ...")`.
+Both `EmbedStage` and `IndexStage` split into `EMBEDDING_UPLOAD_BATCH_SIZE` batches and bound them with `asyncio.Semaphore(EMBEDDING_BATCH_CONCURRENCY)`, so peak memory is roughly `batch_size * concurrency` regardless of file size.
 
-### Chunking (`services/chunking/`)
+`build_ingestion_pipeline(...)` is the single place deciding which stages run and in what order. The `ChunkingService` is built per pipeline rather than at startup, because chunk size and overlap come from the vector store's create request.
 
-`ChonkieChunkingService` (used by the ingest pipeline) — config `ChonkieChunkingConfig`, strategy enum `character | sentence | recursive | token` (default `recursive`, `chunk_size=800`, `chunk_overlap=400`). Maps to `chonkie.TokenChunker` / `SentenceChunker` / `RecursiveChunker` depending on strategy.
+### Retrieval (`pipelines/retrieval/`)
 
-`LangchainChunkingService` also exists (wraps `langchain_text_splitters`) but is not wired into the current ingest path — legacy/alternate implementation.
+`RetrievalContext` carries the query, `limit`, neutral `filters`, and `score_threshold` in; `dense_vector`, `candidates` (hits keyed by retriever name), and `results` out.
 
-At the API level, `VectorStoreCreateRequest.chunking_strategy` only exposes `"auto"` or `"static"` (with `max_chunk_size_tokens`/`chunk_overlap_tokens`) — there's no way to pick `sentence`/`token`/`character` through the public API even though the underlying chunker supports them. Also, `chunk_overlap` is computed in `VectorStoreService.create` but not actually passed into the enqueued task (only `chunk_size` is) — a known gap, see [Design Decisions](DESIGN_DECISIONS.md).
+| Stage | Does | Span notes |
+|---|---|---|
+| `EmbedQueryStage` | Embeds the query text | `ObservationType.EMBEDDING` |
+| `RetrieveStage` | Runs every retriever concurrently, keys hits by retriever name | `ObservationType.RETRIEVER`; merges each retriever's `span_attributes()` under its own name prefix |
+| `FuseStage` | Merges candidate lists into the final ranked list | skips its span when there is nothing to fuse |
+
+`BaseRetriever` is the seam for hybrid search — `RetrievalQuery` deliberately carries the raw query text *and* the dense vector, so a retriever doing its own tokenising has what it needs without the pipeline knowing which representation each retriever consumes. `DenseRetriever` is the one implementation; a missing collection returns `[]` rather than raising, since a vector store row can exist in Postgres before ingestion has created the collection.
+
+`BaseFusion` is the matching seam for merging. `PassthroughFusion` is the only implementation and **raises** if handed more than one candidate list, rather than silently dropping results — adding a second retriever forces you to choose a real fusion strategy.
+
+`build_retrieval_pipeline(vector_store, embed_fn, search_type)` resolves a `SearchType` into a `_RetrievalPlan(retrievers, fusion)`. Retrievers and fusion are chosen *together* so an invalid combination cannot be assembled by accident. Search type is a per-call argument, not configuration — two queries against the same store can reasonably want different retrieval.
+
+`chunks_to_trace_json` renders hits for a span attribute as `{chunk_id, score}` only: a trace is not the place to duplicate document contents.
+
+## Component layer (`app/components/`)
+
+Every package here follows the same shape — a `base.py` declaring the interface, a `provider/` holding implementations, and a facade service whose `from_settings()` picks one from config. Nothing here orchestrates anything or knows about HTTP.
+
+| Package | Interface | Providers | Selected by |
+|---|---|---|---|
+| `parsing/` | `BaseParsingProvider` | `TextProvider` (`.txt`, `.md`), `LlamaParseProvider` (`.pdf`) | `PDF_PARSER_PROVIDER` |
+| `chunking/` | `BaseChunkingProvider` | `ChonkieProvider`, `LangchainProvider` | `CHUNKING_PROVIDER` |
+| `embedding/` | `BaseEmbeddingProvider` | `OpenAIEmbeddingProvider`, `TEIEmbeddingProvider` | `EMBEDDING_PROVIDER` |
+
+`ParsingService.from_settings()` maps extensions to *provider factories*, not instances: plain-text formats always use the in-process decoder, and the PDF backend is validated at startup (so a typo fails fast) but only constructed when a PDF is actually parsed. `supports()`, `supported_extensions`, and `provider_for()` expose the registry; an unmapped extension raises `ValueError("Unsupported file format: ...")`.
+
+Note the mismatch: upload-time `ALLOWED_EXTENSIONS` also allows `.docx`, `.csv`, `.json`, and images — those can be **uploaded** as Files but have no registered parsing provider.
+
+`ChunkingService` exposes `strategy_name` and `async split_text(text)`. The Chonkie provider supports `character | sentence | recursive | token` (default `recursive`, `chunk_size=800`, `chunk_overlap=400`). At the API level, `VectorStoreCreateRequest.chunking_strategy` only exposes `"auto"` or `"static"`, so the finer strategies aren't reachable through the public API.
 
 ## Data layer (`app/db/`)
 
 | Package | Class(es) | Backs | Docker service |
 |---|---|---|---|
 | `minio/` | `MinioService`, `MinioFileStore` | Uploaded file bytes (bucket `uploaded-files`) | `minio` (9000/9001) |
-| `postgres/` | `PostgresClient`, `PostgresFileStore`, `PostgresVectorStore` | `files` + `vector_stores` metadata tables (ownership by `api_key`, status, JSONB metadata) | `postgres` (5432) |
-| `qdrant/` | `QdrantService`, `AsyncQdrantVectorStore` | One Qdrant collection per vector store (`collection_name == vector_store_id`) | `qdrant` (6333/6334) |
+| `postgres/` | `PostgresClient`, `PostgresFileStore`, `PostgresVectorStore` | `files` + `vector_stores` metadata tables (ownership by `api_key`, status, `vector_store_type`, JSONB metadata) | `postgres` (5432) |
+| `vector_store/` | `BaseVectorStoreConnection`, `BaseAsyncVectorStore`, `VectorStoreFactory` | One collection per vector store (`collection_name == vector_store_id`) | `qdrant` (6333/6334) |
 
-`AsyncQdrantVectorStore` lazily creates its collection on first insert (HNSW + configurable quantization — `scalar`/`binary`/`product` — with `indexing_threshold=0` at creation, raised to `20000` after bulk insert to avoid indexing overhead mid-load). `retrieve` runs one `query_points` call per query vector, gathered in parallel.
+### The vector store abstraction (`db/vector_store/`)
+
+Two abstractions in `base.py`:
+
+- `BaseVectorStoreConnection` — a long-lived connection created once at startup (`from_settings()`, `client`, `check_connection()`, `close()`); the equivalent of a connection pool
+- `BaseAsyncVectorStore` — operations scoped to one collection, constructed per use from a client
+
+`ensure_collection` is deliberately **separate** from `insert_documents`. Folding creation into the insert path forces every concurrent batch to race on a check-then-act, which is exactly why the previous ingest code had to run its first batch alone. Callers now create the collection once up front, after which inserts are pure and safely parallel.
+
+`types.py` holds the backend-neutral shapes — `RetrievedChunk`, and a filter tree of `FieldCondition` / `FilterGroup` with `FilterOperator` (`eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `in`, `nin`) and `FilterCombinator` (`and`, `or`). Nothing in this module may import a vendor SDK; these are the only shapes the service layer sees, so swapping Qdrant for Milvus never reaches above `app.db`.
+
+`VectorStoreFactory` resolves a provider name to an implementation. Backends are addressed by *module path* and imported on first use rather than at module level — that keeps the import graph acyclic, and means a backend whose SDK isn't installed only fails when it's actually asked for. Startup pushes live connections down via `register_connection()`; the factory never imports `app.startup`. `get_store(collection_name, provider)` takes the provider recorded on the vector store row, so existing collections keep working after `VECTOR_STORE_PROVIDER` changes; `get_connection` raises a `RuntimeError` naming the fix when a store references a provider this deployment doesn't run.
+
+Each backend supplies a `filter_translator.py` rendering the neutral tree into its own language (`to_qdrant_filter`, `to_milvus_expression`).
+
+**Qdrant** (`provider/qdrant/`) — `AsyncQdrantVectorStore` creates its collection with HNSW + configurable quantization (`scalar`/`binary`/`product`), `indexing_threshold=0` at creation raised to `20000` after bulk insert to avoid indexing overhead mid-load. `retrieve` runs one query per query vector, gathered in parallel, and returns `RetrievedChunk`.
+
+**Milvus** (`provider/milvus/`) — every method raises `NotImplementedError`. The class exists so the provider is already wired end to end (config validation, `VectorStoreType`, `VectorStoreFactory`, startup), which means enabling Milvus later is filling in bodies plus adding `pymilvus` — no changes above `app.db`.
 
 ## Configuration (`app/core/config/`)
 
 Two layers merged per domain module:
 
-1. **pydantic-settings** (`settings.py`) — reads `.env` / real environment variables. Required fields (no default) include API keys, Postgres/MinIO/Qdrant/Langfuse credentials. Validators enforce `API_VERSION` starts with `v`, ports are positive, secrets are non-empty, `LOG_LEVEL`/`LOG_FORMAT` are in an allowed set.
+1. **pydantic-settings** (`settings.py`) — reads `.env` / real environment variables. Required fields (no default) include API keys, Postgres/MinIO/Qdrant/Langfuse credentials. Validators enforce `API_VERSION` starts with `v`, ports are positive, secrets are non-empty, `LOG_LEVEL`/`LOG_FORMAT` are in an allowed set, and each of `EMBEDDING_PROVIDER` / `CHUNKING_PROVIDER` / `PDF_PARSER_PROVIDER` / `VECTOR_STORE_PROVIDER` names a known backend — so a typo fails at startup, not at first use.
 2. **YAML** (`config/config.yaml`, loaded via `YamlConfigLoader`) — stable tunables: `api.num_workers`, `storage.uploaded_file_bucket`/`max_file_size`, `redis.url`, `models.dense_model_name`, `embedding.upload_batch_size`/`batch_concurrency`.
 
 Per-domain modules (`database.py`, `storage.py`, `models.py`, `embedding.py`, `redis.py`, `langfuse.py`, `api.py`) combine both sources into flat constants importable from `app.core.config`. Full parameter list: [Configuration Reference](../CONFIGURATION.md).
 
 ## Tracing (`app/core/tracing/`)
 
-Langfuse via **OpenTelemetry OTLP** exporter — `init_tracing()` builds a `TracerProvider` + `BatchSpanProcessor(OTLPSpanExporter(...))` pointed at `{LANGFUSE_BASE_URL}/api/public/otel/v1/traces` with Basic-Auth from the public/secret key pair. `traced_span(name, attributes)` is a context manager used throughout the search and ingest paths; it auto-sets `Status.OK`/`Status.ERROR` and records exceptions.
+Langfuse via **OpenTelemetry OTLP** exporter — `init_tracing()` builds a `TracerProvider` + `BatchSpanProcessor(OTLPSpanExporter(...))` pointed at `{LANGFUSE_BASE_URL}/api/public/otel/v1/traces` with Basic-Auth from the public/secret key pair.
 
-- **Search**: outer span tagged `vector_store_search`, nested `embedding` and `retrieve` spans (the latter deliberately excludes chunk payload/content from tracing, only `chunk_id`/`score`).
-- **Ingest**: outer span tagged `vector_store_ingest`, nested `embedding` and `upsert` spans.
+- `tracing.py` — `traced_span(name, attributes, parent_carrier)` context manager (auto-sets `Status.OK`/`Status.ERROR`, records exceptions) and `set_span_attributes()`
+- `attributes.py` — Langfuse's attribute names as constants (`TRACE_INPUT`, `TRACE_TAGS`, `TRACE_USER_ID`, `OBSERVATION_TYPE`, …), the `ObservationType` enum (`SPAN`, `EMBEDDING`, `RETRIEVER`, …), and the `observation_metadata()` / `trace_metadata()` helpers that drop `None` values
+- `propagation.py` — `inject_trace_context()` / `extract_trace_context()` over a `TraceCarrier` (W3C traceparent), which is what lets a worker-side pipeline nest inside the HTTP request's trace
 
-Both the web app (`app.py`) and the TaskIQ worker (`taskiq_worker.py`) call `init_tracing()` independently at their own startup.
-
-## Request correlation (`app/middleware/request_id.py`)
-
-`RequestIDMiddleware` is a raw ASGI middleware (not `BaseHTTPMiddleware` — that would reset the contextvar before uvicorn's access logger fires). It reuses a client-supplied `X-Request-Id` header if present, else generates `req_{uuid4().hex}`, binds it to `request_id_ctx` (a `contextvars.ContextVar` in `app/core/request_context.py`) for the request's duration, and echoes it back on the response. The same ID is passed into `process_vector_store_files.kiq(...)` and re-bound inside the worker task, so a single request ID threads through HTTP logs and the async ingest job that request triggered.
-
-## Security (`app/security/auth.py`)
-
-`verify_api_key` requires an `Authorization: Bearer <token>` header, compares the token against the single configured `FASTAPI_API_KEY`, and returns the token as `api_key` — which is then used to scope Postgres rows. Because there is exactly one valid token, this is effectively single-tenant auth even though the schema is shaped for multi-tenant ownership (see [Design Decisions](DESIGN_DECISIONS.md)).
+Span structure: `VectorStoreService.search` opens the root span (`POST /v1/vector_stores/{id}/search`) carrying the trace-level attributes, and `RetrievalPipeline` emits one observation per stage inside it. Ingestion mirrors this from the worker side, parented by the propagated carrier. Both the web app and `app/tasks/broker.py` call `init_tracing()` independently at their own startup.
 
 ## Exceptions (`app/exceptions/`)
 
-Root `AppBaseException(status_code, response: BaseResponse, log_message)`. Domain subclasses: `auth/` (`APIKeyIncorrectException`, `BearerMissingException` — 401), `file/` (`FileSizeLimitExceededException` 413, `FileNotFoundException` 404), `postgres/` (`PostgresConnectionException` 503), `vector_store/` (`VectorStoreNotFoundException` 404, `WrongPrefixVectorstoreException` 400). `common_exception_handler` (registered globally) logs at ERROR/WARNING depending on status and returns `JSONResponse({message, type, params, code})` — the OpenAI-style error envelope. Plain `HTTPException`s (e.g. 415 from `dependencies/file_validation.py`) fall through to FastAPI's default handler instead.
+Root `AppBaseException(status_code, response: BaseResponse, log_message)`. Domain subclasses: `auth/` (`APIKeyIncorrectException`, `BearerMissingException` — 401), `file/` (`FileSizeLimitExceededException` 413, `FileNotFoundException` 404), `postgres/` (`PostgresConnectionException` 503), `vector_store/` (`VectorStoreNotFoundException` 404, `WrongPrefixVectorstoreException` 400, `UnsupportedMultipleFilesException` 400). `common_exception_handler` (registered globally) logs at ERROR/WARNING depending on status and returns `JSONResponse({message, type, params, code})` — the OpenAI-style error envelope. Plain `HTTPException`s (e.g. 415 from `app/api/dependencies.py`) fall through to FastAPI's default handler instead.
 
 ## Schemas (`app/schemas/`)
 
 - `base/` — shared `BaseModel` (`extra="forbid"`), `PaginationParams`, generic `PaginatedResponse[T]`.
 - `file/` — `FileObject`, `FileListObject`, request/response variants, `UploadingStatus` enum.
-- `vector_store/` — `VectorStoreCreateRequest`/`ModifyRequest`/`QueryRequest`, chunking-strategy union types, filter/ranking types (defined, not yet applied), `VectorStoreObject`, `VectorStoreSearchResponse`.
+- `vector_store/` — `VectorStoreCreateRequest`/`ModifyRequest`/`QueryRequest`/`SearchRequest`, chunking-strategy union types, `ComparisonFilter`/`CompoundFilter`, `VectorStoreObject`, `VectorStoreSearchResponse`.
+- `vector_store/types.py` — `VectorStoreType` (`qdrant`, `milvus`) and `SearchType` (`dense` only today). `SearchType` names the whole retrieval shape rather than exposing a retriever list plus a fusion strategy separately, because those two always have to agree — naming the combination keeps the invalid ones unrepresentable.
 - `chunking/` — `ChunkingStrategy` enum, `ChonkieChunkingConfig`, `LangchainChunkingConfig`.
 
-## Dependencies (`app/dependencies/file_validation.py`)
+## Startup / bootstrap (`app/startup.py`)
 
-`validate_file_size` (rejects over `MAX_FILE_SIZE` MB), `validate_file_type` (checks MIME + extension + their consistency via `MIME_TYPE_MAPPING`), composed as `validate_file` — used as `Depends(validate_file)` on the upload endpoint.
+Manual service-locator globals set by `init_embed_model`, `init_parsing_service`, `init_postgres`, `init_minio`, `init_vector_store` and read via matching getters (`get_dense_embedding`, `get_parsing_service`, `get_postgres_pool`, `get_postgres_client`, `get_minio_service`, `get_vector_store_connection`).
 
-## Startup / bootstrap (`app/startup/startup.py`)
+`init_embed_model` builds `EmbeddingService.from_settings()` for the configured provider and smoke-tests it. `init_parsing_service` builds the providers once so a PDF backend's client is reused across files rather than rebuilt per ingestion. `init_vector_store` builds the connection for `VECTOR_STORE_PROVIDER`, verifies it, and registers it with `VectorStoreFactory`. `wait_for_postgres` retries the pool 5× at 0.5s and re-raises the last failure rather than continuing as if Postgres were reachable.
 
-Manual service-locator globals (`embed_model`, `postgres_client`, `minio_service`, `qdrant_service`) set by `init_embed_model`/`init_postgres`/`init_minio`/`init_qdrant` and read via matching getters. `init_embed_model` creates an `AsyncOpenAI` client against `VLLM_DENSE_EMBEDDING_URL` (embeddings are served through an OpenAI-compatible vLLM endpoint, not a local model) and smoke-tests it. Used identically — but independently instantiated — by both `app/app.py` (web) and `taskiq_worker.py` (worker).
+Used identically — but independently instantiated — by both `app/app.py` (web) and `app/tasks/broker.py` (worker), so there are no worker-local globals.
 
-## Background worker (`taskiq_worker.py`)
+## Background worker (`app/tasks/`)
 
-`RedisStreamBroker` + `RedisAsyncResultBackend`, both over `REDIS_URL`. `WORKER_STARTUP`/`WORKER_SHUTDOWN` hooks lazily initialize/tear down the same services as the web app. The one task, `process_vector_store_files(vectorstore_id, api_key, file_ids, chunking_strategy, chunk_size, chunk_overlap, request_id)`:
+`broker.py` owns only the broker lifecycle: `RedisStreamBroker` + `RedisAsyncResultBackend` over `REDIS_URL`, with `WORKER_STARTUP`/`WORKER_SHUTDOWN` hooks that run `_initialize_services()` (mirroring `app.app`'s startup event) once and close the Postgres pool plus `VectorStoreFactory.close_all()` on the way out. Keeping the task in a separate module is what lets `app.tasks.broker:broker` be the deploy entrypoint without importing the ingestion pipeline just to start the process.
 
-1. Filters `file_ids` against Postgres (`check_existing_files`), fetches total bytes + metadata
-2. **Processes exactly one file** — if `file_ids` resolves to more than one file, the extra files are silently skipped (chunked_texts stays empty) and the vector store is still marked `completed`
-3. Loads + chunks the (single) file, embeds + upserts into Qdrant
-4. Marks the vector store `failed` on any error, else `completed` with `usage_bytes`
+`ingestion_task.py` holds the one task, `ingest_vector_store_files(vectorstore_id, api_key, file_ids, chunking_strategy, chunk_size, chunk_overlap, request_id, trace_context, vector_store_type)`. It is orchestration only: bind `request_id_ctx`, delegate to `IngestionService`, log and re-raise so TaskIQ sees the failure, reset the contextvar.
 
 See [Flow](FLOW.md) for the full sequence diagrams.
