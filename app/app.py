@@ -2,17 +2,17 @@ from fastapi import FastAPI
 # Define startup
 from .startup import (init_embed_model,
                       init_postgres,
-                      init_qdrant,
+                      init_vector_store,
                       init_minio,
                       wait_for_postgres)
 # Router
-from .router import (file_router,
-                     vector_store_router)
+from .api.router import (file_router,
+                        vector_store_router)
 # Exception
 from .exceptions import AppBaseException
 from .exceptions.handlers import common_exception_handler
 # Middleware
-from .middleware.request_id import RequestIDMiddleware
+from .api.middleware import RequestIDMiddleware
 # Config
 from .core.config.storage import API_VERSION
 from .core.config import settings
@@ -129,9 +129,9 @@ async def startup_event() -> None:
     # Create table if not existed
     await postgres_client._create_table()
     SystemLogger.info("[APP] ✅ Postgres ready")
-    # Init qdrant
-    await init_qdrant()
-    SystemLogger.info("[APP] ✅ Qdrant ready")
+    # Init vector store (provider from VECTOR_STORE_PROVIDER)
+    await init_vector_store()
+    SystemLogger.info("[APP] ✅ Vector store ready")
     # Init Minio
     init_minio()
     SystemLogger.info("[APP] ✅ MinIO ready")

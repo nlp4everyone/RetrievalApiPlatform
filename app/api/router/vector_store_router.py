@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends
 from app.schemas.vector_store.requests import *
 from app.schemas.vector_store.responses import *
 # Security
-from app.security.auth import verify_api_key
+from app.api.security import verify_api_key
 # Service
 from app.services.vector_store import VectorStoreService
 

@@ -11,9 +11,9 @@ from app.schemas.file import (FilePurposes,
 # Service
 from app.services.file import FileService
 # Security
-from app.security.auth import verify_api_key
+from app.api.security import verify_api_key
 # Dependencies
-from app.dependencies.file_validation import validate_file
+from app.api.dependencies import validate_file
 
 # Router
 file_router = APIRouter()
