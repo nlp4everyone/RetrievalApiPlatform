@@ -1,9 +1,11 @@
 # Embedding
-from app.services.embedding import EmbeddingService
+from app.components.embedding import EmbeddingService
+# Parsing
+from app.components.parsing import ParsingService
 # DB
 from app.db.postgres import PostgresClient
 from app.db.minio import MinioService
-from app.db.qdrant import QdrantService
+from app.db.vector_store import BaseVectorStoreConnection, VectorStoreFactory
 # Postgres
 from asyncpg import PostgresError
 # Config
@@ -52,6 +54,40 @@ async def get_dense_embedding(texts: List[str]) -> List[List[float]]:
         List[List[float]]: Embedding vector for each input text
     """
     return await embed_model.embed(texts)
+
+def init_parsing_service() -> ParsingService:
+    """
+    Initialize the document parsing service.
+
+    Builds the providers selected via config (in-process decoder for text
+    formats, PDF_PARSER_PROVIDER for PDFs). Constructed once so the PDF
+    backend's client is reused across files rather than rebuilt per ingestion.
+
+    Returns:
+        ParsingService: Configured parsing service instance
+
+    Raises:
+        ValueError: If a selected provider is misconfigured (e.g. missing API key)
+    """
+    global parsing_service
+    parsing_service = ParsingService.from_settings()
+    SystemLogger.success(f"[STARTUP] Parsing service ready "
+                         f"({', '.join(parsing_service.supported_extensions)})")
+    return parsing_service
+
+
+def get_parsing_service() -> ParsingService:
+    """
+    Get the global parsing service instance.
+
+    Returns:
+        ParsingService: The initialized parsing service
+
+    Raises:
+        NameError: If the parsing service has not been initialized
+    """
+    return parsing_service
+
 
 def init_postgres() -> PostgresClient:
     """
@@ -104,29 +140,33 @@ def init_minio() -> MinioService:
                 raise e
     return minio_service
 
-async def init_qdrant() -> QdrantService:
+async def init_vector_store() -> BaseVectorStoreConnection:
     """
-    Initialize Qdrant vector database service.
+    Initialize the configured vector database connection.
 
-    Creates and configures a QdrantService instance for vector storage
-    and retrieval operations, and verifies connectivity.
+    Builds the connection for the provider selected via VECTOR_STORE_PROVIDER,
+    verifies connectivity, and registers it with VectorStoreFactory so call
+    sites can obtain per-collection stores without knowing the backend.
 
     Returns:
-        QdrantService: Configured Qdrant service instance
+        BaseVectorStoreConnection: Live vector store connection
 
     Raises:
-        Exception: If Qdrant is not reachable
+        Exception: If the vector database is not reachable
     """
-    global qdrant_service
+    global vector_store_connection
+    provider = VectorStoreFactory.default_provider()
     # Init connection
-    qdrant_service = QdrantService(url = QDRANT_URL, api_key = QDRANT_API_KEY)
+    vector_store_connection = VectorStoreFactory.connection_class(provider).from_settings()
     try:
-        await qdrant_service._check_connection()
-        SystemLogger.success("[STARTUP] Qdrant connection established")
+        await vector_store_connection.check_connection()
+        SystemLogger.success(f"[STARTUP] Vector store connection established ({provider})")
     except Exception as e:
-        SystemLogger.error(f"[STARTUP] Qdrant connection failed: {e!r}")
+        SystemLogger.error(f"[STARTUP] Vector store connection failed ({provider}): {e!r}")
         raise
-    return qdrant_service
+    # Make it reachable through the factory
+    VectorStoreFactory.register_connection(provider, vector_store_connection)
+    return vector_store_connection
 
 def get_embed_model() -> EmbeddingService:
     """
@@ -152,6 +192,19 @@ def get_postgres_pool() -> asyncpg.Pool:
     """
     return postgres_client.pool
 
+def get_postgres_client() -> PostgresClient:
+    """
+    Get the global PostgreSQL client instance.
+
+    Returns:
+        PostgresClient: The initialized PostgreSQL client, e.g. for graceful
+            shutdown via its close() method
+
+    Raises:
+        NameError: If the PostgreSQL client has not been initialized
+    """
+    return postgres_client
+
 def get_minio_service() -> MinioService:
     """
     Get the global MinIO service instance.
@@ -164,17 +217,17 @@ def get_minio_service() -> MinioService:
     """
     return minio_service
 
-def get_qdrant_service() -> QdrantService:
+def get_vector_store_connection() -> BaseVectorStoreConnection:
     """
-    Get the global Qdrant service instance.
+    Get the global vector store connection instance.
 
     Returns:
-        QdrantService: The initialized Qdrant service
+        BaseVectorStoreConnection: The initialized vector store connection
 
     Raises:
-        AttributeError: If Qdrant service has not been initialized
+        NameError: If the vector store connection has not been initialized
     """
-    return qdrant_service
+    return vector_store_connection
 
 async def wait_for_postgres(pool: asyncpg.Pool,
                             retries: int = 5,
