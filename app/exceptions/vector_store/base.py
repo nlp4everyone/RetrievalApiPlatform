@@ -32,3 +32,15 @@ class WrongPrefixVectorstoreException(WrongPrefixException):
                          prefix = prefix,
                          params = params,
                          code = code)
+
+class UnsupportedMultipleFilesException(AppBaseException):
+    def __init__(self,
+                 num_files: int,
+                 type: str = "invalid_request_error",
+                 params: Any = "file_ids",
+                 code: Any = "unsupported_value") -> None:
+        super().__init__(status_code = status.HTTP_400_BAD_REQUEST,
+                         response = BaseResponse(message = f"Only a single file is currently supported per vector store, got {num_files}.",
+                                                 type = type,
+                                                 params = params,
+                                                 code = code))

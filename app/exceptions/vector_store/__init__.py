@@ -1,2 +1,3 @@
-from .base import (VectorStoreNotFoundException,
+from .base import (UnsupportedMultipleFilesException,
+                   VectorStoreNotFoundException,
                    WrongPrefixVectorstoreException)
