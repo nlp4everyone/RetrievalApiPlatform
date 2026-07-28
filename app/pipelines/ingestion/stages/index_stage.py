@@ -56,27 +56,31 @@ class IndexStage(BaseIngestionStage):
         )
         context.metrics["collection_created"] = created
 
-        documents = [Document(page_content = chunk,
-                              metadata = {"source": context.file_id})
-                     for chunk in context.chunks]
-
-        # Slice documents and vectors together so each batch stays aligned
-        batches = [(documents[i:i + self._batch_size], context.embeddings[i:i + self._batch_size])
-                   for i in range(0, len(documents), self._batch_size)]
+        # Slice chunks and vectors together so each batch stays aligned
+        batches = [(context.chunks[i:i + self._batch_size], context.embeddings[i:i + self._batch_size])
+                   for i in range(0, len(context.chunks), self._batch_size)]
         context.metrics["index_num_batches"] = len(batches)
 
         semaphore = asyncio.Semaphore(self._concurrency)
 
-        async def upsert_batch(batch_documents: Sequence[Document],
-                               batch_embeddings: Sequence[list[float]]) -> int:
-            async with semaphore:
-                return await self._vector_store.insert_documents(documents = batch_documents,
-                                                                 embeddings = batch_embeddings,
-                                                                 batch_size = self._batch_size)
-
-        inserted_counts = await asyncio.gather(*[upsert_batch(docs, vectors)
-                                                 for docs, vectors in batches])
+        inserted_counts = await asyncio.gather(*[self._upsert_batch(chunks, vectors, semaphore, context.file_id)
+                                                 for chunks, vectors in batches])
         context.num_inserted = sum(inserted_counts)
+
+    async def _upsert_batch(self,
+                            batch_chunks: Sequence[str],
+                            batch_embeddings: Sequence[list[float]],
+                            semaphore: asyncio.Semaphore,
+                            file_id: str) -> int:
+        async with semaphore:
+            # Built after acquiring, not before - keeps at most `concurrency`
+            # batches of Document copies in memory at once
+            batch_documents = [Document(page_content = chunk,
+                                        metadata = {"source": file_id})
+                              for chunk in batch_chunks]
+            return await self._vector_store.insert_documents(documents = batch_documents,
+                                                             embeddings = batch_embeddings,
+                                                             batch_size = self._batch_size)
 
     def span_attributes(self, context: IngestionContext) -> dict[str, Any]:
         return {
