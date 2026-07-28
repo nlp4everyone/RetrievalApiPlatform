@@ -14,10 +14,9 @@ from app.components.chunking import ChunkingService
 from app.pipelines.ingestion.pipeline import IngestionPipeline
 from app.pipelines.ingestion.stages import (ChunkStage,
                                            DownloadStage,
-                                           EmbedStage,
-                                           IndexStage,
+                                           EmbedAndIndexStage,
                                            ParseStage)
-from app.pipelines.ingestion.stages.embed_stage import EmbedFn
+from app.pipelines.ingestion.stages.embed_index_stage import EmbedFn
 from app.components.parsing import ParsingService
 
 
@@ -28,7 +27,7 @@ def build_ingestion_pipeline(minio_client: Minio,
                              chunking_strategy: str = "auto",
                              chunk_size: Optional[int] = None,
                              chunk_overlap: Optional[int] = None) -> IngestionPipeline:
-    """Build the download -> parse -> chunk -> embed -> index pipeline.
+    """Build the download -> parse -> chunk -> embed+index pipeline.
 
     Args:
         minio_client: Connected MinIO client for the download stage
@@ -52,10 +51,8 @@ def build_ingestion_pipeline(minio_client: Minio,
         DownloadStage(minio_client = minio_client),
         ParseStage(parsing_service = parsing_service),
         ChunkStage(chunking_service = chunking_service),
-        EmbedStage(embed_fn = embed_fn,
-                   batch_size = EMBEDDING_UPLOAD_BATCH_SIZE,
-                   concurrency = EMBEDDING_BATCH_CONCURRENCY),
-        IndexStage(vector_store = vector_store,
-                   batch_size = EMBEDDING_UPLOAD_BATCH_SIZE,
-                   concurrency = EMBEDDING_BATCH_CONCURRENCY),
+        EmbedAndIndexStage(vector_store = vector_store,
+                           embed_fn = embed_fn,
+                           batch_size = EMBEDDING_UPLOAD_BATCH_SIZE,
+                           concurrency = EMBEDDING_BATCH_CONCURRENCY),
     ])

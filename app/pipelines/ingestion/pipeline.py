@@ -1,4 +1,4 @@
-"""The ingestion pipeline: download -> parse -> chunk -> embed -> index."""
+"""The ingestion pipeline: download -> parse -> chunk -> embed+index."""
 from typing import Any, Sequence
 
 from app.core.tracing import observation_metadata

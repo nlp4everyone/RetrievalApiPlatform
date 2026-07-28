@@ -25,9 +25,8 @@ class IngestionContext:
     # --- Filled in progressively by the stages ---------------------------
     raw_bytes: Optional[bytes] = None          # download
     text: Optional[str] = None                 # parse
-    chunks: list[str] = field(default_factory=list)              # chunk
-    embeddings: list[list[float]] = field(default_factory=list)  # embed
-    num_inserted: int = 0                      # index
+    chunks: list[str] = field(default_factory=list)  # chunk
+    num_inserted: int = 0                      # embed + index
 
     # Free-form numbers a stage wants on its span but that are not pipeline
     # state (parser class name, whether the collection was created, ...)

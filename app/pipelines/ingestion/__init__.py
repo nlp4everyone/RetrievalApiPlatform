@@ -1,4 +1,4 @@
-"""File ingestion: download -> parse -> chunk -> embed -> index.
+"""File ingestion: download -> parse -> chunk -> embed+index.
 
 Each step is a BaseIngestionStage; IngestionPipeline runs them in order and
 wraps each one in its own Langfuse observation.
