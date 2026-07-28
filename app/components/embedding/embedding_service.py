@@ -10,7 +10,7 @@ from app.core.config import (EMBEDDING_PROVIDER,
                              TEI_API_KEY,
                              SERVING_API_KEY)
 # Typing
-from typing import List
+from typing import List, Optional
 
 class EmbeddingService:
     """
@@ -28,6 +28,7 @@ class EmbeddingService:
             provider (BaseEmbeddingProvider): The provider that actually performs embedding calls
         """
         self._provider = provider
+        self.dimension: Optional[int] = None
 
     async def embed(self, texts: List[str]) -> List[List[float]]:
         """
@@ -43,12 +44,15 @@ class EmbeddingService:
 
     async def check_connection(self) -> None:
         """
-        Probe the underlying provider with a throwaway request.
+        Probe the underlying provider with a throwaway request, caching the
+        embedding dimension so callers can create a collection before the
+        first real embed call.
 
         Raises:
             Exception: If the provider is unreachable or returns an error
         """
-        await self._provider.embed(["Hello"])
+        result = await self._provider.embed(["Hello"])
+        self.dimension = len(result[0])
 
     @classmethod
     def from_settings(cls) -> "EmbeddingService":

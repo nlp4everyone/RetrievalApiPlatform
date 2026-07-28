@@ -55,6 +55,20 @@ async def get_dense_embedding(texts: List[str]) -> List[List[float]]:
     """
     return await embed_model.embed(texts)
 
+async def get_dense_embedding_dim() -> int:
+    """
+    Return the cached embedding dimension, set once during init_embed_model().
+
+    Returns:
+        int: Dimension of vectors produced by the configured embedding model
+
+    Raises:
+        RuntimeError: If called before init_embed_model() has run
+    """
+    if embed_model.dimension is None:
+        raise RuntimeError("Embedding service not initialized yet")
+    return embed_model.dimension
+
 def init_parsing_service() -> ParsingService:
     """
     Initialize the document parsing service.

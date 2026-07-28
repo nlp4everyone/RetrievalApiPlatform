@@ -7,6 +7,7 @@ from langchain_core.documents import Document
 from app.db.vector_store import BaseAsyncVectorStore
 from app.pipelines.ingestion.base import BaseIngestionStage
 from app.pipelines.ingestion.context import IngestionContext
+from app.startup import get_dense_embedding_dim
 
 
 class IndexStage(BaseIngestionStage):
@@ -52,7 +53,7 @@ class IndexStage(BaseIngestionStage):
         # One creation, before any concurrent write - the whole reason embed and
         # index are separate stages
         created = await self._vector_store.ensure_collection(
-            embedding_dim = len(context.embeddings[0])
+            embedding_dim = await get_dense_embedding_dim()
         )
         context.metrics["collection_created"] = created
 
