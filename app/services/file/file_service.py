@@ -211,24 +211,28 @@ class FileService:
             )
     
     @staticmethod
-    async def get_file_by_id(file_id: str) -> FileObject:
+    async def get_file_by_id(file_id: str,
+                             api_key: str) -> FileObject:
         """
         Retrieve a single file by its ID.
-        
+
         Args:
             file_id: Unique file identifier to retrieve
-            
+            api_key: API key that owns the file (for security)
+
         Returns:
             FileObject containing file metadata with Unix timestamps
-            
+
         Raises:
-            FileNotFoundException: If file does not exist (propagated from DB layer)
+            FileNotFoundException: If file does not exist or doesn't belong to the API key (propagated from DB layer)
         """
         postgres_pool = get_postgres_pool()
 
         try:
             # Fetch file metadata from database
-            result = await PostgresFileStore.get_file_by_id(pool=postgres_pool, file_id=file_id)
+            result = await PostgresFileStore.get_file_by_id(pool=postgres_pool,
+                                                            file_id=file_id,
+                                                            api_key=api_key)
 
             SystemLogger.debug(f"File retrieved: {file_id}")
 

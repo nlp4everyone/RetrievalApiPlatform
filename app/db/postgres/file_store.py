@@ -170,22 +170,26 @@ class PostgresFileStore:
 
     @staticmethod
     async def get_file_by_id(pool: asyncpg.Pool,
-                             file_id: str) -> Dict[str, Any]:
+                             file_id: str,
+                             api_key: str) -> Dict[str, Any]:
         """
         Retrieve a single file by its ID.
-        
+
         Args:
             pool: Database connection pool
             file_id: Unique file identifier to retrieve
-            
+            api_key: API key that owns the file (for security)
+
         Returns:
             Dictionary containing all file fields with metadata parsed from JSON
-            
+
         Raises:
-            FileNotFoundException: If the file does not exist
+            FileNotFoundException: If the file does not exist or doesn't belong to the API key
         """
         async with pool.acquire() as conn:
-            row = await conn.fetchrow("SELECT * FROM files WHERE id = $1;", file_id)
+            row = await conn.fetchrow("SELECT * FROM files WHERE id = $1 AND api_key = $2;",
+                                      file_id,
+                                      api_key)
 
         # Check if file exists and raise appropriate error if not
         if not row: 

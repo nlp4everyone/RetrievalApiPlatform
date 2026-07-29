@@ -67,7 +67,7 @@ async def get_file_by_id(file_id: str,
     Reference: [OpenAI Retrieve File API](https://developers.openai.com/api/reference/resources/files/methods/retrieve)
 
     """
-    return await FileService.get_file_by_id(file_id)
+    return await FileService.get_file_by_id(file_id, api_key)
 
 @file_router.delete("/files/{file_id}", response_model = FileDeletedResponse)
 async def delete_file(file_id: str,
