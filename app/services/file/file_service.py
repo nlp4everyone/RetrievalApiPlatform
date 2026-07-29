@@ -5,7 +5,7 @@ import asyncpg, socket
 from app.schemas.file import FilePurposes, FileObject, FileListResponse, FileQueryRequest
 from app.db.minio import MinioFileStore
 from app.db.postgres import PostgresFileStore
-from app.startup import get_minio_service, get_postgres_pool
+from app.startup import get_io_executor, get_minio_service, get_postgres_pool
 from app.core.config import UPLOADED_FILE_BUCKET
 from app.utils.key_generator import generate_file_id
 from app.utils.datetime_utils import convert_to_unix_timestamp
@@ -93,7 +93,8 @@ class FileService:
                 file_size=file_size_bytes,
                 file_name=object_path,
                 bucket_name=UPLOADED_FILE_BUCKET,
-                content_type=file.content_type
+                content_type=file.content_type,
+                executor=get_io_executor()
             )
             SystemLogger.info(f"File uploaded successfully to MinIO: {object_path}")
         except Exception as e:
@@ -313,7 +314,8 @@ class FileService:
                 await MinioFileStore.delete_file(
                     minio_client=minio_service.client,
                     file_path=deleted_path,
-                    bucket_name=file_bucket
+                    bucket_name=file_bucket,
+                    executor=get_io_executor()
                 )
                 SystemLogger.info(f"File deleted successfully from MinIO: {deleted_path}")
             except Exception as e:

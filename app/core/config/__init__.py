@@ -11,4 +11,5 @@ from .storage import *
 from .api import *
 from .redis import *
 from .embedding import *
+from .ingestion import *
 from .settings import settings

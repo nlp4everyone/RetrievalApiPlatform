@@ -14,7 +14,10 @@ from app.core.config import REDIS_URL
 from app.core.tracing import init_tracing
 from app.db.vector_store import VectorStoreFactory
 from app.startup import (get_postgres_client,
+                         init_cpu_executor,
+                         init_download_semaphore,
                          init_embed_model,
+                         init_io_executor,
                          init_minio,
                          init_parsing_service,
                          init_postgres,
@@ -47,6 +50,12 @@ async def _initialize_services() -> None:
 
     # Minio
     init_minio()
+    # Thread pools: I/O (MinIO, chunking-adjacent network calls) kept apart
+    # from CPU (chunking), plus the download concurrency cap - this worker
+    # process runs the whole ingestion pipeline, so it needs all three
+    init_io_executor()
+    init_cpu_executor()
+    init_download_semaphore()
     # Vector store (registers itself with VectorStoreFactory)
     await init_vector_store()
     # Embedding model

@@ -16,6 +16,10 @@ MINIO_CONSOLE_PORT = settings.MINIO_CONSOLE_PORT
 UPLOADED_FILE_BUCKET = storage_config.get("uploaded_file_bucket")
 MAX_FILE_SIZE = storage_config.get("max_file_size")
 
+# Thread pool for blocking MinIO I/O (upload/download/delete), kept separate
+# from CPU-bound work (chunking) so a slow download can't starve it
+IO_THREAD_POOL_SIZE = storage_config.get("io_thread_pool_size", 32)
+
 # API Versioning - load from YAML with ENV override
 api_config = yaml_config.get_section("api")
 API_VERSION = settings.API_VERSION

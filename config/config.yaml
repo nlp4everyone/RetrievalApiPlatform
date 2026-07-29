@@ -5,6 +5,7 @@ api:
 storage:
   uploaded_file_bucket: uploaded-files
   max_file_size: 100
+  io_thread_pool_size: 32
 
 redis:
   url: redis://redis:6379
@@ -15,3 +16,7 @@ models:
 embedding:
   upload_batch_size: 16
   batch_concurrency: 4
+
+ingestion:
+  cpu_thread_pool_size: 4
+  download_concurrency: 4

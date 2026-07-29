@@ -6,6 +6,7 @@ from minio import Minio
 from app.db.minio import MinioFileStore
 from app.pipelines.ingestion.base import BaseIngestionStage
 from app.pipelines.ingestion.context import IngestionContext
+from app.startup import get_download_semaphore, get_io_executor
 
 
 class DownloadStage(BaseIngestionStage):
@@ -27,9 +28,13 @@ class DownloadStage(BaseIngestionStage):
         Raises:
             ValueError: If the object could not be read
         """
-        file_bytes = await MinioFileStore.download_file(minio_client = self._minio_client,
-                                                        bucket_name = context.storage_bucket,
-                                                        file_path = context.storage_path)
+        # Bounded so a burst of concurrent ingestion jobs in this worker
+        # process can't alone exhaust the I/O thread pool
+        async with get_download_semaphore():
+            file_bytes = await MinioFileStore.download_file(minio_client = self._minio_client,
+                                                            bucket_name = context.storage_bucket,
+                                                            file_path = context.storage_path,
+                                                            executor = get_io_executor())
         if file_bytes is None:
             raise ValueError(f"Failed to download file: {context.storage_path}")
 

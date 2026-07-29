@@ -14,6 +14,7 @@ from app.core.config import *
 from app.core.tracing import init_tracing
 # Other component
 import requests, time, asyncio, asyncpg
+from concurrent.futures import ThreadPoolExecutor
 from typing import List
 # Logger
 from loggers import SystemLogger
@@ -230,6 +231,94 @@ def get_minio_service() -> MinioService:
         AttributeError: If MinIO service has not been initialized
     """
     return minio_service
+
+def init_io_executor() -> ThreadPoolExecutor:
+    """
+    Initialize the thread pool used for blocking I/O (MinIO upload/download/delete).
+
+    Kept separate from the CPU thread pool so a slow network transfer can
+    never queue behind - or starve out - CPU-bound chunking work, and vice versa.
+
+    Returns:
+        ThreadPoolExecutor: The I/O thread pool
+    """
+    global io_executor
+    io_executor = ThreadPoolExecutor(max_workers = IO_THREAD_POOL_SIZE, thread_name_prefix = "io")
+    SystemLogger.success(f"[STARTUP] I/O thread pool ready (max_workers={IO_THREAD_POOL_SIZE})")
+    return io_executor
+
+
+def get_io_executor() -> ThreadPoolExecutor:
+    """
+    Get the global I/O thread pool.
+
+    Returns:
+        ThreadPoolExecutor: The initialized I/O thread pool
+
+    Raises:
+        NameError: If init_io_executor() has not run yet
+    """
+    return io_executor
+
+
+def init_cpu_executor() -> ThreadPoolExecutor:
+    """
+    Initialize the thread pool used for CPU-bound chunking work.
+
+    Sized to the machine's cores (see CPU_THREAD_POOL_SIZE) rather than the
+    I/O pool's size, since oversubscribing CPU-bound work just adds context
+    switching, not throughput.
+
+    Returns:
+        ThreadPoolExecutor: The CPU thread pool
+    """
+    global cpu_executor
+    cpu_executor = ThreadPoolExecutor(max_workers = CPU_THREAD_POOL_SIZE, thread_name_prefix = "cpu")
+    SystemLogger.success(f"[STARTUP] CPU thread pool ready (max_workers={CPU_THREAD_POOL_SIZE})")
+    return cpu_executor
+
+
+def get_cpu_executor() -> ThreadPoolExecutor:
+    """
+    Get the global CPU thread pool.
+
+    Returns:
+        ThreadPoolExecutor: The initialized CPU thread pool
+
+    Raises:
+        NameError: If init_cpu_executor() has not run yet
+    """
+    return cpu_executor
+
+
+def init_download_semaphore() -> asyncio.Semaphore:
+    """
+    Initialize the semaphore capping concurrent file downloads per worker process.
+
+    Bounds how many files DownloadStage pulls from MinIO at once, so a burst
+    of ingestion jobs can't alone exhaust the I/O thread pool.
+
+    Returns:
+        asyncio.Semaphore: The download concurrency semaphore
+    """
+    global download_semaphore
+    download_semaphore = asyncio.Semaphore(DOWNLOAD_CONCURRENCY)
+    SystemLogger.success(f"[STARTUP] Download concurrency limit ready (limit={DOWNLOAD_CONCURRENCY})")
+    return download_semaphore
+
+
+def get_download_semaphore() -> asyncio.Semaphore:
+    """
+    Get the global download concurrency semaphore.
+
+    Returns:
+        asyncio.Semaphore: The initialized download concurrency semaphore
+
+    Raises:
+        NameError: If init_download_semaphore() has not run yet
+    """
+    return download_semaphore
+
 
 def get_vector_store_connection() -> BaseVectorStoreConnection:
     """

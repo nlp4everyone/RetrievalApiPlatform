@@ -4,6 +4,7 @@ from .startup import (init_embed_model,
                       init_postgres,
                       init_vector_store,
                       init_minio,
+                      init_io_executor,
                       wait_for_postgres)
 # Router
 from .api.router import (file_router,
@@ -135,5 +136,8 @@ async def startup_event() -> None:
     # Init Minio
     init_minio()
     SystemLogger.info("[APP] ✅ MinIO ready")
+    # Init I/O thread pool (used by MinIO upload/delete on this process)
+    init_io_executor()
+    SystemLogger.info("[APP] ✅ I/O thread pool ready")
     # Logging
     SystemLogger.success(f"[APP] Service started in {round(time.perf_counter() - start,1)}s")

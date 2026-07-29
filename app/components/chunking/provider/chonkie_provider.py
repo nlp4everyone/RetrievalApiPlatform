@@ -12,6 +12,7 @@ from app.schemas.chunking import (ChunkingStrategy,
 from typing import List, Optional
 # Other component
 import asyncio
+from app.startup import get_cpu_executor
 
 
 class ChonkieProvider(BaseChunkingProvider):
@@ -66,7 +67,8 @@ class ChonkieProvider(BaseChunkingProvider):
         Returns:
             List[str]: Chunks in document order
         """
-        return await asyncio.to_thread(self._split_sync, text)
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(get_cpu_executor(), self._split_sync, text)
 
     def _split_sync(self, text: str) -> List[str]:
         return [chunk.text for chunk in self._chunker.chunk(text)]
