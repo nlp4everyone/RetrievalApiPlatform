@@ -73,9 +73,9 @@ def init_parsing_service() -> ParsingService:
     """
     Initialize the document parsing service.
 
-    Builds the providers selected via config (in-process decoder for text
-    formats, PDF_PARSER_PROVIDER for PDFs). Constructed once so the PDF
-    backend's client is reused across files rather than rebuilt per ingestion.
+    Builds the providers selected via config (PDF_PARSER_PROVIDER for PDFs,
+    Unstructured for everything else). Constructed once so each backend's
+    client is reused across files rather than rebuilt per ingestion.
 
     Returns:
         ParsingService: Configured parsing service instance

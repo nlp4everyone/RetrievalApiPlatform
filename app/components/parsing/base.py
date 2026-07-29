@@ -11,12 +11,15 @@ class BaseParsingProvider(ABC):
     """
 
     @abstractmethod
-    async def parse(self, file_bytes: bytes) -> str:
+    async def parse(self, file_bytes: bytes, file_extension: str = "") -> str:
         """
         Extract text content from raw file bytes.
 
         Args:
             file_bytes (bytes): Raw contents of the file
+            file_extension (str): Extension including the dot, e.g. ".docx".
+                Providers that only ever handle one format may ignore it;
+                multi-format providers use it as a content-type hint.
 
         Returns:
             str: Extracted text

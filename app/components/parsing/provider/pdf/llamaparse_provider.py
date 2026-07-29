@@ -48,7 +48,7 @@ class LlamaParseProvider(BaseParsingProvider):
                                   verbose = verbose,
                                   **kwargs)
 
-    async def parse(self, file_bytes: bytes) -> str:
+    async def parse(self, file_bytes: bytes, file_extension: str = "") -> str:
         """
         Parse a PDF and return its text content as Markdown.
 

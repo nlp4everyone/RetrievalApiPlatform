@@ -31,7 +31,7 @@ class ParseStage(BaseIngestionStage):
         # knowing when a document produces unexpected text
         context.metrics["parser_provider"] = type(provider).__name__
 
-        context.text = await provider.parse(context.raw_bytes)
+        context.text = await provider.parse(context.raw_bytes, context.file_extension)
 
     def span_attributes(self, context: IngestionContext) -> dict[str, Any]:
         return {

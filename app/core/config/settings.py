@@ -26,9 +26,12 @@ class Settings(BaseSettings):
     # External API Keys
     UNDATASIO_API_KEY: Optional[str] = Field(None, description="Undatasio API key")
     LLAMAPARSE_API_KEY: Optional[str] = Field(None, description="LlamaParse API key")
+    UNSTRUCTURED_API_KEY: Optional[str] = Field(None, description="Unstructured API key")
+    UNSTRUCTURED_API_URL: str = "https://api.unstructuredapp.io/general/v0/general"
 
-    # Parsing provider selection for PDFs. Plain-text formats always use the
-    # in-process decoder, so only PDF has a backend worth choosing.
+    # Parsing provider selection for PDFs. Every other format (.txt, .md,
+    # .docx, .doc, images) is parsed via the Unstructured API, so only PDF
+    # has a backend worth choosing.
     PDF_PARSER_PROVIDER: str = "llamaparse"
     
     # Model Config

@@ -1,9 +1,10 @@
 # Inherit
 from .base import BaseParsingProvider
-from .provider.common import TextProvider
 from .provider.pdf import LlamaParseProvider
+from .provider.unstructured import UnstructuredProvider
 # Config
-from app.core.config import LLAMAPARSE_API_KEY, PDF_PARSER_PROVIDER
+from app.core.config import (LLAMAPARSE_API_KEY, PDF_PARSER_PROVIDER,
+                             UNSTRUCTURED_API_KEY, UNSTRUCTURED_API_URL)
 # Typing
 from functools import partial
 from typing import Callable
@@ -99,16 +100,18 @@ class ParsingService:
         Raises:
             ValueError: If no provider is registered for the extension
         """
-        return await self.provider_for(file_extension).parse(file_bytes)
+        return await self.provider_for(file_extension).parse(file_bytes, file_extension)
 
     @classmethod
     def from_settings(cls) -> "ParsingService":
         """
         Build the ParsingService for the providers selected via config.
 
-        Plain-text formats always use the in-process decoder. PDFs go to the
-        backend named by PDF_PARSER_PROVIDER, which is validated here but not
-        constructed until a PDF is actually parsed.
+        PDFs go to the backend named by PDF_PARSER_PROVIDER, which is
+        validated here but not constructed until a PDF is actually parsed.
+        Every other format - plain text, Markdown, Word documents, images -
+        goes to the Unstructured API, converted to Markdown so all providers
+        agree on output shape.
 
         Returns:
             ParsingService: Instance wrapping the configured provider factories
@@ -116,12 +119,19 @@ class ParsingService:
         Raises:
             ValueError: If PDF_PARSER_PROVIDER names a backend this app cannot build
         """
-        text_factory: ProviderFactory = TextProvider
         pdf_factory = cls._pdf_provider_factory()
+        unstructured_factory: ProviderFactory = partial(UnstructuredProvider,
+                                                        api_key=UNSTRUCTURED_API_KEY,
+                                                        api_url=UNSTRUCTURED_API_URL)
 
-        return cls({".txt": text_factory,
-                    ".md": text_factory,
-                    ".pdf": pdf_factory})
+        return cls({".pdf": pdf_factory,
+                    ".txt": unstructured_factory,
+                    ".md": unstructured_factory,
+                    ".docx": unstructured_factory,
+                    ".doc": unstructured_factory,
+                    ".png": unstructured_factory,
+                    ".jpg": unstructured_factory,
+                    ".jpeg": unstructured_factory})
 
     @staticmethod
     def _pdf_provider_factory() -> ProviderFactory:
