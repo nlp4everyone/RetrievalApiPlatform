@@ -38,13 +38,13 @@ Mọi endpoint đều yêu cầu `Depends(verify_api_key)`.
 
 `RequestIDMiddleware` là middleware ASGI thuần (không phải `BaseHTTPMiddleware` — loại đó sẽ reset contextvar trước khi access logger của uvicorn kịp chạy). Nó tái sử dụng header `X-Request-Id` do client gửi nếu có, nếu không thì sinh `req_{uuid4().hex}`, bind vào `request_id_ctx` (một `contextvars.ContextVar` trong `app/core/request_context.py`) trong suốt vòng đời request, và echo lại trên response. Chính ID đó được truyền vào `ingest_vector_store_files.kiq(...)` và bind lại bên trong worker task, nên một request ID xuyên suốt cả log HTTP lẫn job ingestion bất đồng bộ mà request đó kích hoạt.
 
-`app/app.py` còn định nghĩa `GET /health` (loại khỏi OpenAPI schema), đăng ký `RequestIDMiddleware`, handler `AppBaseException` toàn cục, và một startup event khởi tạo theo thứ tự tracing → embed model → Postgres (pool + `wait_for_postgres` + tạo bảng) → vector store → MinIO.
+`app/app.py` còn định nghĩa `GET /health` (loại khỏi OpenAPI schema), đăng ký `RequestIDMiddleware`, handler `AppBaseException` toàn cục, và một startup event khởi tạo theo thứ tự tracing → embed model → Postgres (pool + `wait_for_postgres` + tạo bảng) → vector store → MinIO → pool I/O. Ngoài ra `app.py` còn gắn hai log filter cho `uvicorn.access`: `HealthCheckLogFilter` (im lặng với `/health` khi 2xx) và `QuietAccessLogFilter` (im lặng với list/retrieve/modify khi 2xx — những route đó đã được service layer log; create/delete/search vẫn luôn hiện, và mọi lỗi non-2xx đều hiện).
 
 ## Service layer (`app/services/`)
 
 ### `FileService` (`file/file_service.py`)
 
-Các static method `upload_file`, `list_files`, `get_file_by_id`, `delete_file`. Luồng upload: sinh `file_id`, dựng object path `{api_key}/uploads/{uuid}_{filename}`, upload byte lên MinIO, rồi insert row metadata vào Postgres. Nếu insert Postgres thất bại sau khi upload MinIO đã thành công, object bị bỏ lại thành mồ côi (chỉ log warning, không dọn dẹp) và `PostgresConnectionException` được raise.
+Các static method `upload_file`, `list_files`, `get_file_by_id`, `delete_file` — cả bốn đều scope theo `api_key` của người gọi, kể cả `get_file_by_id` (trước đây đọc theo `id` đơn thuần, nên một key hợp lệ có thể đọc metadata của file thuộc key khác). Luồng upload: sinh `file_id`, dựng object path `{api_key}/uploads/{uuid}_{filename}`, upload byte lên MinIO qua `get_io_executor()`, rồi insert row metadata vào Postgres. Nếu insert Postgres thất bại sau khi upload MinIO đã thành công, object bị bỏ lại thành mồ côi (chỉ log warning, không dọn dẹp) và `PostgresConnectionException` được raise.
 
 ### `VectorStoreService` (`vector_store/vector_store_service.py`)
 
@@ -76,17 +76,24 @@ Lợi ích: hình dạng trace là thuộc tính của pipeline, và nó vẫn �
 
 ### Ingestion (`pipelines/ingestion/`)
 
-`IngestionContext` là một dataclass mutable duy nhất xuyên suốt mọi stage — input (`vector_store_id`, `file_id`, `file_metadata`, tham số chunking), kết quả điền dần (`raw_bytes` → `text` → `chunks` → `embeddings` → `num_inserted`), và một dict `metrics` tự do cho những con số thuộc về span nhưng không thuộc về state của pipeline. Các property tiện lợi (`filename`, `file_extension`, `storage_bucket`, `storage_path`) đọc từ `file_metadata`.
+`IngestionContext` là một dataclass mutable duy nhất xuyên suốt mọi stage — input (`vector_store_id`, `file_id`, `file_metadata`, tham số chunking), kết quả điền dần (`raw_bytes` → `text` → `chunks` → `num_inserted`), và một dict `metrics` tự do cho những con số thuộc về span nhưng không thuộc về state của pipeline. Các property tiện lợi (`filename`, `file_extension`, `storage_bucket`, `storage_path`) đọc từ `file_metadata`.
 
 | Stage | Làm gì | Ghi chú span |
 |---|---|---|
-| `DownloadStage` | Lấy byte từ MinIO | — |
-| `ParseStage` | `ParsingService.parse(bytes, ext)` → text | ghi lại provider đã xử lý |
-| `ChunkStage` | `ChunkingService.split_text(text)` → chunks | — |
-| `EmbedStage` | Chia chunk thành batch, embed song song | `ObservationType.EMBEDDING`; báo cáo `num_batches`, `batch_size` |
-| `IndexStage` | `ensure_collection()` một lần, rồi insert các batch song song | báo cáo collection có được tạo mới không, `num_batches` |
+| `DownloadStage` | Lấy byte từ MinIO, dưới `get_download_semaphore()`, transfer chạy trên `get_io_executor()` | bucket/path, tên file, `file.size_bytes` |
+| `ParseStage` | `ParsingService.parse(bytes, ext)` → text (Markdown) | ghi lại provider đã xử lý, `text.num_chars` |
+| `ChunkStage` | `ChunkingService.split_text(text)` → chunks, chạy trên `get_cpu_executor()` | strategy/provider, `chunks.count`, `chunks.avg_chars` |
+| `EmbedAndIndexStage` | `ensure_collection(embedding_dim)` một lần, rồi embed + upsert **từng batch một** | collection có được tạo mới không, `embedding.dims`, `embed`/`index` wall-clock, `batch.*` |
 
-Cả `EmbedStage` và `IndexStage` đều chia thành batch `EMBEDDING_UPLOAD_BATCH_SIZE` và giới hạn bằng `asyncio.Semaphore(EMBEDDING_BATCH_CONCURRENCY)`, nên bộ nhớ đỉnh xấp xỉ `batch_size * concurrency` bất kể file lớn cỡ nào.
+`EmbedAndIndexStage` là kết quả gộp hai stage `EmbedStage` + `IndexStage` cũ thành một vòng lặp streaming:
+
+- Chunk được chia thành batch `EMBEDDING_UPLOAD_BATCH_SIZE`, và **một** `asyncio.Semaphore(EMBEDDING_BATCH_CONCURRENCY)` bao cả embed lẫn upsert của batch đó — không còn "embed xong toàn file rồi mới ghi", batch đầu tiên đã bắt đầu ghi trong khi các batch sau còn đang embed.
+- `Document` chỉ được dựng *sau* khi lấy được semaphore, nên bộ nhớ đỉnh là `batch_size × concurrency` batch chunk/vector/Document, không phải toàn bộ file.
+- `embedding_dim` lấy từ `get_dense_embedding_dim()` — số chiều được `EmbeddingService.check_connection()` cache lúc startup — nên collection tạo được *trước* lần embed đầu tiên. Đây chính là điều kiện để streaming khả thi: `IndexStage` cũ phải suy `embedding_dim` từ `context.embeddings[0]`, tức phải chờ embed xong.
+- `embed_wall_clock_s` / `index_wall_clock_s` được tính bằng `_union_duration()`, hợp các khoảng thời gian chồng nhau, vì cộng thẳng thời lượng từng batch chạy song song sẽ đếm trùng.
+- Lưu ý: stage gộp này không override `observation_type`, nên nó xuất hiện trên Langfuse dưới `ObservationType.SPAN`, khác với `EmbedStage` trước đây (`EMBEDDING`).
+
+`IngestionContext` cũng theo đó: không còn field `embeddings` — vector chỉ tồn tại trong phạm vi một batch, và `num_inserted` là output duy nhất của bước cuối.
 
 `build_ingestion_pipeline(...)` là nơi duy nhất quyết định stage nào chạy và theo thứ tự nào. `ChunkingService` được dựng theo từng pipeline chứ không phải lúc startup, vì chunk size và overlap đến từ request tạo vector store.
 
@@ -114,15 +121,19 @@ Mọi package ở đây theo cùng một khuôn — một `base.py` khai báo in
 
 | Package | Interface | Provider | Chọn bằng |
 |---|---|---|---|
-| `parsing/` | `BaseParsingProvider` | `TextProvider` (`.txt`, `.md`), `LlamaParseProvider` (`.pdf`) | `PDF_PARSER_PROVIDER` |
+| `parsing/` | `BaseParsingProvider` | `LlamaParseProvider` (`.pdf`), `UnstructuredProvider` (`.txt`, `.md`, `.docx`, `.doc`, `.png`, `.jpg`, `.jpeg`) | `PDF_PARSER_PROVIDER` (chỉ cho PDF) |
 | `chunking/` | `BaseChunkingProvider` | `ChonkieProvider`, `LangchainProvider` | `CHUNKING_PROVIDER` |
 | `embedding/` | `BaseEmbeddingProvider` | `OpenAIEmbeddingProvider`, `TEIEmbeddingProvider` | `EMBEDDING_PROVIDER` |
 
-`ParsingService.from_settings()` map extension tới *provider factory*, không phải instance: định dạng text thuần luôn dùng decoder in-process, còn backend PDF được kiểm tra tên lúc startup (nên gõ sai là fail ngay) nhưng chỉ được khởi tạo khi thực sự có PDF cần parse. `supports()`, `supported_extensions` và `provider_for()` phơi bày registry; extension không có trong map sẽ raise `ValueError("Unsupported file format: ...")`.
+`ParsingService.from_settings()` map extension tới *provider factory*, không phải instance: `.pdf` đi tới backend được `PDF_PARSER_PROVIDER` đặt tên, **mọi định dạng còn lại** (`.txt`, `.md`, `.docx`, `.doc`, `.png`, `.jpg`, `.jpeg`) đi tới Unstructured API. Vì `.txt`/`.md` được đăng ký cùng *một object factory*, chúng dùng chung một instance provider — dict `_instances` được key theo factory chứ không theo extension chính vì thế. Tên backend PDF được kiểm tra lúc startup (nên gõ sai là fail ngay) nhưng provider chỉ được khởi tạo khi thực sự có file cần parse, và `UNSTRUCTURED_API_KEY` cũng chỉ được kiểm tra ở thời điểm đó — một deployment chỉ ingest PDF không nên fail khi khởi động vì thiếu key của Unstructured. `supports()`, `supported_extensions` và `provider_for()` phơi bày registry; extension không có trong map sẽ raise `ValueError("Unsupported file format: ...")`.
 
-Lưu ý điểm lệch: `ALLOWED_EXTENSIONS` lúc upload còn cho phép `.docx`, `.csv`, `.json` và ảnh — những định dạng đó **upload được** dưới dạng File nhưng không có provider parsing nào đăng ký.
+`UnstructuredProvider` gọi `partition_via_api` (thư viện `unstructured` là đồng bộ, nên chạy qua `asyncio.to_thread`) và nhận về element list JSON — API này **không** hỗ trợ output Markdown, chỉ `application/json` hoặc `text/csv`. Provider tự render element list thành Markdown tại chỗ: `Title` → heading theo `category_depth`, `ListItem` → bullet thụt lề, `Table` → bảng Markdown dựng từ metadata `text_as_html` (qua BeautifulSoup). Nhờ vậy mọi provider parsing đều trả về cùng một hình dạng output (Markdown), giống `LlamaParseProvider` với PDF — chunking phía sau không phải phân biệt định dạng nguồn.
+
+Lưu ý điểm lệch giữa hai allow-list: `ALLOWED_EXTENSIONS` lúc upload cho phép `.csv`, `.json` và `.gif` — ba định dạng đó **upload được** dưới dạng File nhưng không có provider parsing nào đăng ký, nên ingestion sẽ raise `ValueError`. Ngược lại, `.md` và `.doc` **parse được** nhưng không nằm trong `ALLOWED_EXTENSIONS`, và `validate_file_type` chặn theo extension (không có ngoại lệ), nên chúng luôn bị 415 ngay ở bước upload.
 
 `ChunkingService` phơi bày `strategy_name` và `async split_text(text)`. Provider Chonkie hỗ trợ `character | sentence | recursive | token` (mặc định `recursive`, `chunk_size=800`, `chunk_overlap=400`). Ở tầng API, `VectorStoreCreateRequest.chunking_strategy` chỉ cho chọn `"auto"` hoặc `"static"`, nên các strategy chi tiết hơn không tiếp cận được qua API công khai.
+
+Cả hai chunking provider đều `run_in_executor(get_cpu_executor(), ...)`: splitting là CPU-bound và nếu chạy thẳng trên event loop sẽ làm đứng mọi task khác trong cùng tiến trình. Pool CPU (`CPU_THREAD_POOL_SIZE`, mặc định 4) được cố ý tách khỏi pool I/O (`IO_THREAD_POOL_SIZE`, mặc định 32) — oversubscribe công việc CPU-bound chỉ thêm context switch chứ không tăng thông lượng, còn dùng chung pool thì một lượt transfer MinIO chậm có thể làm chunking phải xếp hàng, và ngược lại.
 
 ## Data layer (`app/db/`)
 
@@ -132,6 +143,8 @@ Lưu ý điểm lệch: `ALLOWED_EXTENSIONS` lúc upload còn cho phép `.docx`,
 | `postgres/` | `PostgresClient`, `PostgresFileStore`, `PostgresVectorStore` | Bảng metadata `files` + `vector_stores` (sở hữu theo `api_key`, status, `vector_store_type`, metadata JSONB) | `postgres` (5432) |
 | `vector_store/` | `BaseVectorStoreConnection`, `BaseAsyncVectorStore`, `VectorStoreFactory` | Mỗi vector store một collection (`collection_name == vector_store_id`) | `qdrant` (6333/6334) |
 
+Mọi thao tác MinIO (`upload_file`, `download_file`, `delete_file`) đều nhận tham số `executor` và được gọi với `get_io_executor()`, thay vì mượn default executor của event loop. `download_file` uỷ quyền cho helper `_fetch_object`, gộp `get_object()` + `.read()` + `close()` thành **một** đơn vị công việc trên worker thread: `get_object()` chỉ mở stream (đọc header), toàn bộ transfer thật nằm ở `.read()`, nên nếu chỉ offload lời gọi mở stream thì event loop vẫn bị chặn theo kích thước file.
+
 ### Trừu tượng hoá vector store (`db/vector_store/`)
 
 Hai abstraction trong `base.py`:
@@ -139,7 +152,9 @@ Hai abstraction trong `base.py`:
 - `BaseVectorStoreConnection` — kết nối dài hạn tạo một lần lúc startup (`from_settings()`, `client`, `check_connection()`, `close()`); tương đương một connection pool
 - `BaseAsyncVectorStore` — các thao tác giới hạn trong một collection, dựng theo từng lần dùng từ một client
 
-`ensure_collection` được tách khỏi `insert_documents` một cách có chủ đích. Gộp việc tạo collection vào đường insert buộc mọi batch song song phải tranh nhau một check-then-act — đó chính là lý do code ingest trước đây phải chạy batch đầu tiên một mình. Giờ caller tạo collection một lần từ đầu, sau đó mọi insert đều thuần và song song an toàn.
+`ensure_collection(embedding_dim)` được tách khỏi `insert_documents` một cách có chủ đích. Gộp việc tạo collection vào đường insert buộc mọi batch song song phải tranh nhau một check-then-act — đó chính là lý do code ingest trước đây phải chạy batch đầu tiên một mình. Giờ caller tạo collection một lần từ đầu, sau đó mọi insert đều thuần và song song an toàn.
+
+Điểm quan trọng đi kèm: `embedding_dim` truyền vào đến từ `get_dense_embedding_dim()` (cache lúc startup) chứ không phải từ vector embed đầu tiên. Nhờ vậy contract của vector store không còn ép caller phải embed trước khi tạo collection — chính điều đó cho phép `EmbedAndIndexStage` vừa embed vừa ghi theo kiểu streaming.
 
 `types.py` chứa các hình dạng trung lập với backend — `RetrievedChunk`, và cây filter gồm `FieldCondition` / `FilterGroup` với `FilterOperator` (`eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `in`, `nin`) và `FilterCombinator` (`and`, `or`). Không gì trong module này được phép import SDK của nhà cung cấp; đây là những hình dạng duy nhất tầng service nhìn thấy, nên việc đổi Qdrant sang Milvus không bao giờ lan lên trên `app.db`.
 
@@ -156,9 +171,9 @@ Mỗi backend cung cấp một `filter_translator.py` để render cây trung l�
 Hai lớp được gộp theo từng module domain:
 
 1. **pydantic-settings** (`settings.py`) — đọc `.env` / biến môi trường thật. Các field bắt buộc (không có default) gồm API key, credential Postgres/MinIO/Qdrant/Langfuse. Validator bắt buộc `API_VERSION` bắt đầu bằng `v`, port dương, secret không rỗng, `LOG_LEVEL`/`LOG_FORMAT` nằm trong tập cho phép, và mỗi biến `EMBEDDING_PROVIDER` / `CHUNKING_PROVIDER` / `PDF_PARSER_PROVIDER` / `VECTOR_STORE_PROVIDER` phải là một backend đã biết — nên gõ sai sẽ fail lúc startup, không phải lúc dùng lần đầu.
-2. **YAML** (`config/config.yaml`, nạp qua `YamlConfigLoader`) — các tunable ổn định: `api.num_workers`, `storage.uploaded_file_bucket`/`max_file_size`, `redis.url`, `models.dense_model_name`, `embedding.upload_batch_size`/`batch_concurrency`.
+2. **YAML** (`config/config.yaml`, nạp qua `YamlConfigLoader`) — các tunable ổn định: `api.num_workers`, `storage.uploaded_file_bucket`/`max_file_size`/`io_thread_pool_size`, `redis.url`, `models.dense_model_name`, `embedding.upload_batch_size`/`batch_concurrency`, `ingestion.cpu_thread_pool_size`/`download_concurrency`.
 
-Các module theo domain (`database.py`, `storage.py`, `models.py`, `embedding.py`, `redis.py`, `langfuse.py`, `api.py`) gộp cả hai nguồn thành hằng số phẳng import được từ `app.core.config`. Danh sách tham số đầy đủ: [Configuration Reference](../CONFIGURATION.md).
+Các module theo domain (`database.py`, `storage.py`, `models.py`, `embedding.py`, `ingestion.py`, `redis.py`, `langfuse.py`, `api.py`) gộp cả hai nguồn thành hằng số phẳng import được từ `app.core.config`. Ba tham số điều tiết concurrency của worker nằm ở hai module khác nhau vì thuộc hai domain khác nhau: `IO_THREAD_POOL_SIZE` trong `storage.py` (nó phục vụ MinIO), còn `CPU_THREAD_POOL_SIZE` và `DOWNLOAD_CONCURRENCY` trong `ingestion.py`. Danh sách tham số đầy đủ: [Configuration Reference](../CONFIGURATION.md).
 
 ## Tracing (`app/core/tracing/`)
 
@@ -184,15 +199,17 @@ Gốc là `AppBaseException(status_code, response: BaseResponse, log_message)`. 
 
 ## Startup / bootstrap (`app/startup.py`)
 
-Các biến global kiểu service-locator, đặt bởi `init_embed_model`, `init_parsing_service`, `init_postgres`, `init_minio`, `init_vector_store` và đọc qua các getter tương ứng (`get_dense_embedding`, `get_parsing_service`, `get_postgres_pool`, `get_postgres_client`, `get_minio_service`, `get_vector_store_connection`).
+Các biến global kiểu service-locator, đặt bởi `init_embed_model`, `init_parsing_service`, `init_postgres`, `init_minio`, `init_vector_store`, `init_io_executor`, `init_cpu_executor`, `init_download_semaphore` và đọc qua các getter tương ứng (`get_dense_embedding`, `get_dense_embedding_dim`, `get_parsing_service`, `get_postgres_pool`, `get_postgres_client`, `get_minio_service`, `get_vector_store_connection`, `get_io_executor`, `get_cpu_executor`, `get_download_semaphore`).
 
-`init_embed_model` dựng `EmbeddingService.from_settings()` cho provider đã cấu hình rồi smoke-test nó. `init_parsing_service` dựng các provider một lần để client của backend PDF được tái sử dụng qua nhiều file thay vì dựng lại mỗi lần ingest. `init_vector_store` dựng connection cho `VECTOR_STORE_PROVIDER`, kiểm tra nó, rồi đăng ký với `VectorStoreFactory`. `wait_for_postgres` thử lại pool 5 lần cách nhau 0.5s và raise lại lỗi cuối cùng thay vì chạy tiếp như thể Postgres vẫn truy cập được.
+`init_embed_model` dựng `EmbeddingService.from_settings()` cho provider đã cấu hình rồi smoke-test nó; chính lời gọi `check_connection()` đó cache luôn số chiều vector, sau này đọc qua `get_dense_embedding_dim()` (raise `RuntimeError` nếu bị gọi trước khi init). `init_parsing_service` dựng các provider một lần để client của backend parsing được tái sử dụng qua nhiều file thay vì dựng lại mỗi lần ingest. `init_vector_store` dựng connection cho `VECTOR_STORE_PROVIDER`, kiểm tra nó, rồi đăng ký với `VectorStoreFactory`. `wait_for_postgres` thử lại pool 5 lần cách nhau 0.5s và raise lại lỗi cuối cùng thay vì chạy tiếp như thể Postgres vẫn truy cập được.
 
-Được dùng giống hệt nhau — nhưng khởi tạo độc lập — bởi cả `app/app.py` (web) và `app/tasks/broker.py` (worker), nên không có biến global riêng cho worker.
+Ba resource điều tiết concurrency cũng nằm ở đây: `init_io_executor` (pool cho I/O blocking của MinIO), `init_cpu_executor` (pool cho chunking CPU-bound) và `init_download_semaphore` (trần số file tải song song mỗi tiến trình worker).
+
+Được dùng giống hệt nhau — nhưng khởi tạo độc lập — bởi cả `app/app.py` (web) và `app/tasks/broker.py` (worker), nên không có biến global riêng cho worker. Hai tiến trình khởi tạo **không hoàn toàn cùng một tập**: web bỏ qua `init_parsing_service`, `init_cpu_executor` và `init_download_semaphore` vì nó không parse cũng không chunk — nó chỉ cần pool I/O cho upload/delete MinIO.
 
 ## Background worker (`app/tasks/`)
 
-`broker.py` chỉ nắm vòng đời của broker: `RedisStreamBroker` + `RedisAsyncResultBackend` trên `REDIS_URL`, với các hook `WORKER_STARTUP`/`WORKER_SHUTDOWN` chạy `_initialize_services()` (phản chiếu startup event của `app.app`) đúng một lần, rồi đóng pool Postgres cùng `VectorStoreFactory.close_all()` khi thoát. Việc tách task sang module riêng là thứ cho phép `app.tasks.broker:broker` làm entrypoint deploy mà không phải import cả ingestion pipeline chỉ để khởi động tiến trình.
+`broker.py` chỉ nắm vòng đời của broker: `RedisStreamBroker` + `RedisAsyncResultBackend` trên `REDIS_URL`, với các hook `WORKER_STARTUP`/`WORKER_SHUTDOWN` chạy `_initialize_services()` đúng một lần (chốt bằng cờ `_initialized`), rồi đóng pool Postgres cùng `VectorStoreFactory.close_all()` khi thoát. `_initialize_services()` phản chiếu startup event của `app.app` nhưng thêm ba thứ tiến trình web không cần — `init_cpu_executor()`, `init_download_semaphore()` và `init_parsing_service()` — vì worker là nơi chạy toàn bộ ingestion pipeline. Việc tách task sang module riêng là thứ cho phép `app.tasks.broker:broker` làm entrypoint deploy mà không phải import cả ingestion pipeline chỉ để khởi động tiến trình.
 
 `ingestion_task.py` chứa task duy nhất, `ingest_vector_store_files(vectorstore_id, api_key, file_ids, chunking_strategy, chunk_size, chunk_overlap, request_id, trace_context, vector_store_type)`. Nó chỉ điều phối: bind `request_id_ctx`, uỷ quyền cho `IngestionService`, log rồi raise lại để TaskIQ thấy được lỗi, cuối cùng reset contextvar.
 

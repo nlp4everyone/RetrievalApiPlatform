@@ -9,13 +9,28 @@
 App Startup  (FastAPI "startup" event, app/app.py → app/startup.py)
         ├── init_tracing()                OpenTelemetry TracerProvider → export OTLP tới Langfuse
         ├── init_embed_model()             EmbeddingService.from_settings() → check_connection()
+        │                                  ↳ check_connection() embed thử một câu và CACHE số chiều
+        │                                    vector vào embed_model.dimension (get_dense_embedding_dim())
         ├── init_postgres() + wait_for_postgres()   tạo pool, thử lại 5 lần / 0.5s, rồi _create_table()
         ├── init_vector_store()            connection cho VECTOR_STORE_PROVIDER → check_connection()
         │                                  → VectorStoreFactory.register_connection(provider, conn)
-        └── init_minio()                   MinioService, tạo UPLOADED_FILE_BUCKET nếu chưa có
+        ├── init_minio()                   MinioService, tạo UPLOADED_FILE_BUCKET nếu chưa có
+        └── init_io_executor()             ThreadPoolExecutor(IO_THREAD_POOL_SIZE=32, prefix "io")
+                                           tiến trình web chỉ cần pool I/O — nó upload/delete trên MinIO
+                                           nhưng không parse, không chunk
 
 Worker Startup  (TaskIQ WORKER_STARTUP, app/tasks/broker.py::_initialize_services)
-        └── đúng năm init trên, cộng init_parsing_service()   ← chạy một lần, chốt bằng _initialized
+        ├── init_tracing() · init_postgres() · init_minio()
+        ├── init_io_executor()             pool I/O dùng chung cho download MinIO
+        ├── init_cpu_executor()            ThreadPoolExecutor(CPU_THREAD_POOL_SIZE=4, prefix "cpu")
+        │                                  TÁCH RIÊNG khỏi pool I/O: chunking là CPU-bound, không được
+        │                                  xếp hàng sau — hay bị bỏ đói bởi — một lượt transfer chậm
+        ├── init_download_semaphore()      asyncio.Semaphore(DOWNLOAD_CONCURRENCY=4)
+        │                                  chặn trần số file tải song song, để một loạt job ingestion
+        │                                  không tự làm cạn pool I/O
+        ├── init_vector_store() · init_embed_model()
+        └── init_parsing_service()         ParsingService.from_settings() ← chỉ worker cần
+                                           toàn bộ chuỗi trên chạy một lần, chốt bằng _initialized
 
 Client  (OpenAI SDK / HTTP client)
         │  multipart/form-data (upload) hoặc JSON
@@ -35,7 +50,9 @@ FastAPI HTTP Gateway
     FileService.upload_file(file, api_key, purpose, expires_after_seconds)
         ├── generate_file_id()            → "file-{8 hex}"
         ├── object_path = "{api_key}/uploads/{uuid4().hex}_{filename}"
-        ├── MinioFileStore.upload_file(minio_client, file.file, file_size, object_path, UPLOADED_FILE_BUCKET, content_type)
+        ├── MinioFileStore.upload_file(minio_client, file.file, file_size, object_path,
+        │                              UPLOADED_FILE_BUCKET, content_type, executor=get_io_executor())
+        │       put_object chạy trên pool I/O riêng, không phải default executor của event loop
         │       lỗi → log + raise lại (chưa có gì để dọn dẹp ở bước này)
         └── PostgresFileStore.insert_file(id=file_id, api_key, bytes, purpose, created_at, expires_at,
                                           metadata={filename, minio_bucket, minio_path, etag})
@@ -112,26 +129,46 @@ FastAPI HTTP Gateway
         │
         │               ┌── Các stage của IngestionPipeline (mỗi stage một observation Langfuse) ──┐
         │               │                                                                          │
-        │               │  download   MinioFileStore → context.raw_bytes                           │
+        │               │  download   MinioFileStore.download_file → context.raw_bytes             │
         │               │             bucket/path đọc từ context.file_metadata                     │
+        │               │             async with get_download_semaphore()  ← DOWNLOAD_CONCURRENCY=4│
+        │               │             _fetch_object() (get_object + .read() + close) chạy NGUYÊN   │
+        │               │             KHỐI trên get_io_executor(): mở stream mới chỉ là header,    │
+        │               │             transfer thật nằm ở .read() — cả hai phải rời event loop     │
+        │               │             trả None → ValueError("Failed to download file: ...")        │
         │               │                                                                          │
         │               │  parse      ParsingService.parse(raw_bytes, context.file_extension)      │
-        │               │             → context.text                                               │
-        │               │             .txt/.md → TextProvider  |  .pdf → PDF_PARSER_PROVIDER       │
+        │               │             → context.text  (Markdown cho MỌI định dạng)                 │
+        │               │             .pdf → PDF_PARSER_PROVIDER (LlamaParseProvider)              │
+        │               │             .txt .md .docx .doc .png .jpg .jpeg → UnstructuredProvider   │
+        │               │                 partition_via_api trên asyncio.to_thread, rồi element    │
+        │               │                 list JSON được render thành Markdown tại chỗ             │
         │               │             extension không có trong map → ValueError("Unsupported ...") │
         │               │                                                                          │
         │               │  chunk      ChunkingService.split_text(text) → context.chunks            │
         │               │             provider từ CHUNKING_PROVIDER, size/overlap theo request     │
+        │               │             chạy trên get_cpu_executor() — CPU-bound, không được đứng    │
+        │               │             chung pool với I/O                                           │
         │               │                                                                          │
-        │               │  embed      chunks → batch cỡ EMBEDDING_UPLOAD_BATCH_SIZE (16)           │
-        │               │             asyncio.gather giới hạn bởi Semaphore(BATCH_CONCURRENCY=4)   │
-        │               │             → context.embeddings         [ObservationType.EMBEDDING]     │
-        │               │                                                                          │
-        │               │  index      vector_store.ensure_collection(...) MỘT LẦN, từ đầu          │
-        │               │             rồi mọi batch insert_documents chạy song song                │
-        │               │             (không còn race "batch đầu chạy một mình": việc tạo          │
-        │               │              collection không còn nằm trong đường insert)                │
-        │               │             → context.num_inserted                                       │
+        │               │  embed_index  MỘT stage streaming (EmbedAndIndexStage)                   │
+        │               │             ① embedding_dim = await get_dense_embedding_dim()            │
+        │               │                (số chiều đã cache lúc startup — KHÔNG suy ra từ kết quả  │
+        │               │                 embed đầu tiên, đó chính là điều cho phép streaming)     │
+        │               │             ② ensure_collection(embedding_dim) MỘT LẦN, từ đầu           │
+        │               │                → context.metrics["collection_created"]                   │
+        │               │             ③ chunks → batch cỡ EMBEDDING_UPLOAD_BATCH_SIZE (16),        │
+        │               │                asyncio.gather dưới Semaphore(BATCH_CONCURRENCY=4);       │
+        │               │                mỗi batch: embed → dựng Document → insert_documents,      │
+        │               │                TẤT CẢ bên trong cùng một lượt giữ semaphore              │
+        │               │                → bộ nhớ đỉnh ≈ batch_size × concurrency, không phụ       │
+        │               │                  thuộc kích thước file; ghi bắt đầu ngay từ batch đầu    │
+        │               │                  chứ không chờ embed xong toàn file                      │
+        │               │             ④ context.num_inserted = sum(...)                            │
+        │               │                embed_wall_clock_s / index_wall_clock_s tính bằng         │
+        │               │                _union_duration() — hợp các khoảng thời gian chồng nhau,  │
+        │               │                nên chạy song song không bị đếm trùng                     │
+        │               │             ⓘ stage này báo cáo dưới ObservationType.SPAN (mặc định),    │
+        │               │               không phải EMBEDDING như EmbedStage trước khi gộp          │
         │               │                                                                          │
         │               └──────────────────────────────────────────────────────────────────────────┘
         │

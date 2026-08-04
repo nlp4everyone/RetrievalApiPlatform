@@ -21,7 +21,7 @@
 
 ## Vì sao dùng background worker qua TaskIQ
 
-Ingest một file (download → parse → chunk → embed → index) có thể mất từ vài giây tới vài chục giây, đặc biệt với PDF qua LlamaParse hoặc file lớn — quá lâu để giữ một HTTP request mở đồng bộ. `POST /v1/vector_stores` chỉ tạo record với `status=in_progress` và đẩy job; phần việc thật chạy trên một tiến trình worker riêng (TaskIQ, broker Redis Streams), tách khỏi vòng đời request.
+Ingest một file (download → parse → chunk → embed_index) có thể mất từ vài giây tới vài chục giây, đặc biệt khi parsing đi qua service ngoài (LlamaParse, Unstructured API) hoặc file lớn — quá lâu để giữ một HTTP request mở đồng bộ. `POST /v1/vector_stores` chỉ tạo record với `status=in_progress` và đẩy job; phần việc thật chạy trên một tiến trình worker riêng (TaskIQ, broker Redis Streams), tách khỏi vòng đời request.
 
 **Ưu điểm**
 - Request trả về ngay với thời gian phản hồi dự đoán được: tiến trình API không bao giờ bị chặn bởi công việc nặng CPU/IO.
@@ -52,7 +52,7 @@ Ingestion và retrieval mỗi cái được biểu diễn thành một danh sác
 - Hai pipeline dùng chung một runner, nên cải tiến về xử lý lỗi hay lồng span có lợi cho cả hai.
 
 **Nhược điểm**
-- Nhiều lớp gián tiếp hơn khi đọc: theo dõi một lượt ingestion từ đầu tới cuối nghĩa là mở một factory, một context và năm file stage thay vì một hàm duy nhất.
+- Nhiều lớp gián tiếp hơn khi đọc: theo dõi một lượt ingestion từ đầu tới cuối nghĩa là mở một factory, một context và bốn file stage thay vì một hàm duy nhất.
 - Context mutable dùng chung là contract yếu hơn tham số tường minh — một stage về mặt kỹ thuật có thể đọc field mà stage trước chưa ghi, và chỉ fail lúc runtime.
 - Chi phí này không đáng với một pipeline chỉ có hai bước; nó đáng ở đây vì cả hai pipeline đều được dự kiến sẽ mở rộng.
 
@@ -61,7 +61,7 @@ Ingestion và retrieval mỗi cái được biểu diễn thành một danh sác
 | Phương án | Vì sao không chọn |
 |---|---|
 | `load_and_chunk_file()` / `embed_and_upload_chunks()` thủ tục (hình dạng cũ) | Mỗi bước mới đều phải sửa một hàm sẵn có, và mỗi bước phải tự nhớ mở span; hình dạng trace dần lệch khỏi hình dạng code |
-| Framework điều phối bên thứ ba (Prefect, Dagster, LangChain chains) | Nặng hơn nhiều so với nhu cầu của một pipeline năm bước in-process, và nó sẽ chiếm quyền tích hợp tracing mà repo này muốn trỏ thẳng vào Langfuse |
+| Framework điều phối bên thứ ba (Prefect, Dagster, LangChain chains) | Nặng hơn nhiều so với nhu cầu của một pipeline bốn bước in-process, và nó sẽ chiếm quyền tích hợp tracing mà repo này muốn trỏ thẳng vào Langfuse |
 
 ## Vì sao mọi năng lực đều nằm sau một interface provider
 
@@ -116,6 +116,63 @@ Hai thứ đó luôn phải khớp nhau: nhiều retriever đi cùng `Passthroug
 
 Cái giá là thêm hybrid search phải động vào enum và factory thay vì chỉ truyền tham số khác — một sự đánh đổi có chủ đích: bớt linh hoạt cho caller để đổi lấy một bất biến không thể vô tình phá vỡ.
 
+## Vì sao embed và index là một stage streaming, không phải hai stage tuần tự
+
+Trước đây `EmbedStage` embed toàn bộ chunk của file rồi để `IndexStage` ghi tất cả lên vector store. Giờ chỉ còn `EmbedAndIndexStage`: mỗi batch được embed rồi upsert ngay trong cùng một lượt giữ semaphore, và `Document` chỉ được dựng sau khi lấy được semaphore.
+
+**Ưu điểm**
+- Bộ nhớ đỉnh có trần thật: `batch_size × concurrency` batch chunk/vector/Document, không phụ thuộc kích thước file. Hình dạng cũ giữ vector của *toàn bộ* file trong `context.embeddings` trước khi ghi được byte đầu tiên.
+- Ghi bắt đầu sớm hơn: batch đầu tiên đã vào vector store trong khi các batch sau còn đang embed, nên tổng thời gian ingest gần với `max(embed, index)` hơn là `embed + index`.
+- Vẫn đúng một lời gọi `ensure_collection()` từ đầu, nên không có race check-then-act trên đường insert.
+
+**Nhược điểm**
+- Không còn quan sát được embed và index như hai observation riêng trên Langfuse; hai con số `embed_wall_clock_s` / `index_wall_clock_s` trong cùng một span thay thế cho việc đó, và phải tính bằng `_union_duration()` vì các batch chạy chồng nhau.
+- Stage gộp làm hai việc, nên nó không còn khớp với `ObservationType` nào: nó báo cáo dưới `SPAN` chứ không phải `EMBEDDING`.
+- Ghi một phần khi lỗi: nếu một batch fail giữa đường, các batch trước đó **đã** nằm trong collection, trong khi store bị đánh dấu `failed`. Hình dạng cũ cũng có vấn đề này, nhưng ở đây nó xảy ra sớm hơn.
+- Đổi lấy một điều kiện tiên quyết: phải biết `embedding_dim` *trước* khi embed, nên `EmbeddingService.check_connection()` buộc phải cache số chiều lúc startup và `get_dense_embedding_dim()` raise nếu bị gọi trước init.
+
+**Phương án đã cân nhắc**
+
+| Phương án | Vì sao không chọn |
+|---|---|
+| Giữ hai stage, chỉ giảm `batch_size` | Không giải quyết được gốc: `context.embeddings` vẫn giữ vector của cả file, trần bộ nhớ vẫn theo kích thước file |
+| Suy `embedding_dim` từ batch embed đầu tiên rồi mới tạo collection | Buộc lần ghi đầu phải chờ lần embed đầu, và đưa việc tạo collection trở lại đường insert — đúng cái race đã bỏ |
+
+## Vì sao tách pool thread I/O khỏi pool CPU
+
+Worker chạy hai `ThreadPoolExecutor` riêng — `IO_THREAD_POOL_SIZE=32` cho transfer MinIO, `CPU_THREAD_POOL_SIZE=4` cho chunking — cộng một `asyncio.Semaphore(DOWNLOAD_CONCURRENCY=4)` chặn số file tải song song.
+
+**Ưu điểm**
+- Hai loại công việc có hình dạng tối ưu trái ngược nhau: I/O muốn nhiều thread đang chờ mạng, CPU-bound thì oversubscribe chỉ thêm context switch. Một pool duy nhất buộc phải chọn sai cho một trong hai.
+- Không bỏ đói lẫn nhau: một loạt transfer chậm không thể chiếm hết slot khiến chunking phải xếp hàng, và ngược lại.
+- Trần download là lớp bảo vệ thứ hai ở mức job: nhiều job ingestion đồng thời trong cùng tiến trình worker không thể tự làm cạn pool I/O.
+
+**Nhược điểm**
+- Ba con số phải điều chỉnh thay vì một, và điều chỉnh đúng phụ thuộc vào phần cứng cùng kích thước file thực tế — vì thế cả ba đều nằm trong `config/config.yaml`.
+- Thêm resource phải khởi tạo lúc startup, và một getter gọi trước init sẽ fail với `NameError` — đó chính là lý do provider chunking gọi `get_cpu_executor()` chứ không tự giữ pool riêng.
+- Tiến trình web và worker không còn khởi tạo cùng một tập service (web bỏ pool CPU và semaphore download), nên "cả hai chạy chung `app/startup.py`" giờ đúng ở mức từng hàm, không phải ở mức toàn bộ chuỗi.
+
+## Vì sao mọi định dạng không phải PDF đều đi qua Unstructured API
+
+`.txt`, `.md`, `.docx`, `.doc` và ảnh không còn dùng decoder in-process, mà đi qua Unstructured API; `.pdf` vẫn thuộc `PDF_PARSER_PROVIDER`.
+
+**Ưu điểm**
+- Output đồng nhất: mọi provider parsing giờ đều trả Markdown, nên chunking phía sau không phải phân biệt định dạng nguồn — quan trọng cho các splitter nhận biết cấu trúc (MarkdownHeader chẳng hạn).
+- Mở rộng phạm vi định dạng mà không thêm code: `.docx`/`.doc` và ảnh (OCR) hoạt động ngay, thay vì mỗi định dạng một decoder.
+- Cấu trúc tài liệu được giữ lại: heading theo `category_depth`, danh sách, và bảng dựng từ metadata `text_as_html` — thứ mà decoder text thuần không thể có.
+
+**Nhược điểm**
+- Một file `.txt` giờ cũng cần một lời gọi mạng và một API key, trong khi trước đó chỉ là `bytes.decode()`. Ingest chậm hơn và phụ thuộc thêm một service ngoài.
+- Unstructured API không có output Markdown gốc (chỉ `application/json` hoặc `text/csv`), nên việc render Markdown là code của repo này và phải tự bám theo tập `category` của element.
+- Nâng ràng buộc Python lên `>=3.11,<3.14` để khớp `unstructured==0.24.1`.
+
+**Phương án đã cân nhắc**
+
+| Phương án | Vì sao không chọn |
+|---|---|
+| Giữ decoder in-process cho `.txt`/`.md` | Hai đường parsing với hai hình dạng output khác nhau (text thuần vs Markdown), khiến chunking phải phân biệt định dạng nguồn |
+| Chạy `unstructured` local (`partition` thay vì `partition_via_api`) | Kéo theo bộ dependency ML nặng và công việc CPU/OCR vào chính tiến trình worker, đúng thứ đang cố giữ ngoài đường chạy nóng |
+
 ## Giới hạn đã biết
 
 - **Chỉ ingest một file.** Nhiều hơn một `file_id` bị từ chối với lỗi 400 ngay tại request, và `IngestionService` kiểm tra lại rồi đánh dấu store `failed` thay vì báo `completed` trên một store rỗng.
@@ -126,4 +183,5 @@ Cái giá là thêm hybrid search phải động vào enum và factory thay vì 
 - **Object mồ côi.** Nếu insert Postgres thất bại sau khi upload MinIO thành công, object bị bỏ lại — chỉ được log, không có cơ chế dọn dẹp bù trừ.
 - **Chỉ retrieval dense.** `SearchType.DENSE` là giá trị duy nhất được triển khai; seam `BaseRetriever` / `BaseFusion` đã có nhưng chưa có implementation keyword/BM25.
 - **Milvus là placeholder.** Đã nối dây qua config, `VectorStoreType`, `VectorStoreFactory` và startup, nhưng mọi method đều raise `NotImplementedError`.
-- **Upload chấp nhận nhiều hơn ingestion parse được.** `.docx`, `.csv`, `.json` và ảnh vượt qua validation lúc upload nhưng không có provider parsing nào đăng ký.
+- **Upload và parsing chưa khớp allow-list.** `.csv`, `.json` và `.gif` vượt qua validation lúc upload nhưng không có provider parsing nào đăng ký. Ngược lại, `.md` và `.doc` parse được nhưng không nằm trong `ALLOWED_EXTENSIONS`, và `validate_file_type` chặn theo extension nên không có đường lách — hai định dạng đó luôn bị 415 ngay ở bước upload.
+- **Ghi một phần khi ingestion lỗi.** `EmbedAndIndexStage` upsert theo từng batch, nên một batch fail giữa đường vẫn để lại các batch trước trong collection dù store bị đánh dấu `failed`; không có cơ chế dọn dẹp.

@@ -7,7 +7,8 @@ Một **Retrieval Engine** tương thích OpenAI API dành cho các hệ thống
 ## Tính năng chính
 
 - **API tương thích OpenAI** — `/v1/files` và `/v1/vector_stores` mô phỏng sát OpenAI Files API và Vector Stores API, đến mức SDK `openai` Python gốc chạy được thẳng với server này mà không cần sửa (xem `examples/file_upload_example.py`)
-- **Pipeline theo stage** — ingestion (`download → parse → chunk → embed → index`) và retrieval (`embed_query → retrieve → fuse`) đều được ghép từ các class `BaseStage` do một `Pipeline` chung thực thi. Thêm một bước là thêm một class, không phải sửa hàm điều phối
+- **Pipeline theo stage** — ingestion (`download → parse → chunk → embed_index`) và retrieval (`embed_query → retrieve → fuse`) đều được ghép từ các class `BaseStage` do một `Pipeline` chung thực thi. Thêm một bước là thêm một class, không phải sửa hàm điều phối
+- **Ingestion streaming, bộ nhớ có trần** — bước cuối embed và upsert **từng batch một** trong cùng một semaphore, nên việc ghi bắt đầu từ batch đầu tiên và bộ nhớ đỉnh là `batch_size × concurrency` chứ không theo kích thước file. Worker tách pool thread I/O khỏi pool CPU và chặn trần số download song song
 - **Provider có thể thay thế ở mọi lớp** — parsing, chunking, embedding và vector database đều nằm sau một interface `base.py`, với thư mục `provider/` và một facade `from_settings()`, chọn bằng đúng một biến môi trường
 - **Ingestion bất đồng bộ** — upload file trả về ngay lập tức; pipeline chạy nền trên một TaskIQ worker (broker Redis Streams)
 - **Vector search không phụ thuộc backend** — dense similarity search qua `BaseAsyncVectorStore`; Qdrant đã triển khai, Milvus đã được nối dây đầy đủ nhưng còn là placeholder. Metadata filter được biểu diễn dưới dạng cây trung lập rồi dịch riêng cho từng backend
@@ -19,7 +20,9 @@ Một **Retrieval Engine** tương thích OpenAI API dành cho các hệ thống
 
 1. **Software**
    - Docker và Docker Compose
+   - Python 3.11–3.13 nếu chạy ngoài Docker (`requires-python = ">=3.11,<3.14"`, theo ràng buộc của `unstructured`)
    - Một endpoint dense embedding — hoặc tương thích OpenAI (ví dụ vLLM phục vụ `Qwen/Qwen3-Embedding-0.6B` tại `VLLM_DENSE_EMBEDDING_URL`), hoặc một server Text Embeddings Inference tại `TEI_EMBEDDING_URL`
+   - API key cho các service parsing thực sự dùng: `LLAMAPARSE_API_KEY` cho PDF, `UNSTRUCTURED_API_KEY` (+ `UNSTRUCTURED_API_URL`) cho mọi định dạng còn lại. Key chỉ được kiểm tra khi provider tương ứng được dùng lần đầu, nên deployment chỉ ingest PDF không cần key của Unstructured
    - Một instance [Langfuse](https://langfuse.com) (self-hosted hoặc cloud) cho tracing
 
 2. **Hardware**
@@ -35,6 +38,7 @@ git clone -b retrieval/naive-rag https://github.com/nlp4everyone/RetrievalApiPla
 cd RetrievalApiPlatform
 cp .env.sample .env
 # chỉnh .env: API key, credential Postgres/MinIO/Qdrant/Langfuse, endpoint embedding,
+#             key parsing (LLAMAPARSE_API_KEY, UNSTRUCTURED_API_KEY/UNSTRUCTURED_API_URL),
 #             và các công tắc provider (EMBEDDING_PROVIDER, CHUNKING_PROVIDER,
 #             PDF_PARSER_PROVIDER, VECTOR_STORE_PROVIDER)
 make up      # build và khởi động postgres, redis, qdrant, minio, worker, web
@@ -64,7 +68,7 @@ file = client.files.create(
 vector_store = client.vector_stores.create(name="Support FAQ", file_ids=[file.id])
 ```
 
-Upload trả về ngay lập tức; ingestion (download → parse → chunk → embed → index) chạy bất đồng bộ ở nền. Poll `GET /v1/vector_stores/{id}` và theo dõi `status` chuyển từ `in_progress` → `completed` (hoặc `failed`).
+Upload trả về ngay lập tức; ingestion (download → parse → chunk → embed_index) chạy bất đồng bộ ở nền. Poll `GET /v1/vector_stores/{id}` và theo dõi `status` chuyển từ `in_progress` → `completed` (hoặc `failed`).
 
 <br />
 
@@ -77,7 +81,7 @@ Upload trả về ngay lập tức; ingestion (download → parse → chunk → 
 | Metadata store | PostgreSQL (`asyncpg`) | — |
 | Object storage | MinIO (lưu byte của file đã upload) | — |
 | Task queue | Redis Streams + TaskIQ | — |
-| Parsing | decoder in-process (`.txt`/`.md`), LlamaParse (`.pdf`) | `PDF_PARSER_PROVIDER` |
+| Parsing | LlamaParse (`.pdf`), Unstructured API (`.txt`, `.md`, `.docx`, `.doc`, ảnh) — cả hai đều trả Markdown | `PDF_PARSER_PROVIDER` (chỉ cho PDF) |
 | Chunking | [Chonkie](https://docs.chonkie.ai) hoặc `langchain_text_splitters` | `CHUNKING_PROVIDER` |
 | Embeddings | endpoint tương thích OpenAI hoặc Text Embeddings Inference | `EMBEDDING_PROVIDER` |
 | Tracing | Langfuse qua OpenTelemetry OTLP | — |
@@ -105,6 +109,7 @@ Xem chi tiết tại [Design Decisions](DESIGN_DECISIONS_vi.md).
 - Milvus đã được nối dây qua config, `VectorStoreType` và `VectorStoreFactory`, nhưng mọi method đều raise `NotImplementedError`
 - Auth dùng chung một `FASTAPI_API_KEY` duy nhất — chưa phải multi-tenant theo từng người dùng, dù các row đã được scope theo `api_key`
 - Chưa có endpoint sub-resource "vector store files" kiểu OpenAI (attach/list/detach một file trên vector store đã tồn tại)
+- `.csv`, `.json` và `.gif` vượt qua validation lúc upload nhưng chưa có provider parsing nào đăng ký; ngược lại `.md` và `.doc` parse được nhưng không nằm trong allow-list lúc upload nên luôn bị 415
 
 <br />
 
@@ -119,9 +124,12 @@ Xem chi tiết tại [Design Decisions](DESIGN_DECISIONS_vi.md).
 - [x] Trừu tượng hoá provider cho parsing, chunking, embedding và vector store
 - [x] Khung pipeline theo stage cho ingestion và retrieval
 - [x] Áp dụng metadata filter trong search
+- [x] Parsing qua Unstructured API cho `.txt`/`.md`/`.docx`/`.doc`/ảnh (thay decoder in-process; mọi định dạng giờ đều ra Markdown)
+- [x] Ingestion streaming: gộp embed + index thành một stage, bộ nhớ đỉnh không phụ thuộc kích thước file
+- [x] Tách pool thread I/O và CPU, chặn trần download đồng thời trong worker
 - [ ] Ingest nhiều file cho một vector store
 - [ ] Hybrid search (retriever keyword/BM25 + chiến lược fusion)
 - [ ] Áp dụng ranking option trong search
 - [ ] Triển khai backend Milvus
 - [ ] Endpoint sub-resource cho vector store file (attach/list/detach)
-- [ ] Parser cho `.docx` (extension được chấp nhận khi upload nhưng chưa có parser đăng ký)
+- [ ] Đồng bộ hai allow-list: parser cho `.csv`/`.json`/`.gif` (hoặc gỡ chúng khỏi upload), và thêm `.md`/`.doc` vào `ALLOWED_EXTENSIONS`
