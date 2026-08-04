@@ -38,13 +38,13 @@ All endpoints require `Depends(verify_api_key)`.
 
 `RequestIDMiddleware` is a raw ASGI middleware (not `BaseHTTPMiddleware` — that would reset the contextvar before uvicorn's access logger fires). It reuses a client-supplied `X-Request-Id` header if present, else generates `req_{uuid4().hex}`, binds it to `request_id_ctx` (a `contextvars.ContextVar` in `app/core/request_context.py`) for the request's duration, and echoes it back on the response. The same ID is passed into `ingest_vector_store_files.kiq(...)` and re-bound inside the worker task, so a single request ID threads through HTTP logs and the async ingestion job that request triggered.
 
-`app/app.py` also defines `GET /health` (excluded from OpenAPI schema), registers `RequestIDMiddleware`, the global `AppBaseException` handler, and a startup event that brings up tracing → embed model → Postgres (pool + `wait_for_postgres` + table creation) → vector store → MinIO, in that order.
+`app/app.py` also defines `GET /health` (excluded from OpenAPI schema), registers `RequestIDMiddleware`, the global `AppBaseException` handler, and a startup event that brings up tracing → embed model → Postgres (pool + `wait_for_postgres` + table creation) → vector store → MinIO → I/O pool, in that order. It also installs two `uvicorn.access` log filters: `HealthCheckLogFilter` (silences 2xx `/health` probes) and `QuietAccessLogFilter` (silences 2xx list/retrieve/modify calls, which the service layer already logs; create/delete/search stay visible, and every non-2xx line still shows up).
 
 ## Service layer (`app/services/`)
 
 ### `FileService` (`file/file_service.py`)
 
-Static methods `upload_file`, `list_files`, `get_file_by_id`, `delete_file`. Upload flow: generate `file_id`, build object path `{api_key}/uploads/{uuid}_{filename}`, upload bytes to MinIO, then insert the Postgres metadata row. If the Postgres insert fails after a successful MinIO upload, the object is left orphaned (logged as a warning, not cleaned up) and `PostgresConnectionException` is raised.
+Static methods `upload_file`, `list_files`, `get_file_by_id`, `delete_file` — all four scope by the caller's `api_key`, `get_file_by_id` included (it previously read by `id` alone, letting any valid key fetch metadata for another key's files). Upload flow: generate `file_id`, build object path `{api_key}/uploads/{uuid}_{filename}`, upload bytes to MinIO via `get_io_executor()`, then insert the Postgres metadata row. If the Postgres insert fails after a successful MinIO upload, the object is left orphaned (logged as a warning, not cleaned up) and `PostgresConnectionException` is raised.
 
 ### `VectorStoreService` (`vector_store/vector_store_service.py`)
 
@@ -76,17 +76,24 @@ The payoff: the trace shape is a property of the pipeline, and it stays correct 
 
 ### Ingestion (`pipelines/ingestion/`)
 
-`IngestionContext` is one mutable dataclass threaded through every stage — inputs (`vector_store_id`, `file_id`, `file_metadata`, chunking params), progressively filled results (`raw_bytes` → `text` → `chunks` → `embeddings` → `num_inserted`), and a free-form `metrics` dict for numbers that belong on a span but not in pipeline state. Convenience properties (`filename`, `file_extension`, `storage_bucket`, `storage_path`) read out of `file_metadata`.
+`IngestionContext` is one mutable dataclass threaded through every stage — inputs (`vector_store_id`, `file_id`, `file_metadata`, chunking params), progressively filled results (`raw_bytes` → `text` → `chunks` → `num_inserted`), and a free-form `metrics` dict for numbers that belong on a span but not in pipeline state. Convenience properties (`filename`, `file_extension`, `storage_bucket`, `storage_path`) read out of `file_metadata`.
 
 | Stage | Does | Span notes |
 |---|---|---|
-| `DownloadStage` | Fetches bytes from MinIO | — |
-| `ParseStage` | `ParsingService.parse(bytes, ext)` → text | records the provider that handled it |
-| `ChunkStage` | `ChunkingService.split_text(text)` → chunks | — |
-| `EmbedStage` | Batches chunks, embeds concurrently | `ObservationType.EMBEDDING`; reports `num_batches`, `batch_size` |
-| `IndexStage` | `ensure_collection()` once, then concurrent `insert_documents` batches | reports whether the collection was created, `num_batches` |
+| `DownloadStage` | Fetches bytes from MinIO under `get_download_semaphore()`, transfer on `get_io_executor()` | bucket/path, filename, `file.size_bytes` |
+| `ParseStage` | `ParsingService.parse(bytes, ext)` → text (Markdown) | records the provider that handled it, `text.num_chars` |
+| `ChunkStage` | `ChunkingService.split_text(text)` → chunks, on `get_cpu_executor()` | strategy/provider, `chunks.count`, `chunks.avg_chars` |
+| `EmbedAndIndexStage` | `ensure_collection(embedding_dim)` once, then embeds + upserts **one batch at a time** | whether the collection was created, `embedding.dims`, `embed`/`index` wall-clock, `batch.*` |
 
-Both `EmbedStage` and `IndexStage` split into `EMBEDDING_UPLOAD_BATCH_SIZE` batches and bound them with `asyncio.Semaphore(EMBEDDING_BATCH_CONCURRENCY)`, so peak memory is roughly `batch_size * concurrency` regardless of file size.
+`EmbedAndIndexStage` is the former `EmbedStage` + `IndexStage` merged into one streaming loop:
+
+- Chunks are split into `EMBEDDING_UPLOAD_BATCH_SIZE` batches, and **one** `asyncio.Semaphore(EMBEDDING_BATCH_CONCURRENCY)` covers that batch's embed *and* its upsert — no more "embed the whole file, then write"; the first batch is already being written while later ones are still embedding.
+- `Document` objects are built *after* the semaphore slot is acquired, so peak memory is `batch_size × concurrency` batches' worth of chunks/vectors/Documents, not the whole file's.
+- `embedding_dim` comes from `get_dense_embedding_dim()` — the dimension `EmbeddingService.check_connection()` cached at startup — so the collection can be created *before* the first embed call. That is the precondition streaming needs: the old `IndexStage` had to infer `embedding_dim` from `context.embeddings[0]`, which meant waiting for embedding to finish.
+- `embed_wall_clock_s` / `index_wall_clock_s` are computed by `_union_duration()`, which merges overlapping intervals, because summing each concurrent batch's raw duration would double-count.
+- Note: the merged stage does not override `observation_type`, so it shows up in Langfuse as `ObservationType.SPAN`, unlike the previous `EmbedStage` (`EMBEDDING`).
+
+`IngestionContext` follows suit: there is no `embeddings` field any more — vectors live only within a single batch, and `num_inserted` is the last step's only output.
 
 `build_ingestion_pipeline(...)` is the single place deciding which stages run and in what order. The `ChunkingService` is built per pipeline rather than at startup, because chunk size and overlap come from the vector store's create request.
 
@@ -114,15 +121,19 @@ Every package here follows the same shape — a `base.py` declaring the interfac
 
 | Package | Interface | Providers | Selected by |
 |---|---|---|---|
-| `parsing/` | `BaseParsingProvider` | `TextProvider` (`.txt`, `.md`), `LlamaParseProvider` (`.pdf`) | `PDF_PARSER_PROVIDER` |
+| `parsing/` | `BaseParsingProvider` | `LlamaParseProvider` (`.pdf`), `UnstructuredProvider` (`.txt`, `.md`, `.docx`, `.doc`, `.png`, `.jpg`, `.jpeg`) | `PDF_PARSER_PROVIDER` (PDF only) |
 | `chunking/` | `BaseChunkingProvider` | `ChonkieProvider`, `LangchainProvider` | `CHUNKING_PROVIDER` |
 | `embedding/` | `BaseEmbeddingProvider` | `OpenAIEmbeddingProvider`, `TEIEmbeddingProvider` | `EMBEDDING_PROVIDER` |
 
-`ParsingService.from_settings()` maps extensions to *provider factories*, not instances: plain-text formats always use the in-process decoder, and the PDF backend is validated at startup (so a typo fails fast) but only constructed when a PDF is actually parsed. `supports()`, `supported_extensions`, and `provider_for()` expose the registry; an unmapped extension raises `ValueError("Unsupported file format: ...")`.
+`ParsingService.from_settings()` maps extensions to *provider factories*, not instances: `.pdf` goes to the backend named by `PDF_PARSER_PROVIDER`, and **every other format** (`.txt`, `.md`, `.docx`, `.doc`, `.png`, `.jpg`, `.jpeg`) goes to the Unstructured API. Because `.txt`/`.md` are registered against the *same factory object*, they share a single provider instance — that is why the `_instances` dict is keyed by factory rather than by extension. The PDF backend's name is validated at startup (so a typo fails fast), but providers are only constructed on first use, and `UNSTRUCTURED_API_KEY` is likewise only checked then — a deployment that ingests nothing but PDFs should not fail to start over a missing Unstructured key. `supports()`, `supported_extensions`, and `provider_for()` expose the registry; an unmapped extension raises `ValueError("Unsupported file format: ...")`.
 
-Note the mismatch: upload-time `ALLOWED_EXTENSIONS` also allows `.docx`, `.csv`, `.json`, and images — those can be **uploaded** as Files but have no registered parsing provider.
+`UnstructuredProvider` calls `partition_via_api` (the `unstructured` library is synchronous, so it runs via `asyncio.to_thread`) and gets back a JSON element list — the API supports no Markdown response format, only `application/json` or `text/csv`. The provider renders that element list to Markdown locally: `Title` → heading by `category_depth`, `ListItem` → indented bullet, `Table` → a Markdown table built from the `text_as_html` metadata (via BeautifulSoup). That way every parsing provider returns the same output shape (Markdown), matching `LlamaParseProvider` on PDFs, and downstream chunking never has to care which format the text came from.
+
+Note the mismatch between the two allow-lists: upload-time `ALLOWED_EXTENSIONS` permits `.csv`, `.json`, and `.gif` — those can be **uploaded** as Files but have no registered parsing provider, so ingestion raises `ValueError`. Conversely `.md` and `.doc` **can be parsed** but are not in `ALLOWED_EXTENSIONS`, and `validate_file_type` gates on extension with no escape hatch, so they are always rejected with a 415 at upload.
 
 `ChunkingService` exposes `strategy_name` and `async split_text(text)`. The Chonkie provider supports `character | sentence | recursive | token` (default `recursive`, `chunk_size=800`, `chunk_overlap=400`). At the API level, `VectorStoreCreateRequest.chunking_strategy` only exposes `"auto"` or `"static"`, so the finer strategies aren't reachable through the public API.
+
+Both chunking providers `run_in_executor(get_cpu_executor(), ...)`: splitting is CPU-bound and would otherwise stall the event loop for every other task in the process. The CPU pool (`CPU_THREAD_POOL_SIZE`, default 4) is deliberately separate from the I/O pool (`IO_THREAD_POOL_SIZE`, default 32) — oversubscribing CPU-bound work only adds context switching, not throughput, while sharing one pool lets a slow MinIO transfer make chunking queue behind it, and vice versa.
 
 ## Data layer (`app/db/`)
 
@@ -132,6 +143,8 @@ Note the mismatch: upload-time `ALLOWED_EXTENSIONS` also allows `.docx`, `.csv`,
 | `postgres/` | `PostgresClient`, `PostgresFileStore`, `PostgresVectorStore` | `files` + `vector_stores` metadata tables (ownership by `api_key`, status, `vector_store_type`, JSONB metadata) | `postgres` (5432) |
 | `vector_store/` | `BaseVectorStoreConnection`, `BaseAsyncVectorStore`, `VectorStoreFactory` | One collection per vector store (`collection_name == vector_store_id`) | `qdrant` (6333/6334) |
 
+Every MinIO operation (`upload_file`, `download_file`, `delete_file`) takes an `executor` argument and is called with `get_io_executor()` rather than borrowing the event loop's default executor. `download_file` delegates to the `_fetch_object` helper, which folds `get_object()` + `.read()` + `close()` into **one** unit of work on a worker thread: `get_object()` only opens the stream (headers), the entire real transfer happens in `.read()`, so offloading just the open still blocks the event loop in proportion to file size.
+
 ### The vector store abstraction (`db/vector_store/`)
 
 Two abstractions in `base.py`:
@@ -139,7 +152,9 @@ Two abstractions in `base.py`:
 - `BaseVectorStoreConnection` — a long-lived connection created once at startup (`from_settings()`, `client`, `check_connection()`, `close()`); the equivalent of a connection pool
 - `BaseAsyncVectorStore` — operations scoped to one collection, constructed per use from a client
 
-`ensure_collection` is deliberately **separate** from `insert_documents`. Folding creation into the insert path forces every concurrent batch to race on a check-then-act, which is exactly why the previous ingest code had to run its first batch alone. Callers now create the collection once up front, after which inserts are pure and safely parallel.
+`ensure_collection(embedding_dim)` is deliberately **separate** from `insert_documents`. Folding creation into the insert path forces every concurrent batch to race on a check-then-act, which is exactly why the previous ingest code had to run its first batch alone. Callers now create the collection once up front, after which inserts are pure and safely parallel.
+
+The companion point: the `embedding_dim` passed in comes from `get_dense_embedding_dim()` (cached at startup), not from the first embedding vector. That keeps the vector store contract from forcing callers to embed before creating a collection — which is precisely what lets `EmbedAndIndexStage` embed and write in a streaming fashion.
 
 `types.py` holds the backend-neutral shapes — `RetrievedChunk`, and a filter tree of `FieldCondition` / `FilterGroup` with `FilterOperator` (`eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `in`, `nin`) and `FilterCombinator` (`and`, `or`). Nothing in this module may import a vendor SDK; these are the only shapes the service layer sees, so swapping Qdrant for Milvus never reaches above `app.db`.
 
@@ -156,7 +171,7 @@ Each backend supplies a `filter_translator.py` rendering the neutral tree into i
 Two layers merged per domain module:
 
 1. **pydantic-settings** (`settings.py`) — reads `.env` / real environment variables. Required fields (no default) include API keys, Postgres/MinIO/Qdrant/Langfuse credentials. Validators enforce `API_VERSION` starts with `v`, ports are positive, secrets are non-empty, `LOG_LEVEL`/`LOG_FORMAT` are in an allowed set, and each of `EMBEDDING_PROVIDER` / `CHUNKING_PROVIDER` / `PDF_PARSER_PROVIDER` / `VECTOR_STORE_PROVIDER` names a known backend — so a typo fails at startup, not at first use.
-2. **YAML** (`config/config.yaml`, loaded via `YamlConfigLoader`) — stable tunables: `api.num_workers`, `storage.uploaded_file_bucket`/`max_file_size`, `redis.url`, `models.dense_model_name`, `embedding.upload_batch_size`/`batch_concurrency`.
+2. **YAML** (`config/config.yaml`, loaded via `YamlConfigLoader`) — stable tunables: `api.num_workers`, `storage.uploaded_file_bucket`/`max_file_size`/`io_thread_pool_size`, `redis.url`, `models.dense_model_name`, `embedding.upload_batch_size`/`batch_concurrency`, `ingestion.cpu_thread_pool_size`/`download_concurrency`.
 
 Per-domain modules (`database.py`, `storage.py`, `models.py`, `embedding.py`, `redis.py`, `langfuse.py`, `api.py`) combine both sources into flat constants importable from `app.core.config`. Full parameter list: [Configuration Reference](../CONFIGURATION.md).
 
@@ -184,15 +199,15 @@ Root `AppBaseException(status_code, response: BaseResponse, log_message)`. Domai
 
 ## Startup / bootstrap (`app/startup.py`)
 
-Manual service-locator globals set by `init_embed_model`, `init_parsing_service`, `init_postgres`, `init_minio`, `init_vector_store` and read via matching getters (`get_dense_embedding`, `get_parsing_service`, `get_postgres_pool`, `get_postgres_client`, `get_minio_service`, `get_vector_store_connection`).
+Manual service-locator globals set by `init_embed_model`, `init_parsing_service`, `init_postgres`, `init_minio`, `init_vector_store`, `init_io_executor`, `init_cpu_executor`, `init_download_semaphore` and read via matching getters (`get_dense_embedding`, `get_dense_embedding_dim`, `get_parsing_service`, `get_postgres_pool`, `get_postgres_client`, `get_minio_service`, `get_vector_store_connection`, `get_io_executor`, `get_cpu_executor`, `get_download_semaphore`).
 
-`init_embed_model` builds `EmbeddingService.from_settings()` for the configured provider and smoke-tests it. `init_parsing_service` builds the providers once so a PDF backend's client is reused across files rather than rebuilt per ingestion. `init_vector_store` builds the connection for `VECTOR_STORE_PROVIDER`, verifies it, and registers it with `VectorStoreFactory`. `wait_for_postgres` retries the pool 5× at 0.5s and re-raises the last failure rather than continuing as if Postgres were reachable.
+`init_embed_model` builds `EmbeddingService.from_settings()` for the configured provider and smoke-tests it; that same `check_connection()` call caches the vector dimension, read later via `get_dense_embedding_dim()` (which raises `RuntimeError` if called before init). `init_parsing_service` builds the providers once so a parsing backend's client is reused across files rather than rebuilt per ingestion. `init_vector_store` builds the connection for `VECTOR_STORE_PROVIDER`, verifies it, and registers it with `VectorStoreFactory`. `wait_for_postgres` retries the pool 5× at 0.5s and re-raises the last failure rather than continuing as if Postgres were reachable.
 
 Used identically — but independently instantiated — by both `app/app.py` (web) and `app/tasks/broker.py` (worker), so there are no worker-local globals.
 
 ## Background worker (`app/tasks/`)
 
-`broker.py` owns only the broker lifecycle: `RedisStreamBroker` + `RedisAsyncResultBackend` over `REDIS_URL`, with `WORKER_STARTUP`/`WORKER_SHUTDOWN` hooks that run `_initialize_services()` (mirroring `app.app`'s startup event) once and close the Postgres pool plus `VectorStoreFactory.close_all()` on the way out. Keeping the task in a separate module is what lets `app.tasks.broker:broker` be the deploy entrypoint without importing the ingestion pipeline just to start the process.
+`broker.py` owns only the broker lifecycle: `RedisStreamBroker` + `RedisAsyncResultBackend` over `REDIS_URL`, with `WORKER_STARTUP`/`WORKER_SHUTDOWN` hooks that run `_initialize_services()` once (guarded by the `_initialized` flag) and close the Postgres pool plus `VectorStoreFactory.close_all()` on the way out. `_initialize_services()` mirrors `app.app`'s startup event but adds three things the web process does not need — `init_cpu_executor()`, `init_download_semaphore()`, and `init_parsing_service()` — because the worker is where the whole ingestion pipeline runs. Keeping the task in a separate module is what lets `app.tasks.broker:broker` be the deploy entrypoint without importing the ingestion pipeline just to start the process.
 
 `ingestion_task.py` holds the one task, `ingest_vector_store_files(vectorstore_id, api_key, file_ids, chunking_strategy, chunk_size, chunk_overlap, request_id, trace_context, vector_store_type)`. It is orchestration only: bind `request_id_ctx`, delegate to `IngestionService`, log and re-raise so TaskIQ sees the failure, reset the contextvar.
 

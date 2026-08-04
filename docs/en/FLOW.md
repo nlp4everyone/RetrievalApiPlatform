@@ -9,13 +9,29 @@
 App Startup  (FastAPI "startup" event, app/app.py → app/startup.py)
         ├── init_tracing()                OpenTelemetry TracerProvider → export OTLP to Langfuse
         ├── init_embed_model()             EmbeddingService.from_settings() → check_connection()
+        │                                  ↳ check_connection() embeds a throwaway string and CACHES
+        │                                    the vector dimension on embed_model.dimension
+        │                                    (read later via get_dense_embedding_dim())
         ├── init_postgres() + wait_for_postgres()   create pool, retry 5x / 0.5s, then _create_table()
         ├── init_vector_store()            connection for VECTOR_STORE_PROVIDER → check_connection()
         │                                  → VectorStoreFactory.register_connection(provider, conn)
-        └── init_minio()                   MinioService, create UPLOADED_FILE_BUCKET if missing
+        ├── init_minio()                   MinioService, create UPLOADED_FILE_BUCKET if missing
+        └── init_io_executor()             ThreadPoolExecutor(IO_THREAD_POOL_SIZE=32, prefix "io")
+                                           the web process needs the I/O pool only — it uploads to
+                                           and deletes from MinIO, but never parses or chunks
 
 Worker Startup  (TaskIQ WORKER_STARTUP, app/tasks/broker.py::_initialize_services)
-        └── the same five inits, plus init_parsing_service()   ← runs once, guarded by _initialized
+        ├── init_tracing() · init_postgres() · init_minio()
+        ├── init_io_executor()             same I/O pool, here used for MinIO downloads
+        ├── init_cpu_executor()            ThreadPoolExecutor(CPU_THREAD_POOL_SIZE=4, prefix "cpu")
+        │                                  KEPT SEPARATE from the I/O pool: chunking is CPU-bound and
+        │                                  must not queue behind - or be starved by - a slow transfer
+        ├── init_download_semaphore()      asyncio.Semaphore(DOWNLOAD_CONCURRENCY=4)
+        │                                  caps concurrent downloads so one burst of ingestion jobs
+        │                                  cannot exhaust the I/O pool on its own
+        ├── init_vector_store() · init_embed_model()
+        └── init_parsing_service()         ParsingService.from_settings() ← worker-only
+                                           the whole sequence runs once, guarded by _initialized
 
 Client  (OpenAI SDK / HTTP client)
         │  multipart/form-data (upload) or JSON
@@ -35,7 +51,9 @@ FastAPI HTTP Gateway
     FileService.upload_file(file, api_key, purpose, expires_after_seconds)
         ├── generate_file_id()            → "file-{8 hex}"
         ├── object_path = "{api_key}/uploads/{uuid4().hex}_{filename}"
-        ├── MinioFileStore.upload_file(minio_client, file.file, file_size, object_path, UPLOADED_FILE_BUCKET, content_type)
+        ├── MinioFileStore.upload_file(minio_client, file.file, file_size, object_path,
+        │                              UPLOADED_FILE_BUCKET, content_type, executor=get_io_executor())
+        │       put_object runs on the dedicated I/O pool, not the loop's default executor
         │       error → log + re-raise (nothing to clean up yet at this step)
         └── PostgresFileStore.insert_file(id=file_id, api_key, bytes, purpose, created_at, expires_at,
                                           metadata={filename, minio_bucket, minio_path, etag})
@@ -112,25 +130,49 @@ FastAPI HTTP Gateway
         │
         │               ┌── IngestionPipeline stages (one Langfuse observation each) ────────────┐
         │               │                                                                        │
-        │               │  download   MinioFileStore → context.raw_bytes                         │
+        │               │  download   MinioFileStore.download_file → context.raw_bytes           │
         │               │             bucket/path read from context.file_metadata                │
+        │               │             async with get_download_semaphore()                        │
+        │               │                 ← bounded by DOWNLOAD_CONCURRENCY=4                    │
+        │               │             _fetch_object() (get_object + .read() + close) runs as ONE │
+        │               │             unit on get_io_executor(): opening the stream is just      │
+        │               │             headers, the real transfer is .read() — both must leave    │
+        │               │             the event loop together                                    │
+        │               │             returns None → ValueError("Failed to download file: ...")  │
         │               │                                                                        │
         │               │  parse      ParsingService.parse(raw_bytes, context.file_extension)    │
-        │               │             → context.text                                             │
-        │               │             .txt/.md → TextProvider  |  .pdf → PDF_PARSER_PROVIDER     │
+        │               │             → context.text  (Markdown for EVERY format)                │
+        │               │             .pdf → PDF_PARSER_PROVIDER (LlamaParseProvider)            │
+        │               │             .txt .md .docx .doc .png .jpg .jpeg → UnstructuredProvider │
+        │               │                 partition_via_api on asyncio.to_thread, then the JSON  │
+        │               │                 element list is rendered to Markdown locally           │
         │               │             unmapped extension → ValueError("Unsupported file format") │
         │               │                                                                        │
         │               │  chunk      ChunkingService.split_text(text) → context.chunks          │
         │               │             provider from CHUNKING_PROVIDER, size/overlap per request  │
+        │               │             runs on get_cpu_executor() — CPU-bound, kept off the I/O   │
+        │               │             pool                                                       │
         │               │                                                                        │
-        │               │  embed      chunks → batches of EMBEDDING_UPLOAD_BATCH_SIZE (16)       │
-        │               │             asyncio.gather bounded by Semaphore(BATCH_CONCURRENCY=4)   │
-        │               │             → context.embeddings         [ObservationType.EMBEDDING]   │
-        │               │                                                                        │
-        │               │  index      vector_store.ensure_collection(...) ONCE, up front         │
-        │               │             then all insert_documents batches concurrently             │
-        │               │             (no first-batch-alone race: creation is not in the         │
-        │               │              insert path any more)  → context.num_inserted             │
+        │               │  embed_index  ONE streaming stage (EmbedAndIndexStage)                 │
+        │               │             ① embedding_dim = await get_dense_embedding_dim()          │
+        │               │                (dimension cached at startup — NOT inferred from the    │
+        │               │                 first embedding result; that is what makes streaming   │
+        │               │                 possible)                                              │
+        │               │             ② ensure_collection(embedding_dim) ONCE, up front          │
+        │               │                → context.metrics["collection_created"]                 │
+        │               │             ③ chunks → batches of EMBEDDING_UPLOAD_BATCH_SIZE (16),    │
+        │               │                asyncio.gather under Semaphore(BATCH_CONCURRENCY=4);    │
+        │               │                per batch: embed → build Documents → insert_documents,  │
+        │               │                ALL while holding the same semaphore slot               │
+        │               │                → peak memory ≈ batch_size × concurrency, independent   │
+        │               │                  of file size; writes start with the first batch       │
+        │               │                  instead of after the whole file is embedded           │
+        │               │             ④ context.num_inserted = sum(...)                          │
+        │               │                embed_wall_clock_s / index_wall_clock_s come from       │
+        │               │                _union_duration(), merging overlapping intervals so     │
+        │               │                concurrent batches are not double-counted               │
+        │               │             ⓘ reports as ObservationType.SPAN (the default), not       │
+        │               │               EMBEDDING as the pre-merge EmbedStage did                │
         │               │                                                                        │
         │               └────────────────────────────────────────────────────────────────────────┘
         │

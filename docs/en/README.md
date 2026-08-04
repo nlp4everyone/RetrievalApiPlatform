@@ -7,7 +7,8 @@ An OpenAI-API-compatible **Retrieval Engine** for Retrieval-Augmented Generation
 ## Key Features
 
 - **OpenAI-compatible API surface** — `/v1/files` and `/v1/vector_stores` mirror the OpenAI Files and Vector Stores APIs closely enough that the stock `openai` Python SDK works against this server unmodified (see `examples/file_upload_example.py`)
-- **Staged pipelines** — ingestion (`download → parse → chunk → embed → index`) and retrieval (`embed_query → retrieve → fuse`) are built from `BaseStage` classes run by a shared `Pipeline`. Adding a step is adding a class, not editing an orchestration function
+- **Staged pipelines** — ingestion (`download → parse → chunk → embed_index`) and retrieval (`embed_query → retrieve → fuse`) are built from `BaseStage` classes run by a shared `Pipeline`. Adding a step is adding a class, not editing an orchestration function
+- **Streaming ingestion with bounded memory** — the last step embeds and upserts **one batch at a time** under a single semaphore, so writes start with the first batch and peak memory is `batch_size × concurrency` rather than file-sized. The worker keeps its I/O thread pool separate from its CPU pool and caps concurrent downloads
 - **Swappable providers everywhere** — parsing, chunking, embedding, and the vector database each sit behind a `base.py` interface with a `provider/` directory and a `from_settings()` facade, selected by one environment variable
 - **Async ingestion** — file upload returns immediately; the pipeline runs out-of-band on a TaskIQ worker (Redis Streams broker)
 - **Provider-agnostic vector search** — dense similarity search through `BaseAsyncVectorStore`; Qdrant is implemented, Milvus is wired end-to-end as a placeholder. Metadata filters are expressed in a backend-neutral tree and translated per backend
@@ -19,7 +20,9 @@ An OpenAI-API-compatible **Retrieval Engine** for Retrieval-Augmented Generation
 
 1. **Software**
    - Docker and Docker Compose
+   - Python 3.11–3.13 if running outside Docker (`requires-python = ">=3.11,<3.14"`, per `unstructured`'s constraint)
    - A dense embedding endpoint — either OpenAI-compatible (e.g. vLLM serving `Qwen/Qwen3-Embedding-0.6B` at `VLLM_DENSE_EMBEDDING_URL`) or a Text Embeddings Inference server at `TEI_EMBEDDING_URL`
+   - API keys for the parsing services you actually use: `LLAMAPARSE_API_KEY` for PDFs, `UNSTRUCTURED_API_KEY` (+ `UNSTRUCTURED_API_URL`) for every other format. Each key is only checked when its provider is first used, so a PDF-only deployment needs no Unstructured key
    - A self-hosted (or cloud) [Langfuse](https://langfuse.com) instance for tracing
 
 2. **Hardware**
@@ -35,6 +38,7 @@ git clone -b retrieval/naive-rag https://github.com/nlp4everyone/RetrievalApiPla
 cd RetrievalApiPlatform
 cp .env.sample .env
 # edit .env: API keys, Postgres/MinIO/Qdrant/Langfuse credentials, embedding endpoint,
+#            parsing keys (LLAMAPARSE_API_KEY, UNSTRUCTURED_API_KEY/UNSTRUCTURED_API_URL),
 #            and the provider switches (EMBEDDING_PROVIDER, CHUNKING_PROVIDER,
 #            PDF_PARSER_PROVIDER, VECTOR_STORE_PROVIDER)
 make up      # builds and starts postgres, redis, qdrant, minio, worker, web
@@ -64,7 +68,7 @@ file = client.files.create(
 vector_store = client.vector_stores.create(name="Support FAQ", file_ids=[file.id])
 ```
 
-The upload returns immediately; ingestion (download → parse → chunk → embed → index) runs asynchronously. Poll `GET /v1/vector_stores/{id}` and watch `status` go `in_progress` → `completed` (or `failed`).
+The upload returns immediately; ingestion (download → parse → chunk → embed_index) runs asynchronously. Poll `GET /v1/vector_stores/{id}` and watch `status` go `in_progress` → `completed` (or `failed`).
 
 <br />
 
@@ -77,7 +81,7 @@ The upload returns immediately; ingestion (download → parse → chunk → embe
 | Metadata store | PostgreSQL (`asyncpg`) | — |
 | Object storage | MinIO (uploaded file bytes) | — |
 | Task queue | Redis Streams + TaskIQ | — |
-| Parsing | in-process decoder (`.txt`/`.md`), LlamaParse (`.pdf`) | `PDF_PARSER_PROVIDER` |
+| Parsing | LlamaParse (`.pdf`), Unstructured API (`.txt`, `.md`, `.docx`, `.doc`, images) — both return Markdown | `PDF_PARSER_PROVIDER` (PDF only) |
 | Chunking | [Chonkie](https://docs.chonkie.ai) or `langchain_text_splitters` | `CHUNKING_PROVIDER` |
 | Embeddings | OpenAI-compatible endpoint or Text Embeddings Inference | `EMBEDDING_PROVIDER` |
 | Tracing | Langfuse via OpenTelemetry OTLP | — |
@@ -105,6 +109,7 @@ See [Design Decisions](DESIGN_DECISIONS.md) for detail.
 - Milvus is wired through config, `VectorStoreType`, and `VectorStoreFactory`, but every method raises `NotImplementedError`
 - Auth is a single shared `FASTAPI_API_KEY` — not per-user multi-tenancy, even though rows are scoped by `api_key`
 - No OpenAI "vector store files" sub-resource endpoints (attach/list/detach a file on an existing vector store)
+- `.csv`, `.json`, and `.gif` pass upload validation but have no registered parsing provider; conversely `.md` and `.doc` can be parsed but are not upload-accepted, so they always get a 415
 
 <br />
 
@@ -119,9 +124,12 @@ See [Design Decisions](DESIGN_DECISIONS.md) for detail.
 - [x] Provider abstraction for parsing, chunking, embedding, and the vector store
 - [x] Staged pipeline framework for ingestion and retrieval
 - [x] Apply metadata filters in search
+- [x] Unstructured API parsing for `.txt`/`.md`/`.docx`/`.doc`/images (replaces the in-process decoder; every format now yields Markdown)
+- [x] Streaming ingestion: embed and index merged into one stage, peak memory independent of file size
+- [x] Split I/O and CPU thread pools, cap concurrent downloads in the worker
 - [ ] Multi-file ingest per vector store
 - [ ] Hybrid search (keyword/BM25 retriever + fusion strategy)
 - [ ] Apply ranking options in search
 - [ ] Milvus backend implementation
 - [ ] Vector store file sub-resource endpoints (attach/list/detach)
-- [ ] `.docx` parser (extension is upload-accepted but has no registered parser)
+- [ ] Reconcile the two allow-lists: parsers for `.csv`/`.json`/`.gif` (or drop them from upload), and add `.md`/`.doc` to `ALLOWED_EXTENSIONS`
