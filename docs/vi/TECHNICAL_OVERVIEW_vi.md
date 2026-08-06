@@ -236,7 +236,7 @@ Ba file compose được `Makefile` gộp lại:
 - **`compose_tracking.yml`** — `minio` (9000 API / 9001 console) — object storage, dù tên file gợi ý khác
 - **`compose_web.yml`** — `web` (uvicorn, 8005; phụ thuộc `postgres` khoẻ mạnh + `worker` đã khởi động) và `worker` (TaskIQ; phụ thuộc `postgres`, `redis`, `minio` khoẻ mạnh)
 
-Bản thân Langfuse **không** nằm trong stack Compose này — cấu hình trỏ tới một instance bên ngoài/self-hosted. Tương tự với embedding server — `VLLM_DENSE_EMBEDDING_URL` mặc định là `http://172.17.0.1:8100/v1` (máy host, không phải một service Compose).
+Bản thân Langfuse **không** nằm trong stack Compose này — cấu hình trỏ tới một instance bên ngoài/self-hosted. Tương tự với embedding server — `DENSE_EMBEDDING_URL` mặc định là `http://172.17.0.1:8100/v1` (máy host, không phải một service Compose).
 
 Cả `web` và `worker` chạy từ cùng một image (`docker/Dockerfile`, build multi-stage `uv sync --frozen`, user `appuser` không phải root), chỉ khác lệnh entrypoint (`uvicorn app.app:app` so với `taskiq worker app.tasks.broker:broker`). Mỗi tiến trình chạy độc lập cùng một quy trình bootstrap trong `app/startup.py`, nên cả hai đều có cùng bộ service sống, truy cập qua cùng các getter.
 

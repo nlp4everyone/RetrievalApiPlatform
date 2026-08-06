@@ -21,7 +21,7 @@ Một **Retrieval Engine** tương thích OpenAI API dành cho các hệ thống
 1. **Software**
    - Docker và Docker Compose
    - Python 3.11–3.13 nếu chạy ngoài Docker (`requires-python = ">=3.11,<3.14"`, theo ràng buộc của `unstructured`)
-   - Một endpoint dense embedding — hoặc tương thích OpenAI (ví dụ vLLM phục vụ `Qwen/Qwen3-Embedding-0.6B` tại `VLLM_DENSE_EMBEDDING_URL`), hoặc một server Text Embeddings Inference tại `TEI_EMBEDDING_URL`
+   - Một endpoint dense embedding tại `DENSE_EMBEDDING_URL` — hoặc tương thích OpenAI (ví dụ vLLM phục vụ `Qwen/Qwen3-Embedding-0.6B`), hoặc một server Text Embeddings Inference
    - API key cho các service parsing thực sự dùng: `LLAMAPARSE_API_KEY` cho PDF, `UNSTRUCTURED_API_KEY` (+ `UNSTRUCTURED_API_URL`) cho mọi định dạng còn lại. Key chỉ được kiểm tra khi provider tương ứng được dùng lần đầu, nên deployment chỉ ingest PDF không cần key của Unstructured
    - Một instance [Langfuse](https://langfuse.com) (self-hosted hoặc cloud) cho tracing
 

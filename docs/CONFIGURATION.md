@@ -13,7 +13,7 @@ Four variables pick which backend serves each swappable capability. Each is vali
 
 | Variable | Default | Accepted values | Picks |
 |---|---|---|---|
-| `EMBEDDING_PROVIDER` | `openai` | `openai`, `tei` | `OpenAIEmbeddingProvider` (OpenAI-compatible endpoint at `VLLM_DENSE_EMBEDDING_URL`) or `TEIEmbeddingProvider` (raw HTTP to a Text Embeddings Inference `/embed` endpoint at `TEI_EMBEDDING_URL`) |
+| `EMBEDDING_PROVIDER` | `openai` | `openai`, `tei` | `OpenAIEmbeddingProvider` (OpenAI-compatible endpoint) or `TEIEmbeddingProvider` (raw HTTP to a Text Embeddings Inference `/embed` endpoint). Both read the same `DENSE_EMBEDDING_URL` / `DENSE_EMBEDDING_API_KEY` |
 | `CHUNKING_PROVIDER` | `chonkie` | `chonkie`, `langchain` | `ChonkieProvider` or `LangchainProvider` (`langchain_text_splitters`) |
 | `PDF_PARSER_PROVIDER` | `llamaparse` | `llamaparse` | PDF backend. Every other format (`.txt`, `.md`, `.docx`, `.doc`, images) always goes through the Unstructured API, so only PDF has a backend worth choosing |
 | `VECTOR_STORE_PROVIDER` | `qdrant` | `qdrant`, `milvus` | Backend **new** vector stores are created on. Existing stores are read back using the provider recorded on their database row, so changing this doesn't strand old collections. Milvus is wired but every method raises `NotImplementedError` |
@@ -38,10 +38,9 @@ Four variables pick which backend serves each swappable capability. Each is vali
 | `LOG_LEVEL` | `INFO` | `TRACE`\|`DEBUG`\|`INFO`\|`SUCCESS`\|`WARNING`\|`ERROR`\|`CRITICAL` |
 | `LOG_FORMAT` | `auto` | `auto` (detect TTY) \| `console` (colorized) \| `json` (structured, for Docker/prod) |
 | `DENSE_MODEL_NAME` | `Qwen/Qwen3-Embedding-0.6B` | Model name sent to the embedding endpoint |
-| `VLLM_DENSE_EMBEDDING_URL` | `http://172.17.0.1:8100/v1` | OpenAI-compatible embedding endpoint; used only when `EMBEDDING_PROVIDER=openai` |
 | `EMBEDDING_PROVIDER` | `openai` | Embedding backend — see [Provider selection](#provider-selection) |
-| `TEI_EMBEDDING_URL` | `http://localhost:8100` | Base URL of the TEI embedding service; used only when `EMBEDDING_PROVIDER=tei` |
-| `TEI_API_KEY` | — | Bearer token for the TEI embedding service; used only when `EMBEDDING_PROVIDER=tei` |
+| `DENSE_EMBEDDING_URL` | `http://172.17.0.1:8100/v1` | Base URL of the embedding server, whichever provider is selected — the OpenAI-compatible base (vLLM, `.../v1`) or the TEI base (the `/embed` path is appended) |
+| `DENSE_EMBEDDING_API_KEY` | — | Bearer token sent to the embedding server; TEI omits the header entirely when unset |
 | `CHUNKING_PROVIDER` | `chonkie` | Chunking backend — see [Provider selection](#provider-selection) |
 | `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` / `POSTGRES_HOST` | — (required) | Postgres connection |
 | `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` | — (required) | MinIO credentials |

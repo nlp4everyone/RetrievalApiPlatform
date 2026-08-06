@@ -21,7 +21,7 @@ An OpenAI-API-compatible **Retrieval Engine** for Retrieval-Augmented Generation
 1. **Software**
    - Docker and Docker Compose
    - Python 3.11–3.13 if running outside Docker (`requires-python = ">=3.11,<3.14"`, per `unstructured`'s constraint)
-   - A dense embedding endpoint — either OpenAI-compatible (e.g. vLLM serving `Qwen/Qwen3-Embedding-0.6B` at `VLLM_DENSE_EMBEDDING_URL`) or a Text Embeddings Inference server at `TEI_EMBEDDING_URL`
+   - A dense embedding endpoint at `DENSE_EMBEDDING_URL` — either OpenAI-compatible (e.g. vLLM serving `Qwen/Qwen3-Embedding-0.6B`) or a Text Embeddings Inference server
    - API keys for the parsing services you actually use: `LLAMAPARSE_API_KEY` for PDFs, `UNSTRUCTURED_API_KEY` (+ `UNSTRUCTURED_API_URL`) for every other format. Each key is only checked when its provider is first used, so a PDF-only deployment needs no Unstructured key
    - A self-hosted (or cloud) [Langfuse](https://langfuse.com) instance for tracing
 

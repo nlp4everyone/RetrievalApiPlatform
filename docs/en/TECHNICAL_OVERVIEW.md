@@ -236,7 +236,7 @@ Three compose files combined by the `Makefile`:
 - **`compose_tracking.yml`** — `minio` (9000 API / 9001 console) — object storage, despite the filename
 - **`compose_web.yml`** — `web` (uvicorn, 8005; depends on `postgres` healthy + `worker` started) and `worker` (TaskIQ; depends on `postgres`, `redis`, `minio` healthy)
 
-Langfuse itself is **not** part of this Compose stack — configuration points at an external/self-hosted instance. Same for the embedding server — `VLLM_DENSE_EMBEDDING_URL` defaults to `http://172.17.0.1:8100/v1` (the host machine, not a Compose service).
+Langfuse itself is **not** part of this Compose stack — configuration points at an external/self-hosted instance. Same for the embedding server — `DENSE_EMBEDDING_URL` defaults to `http://172.17.0.1:8100/v1` (the host machine, not a Compose service).
 
 Both `web` and `worker` run from the same image (`docker/Dockerfile`, multi-stage `uv sync --frozen` build, non-root `appuser`), just with different entrypoint commands (`uvicorn app.app:app` vs `taskiq worker app.tasks.broker:broker`). Each independently runs the same bootstrap out of `app/startup.py`, so both processes end up with the same live services reached through the same getters.
 
