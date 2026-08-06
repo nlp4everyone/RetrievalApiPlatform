@@ -13,7 +13,8 @@ EMBEDDING_BATCH_CONCURRENCY = embedding_config.get("batch_concurrency")
 # Chunking provider selection ("chonkie" or "langchain")
 CHUNKING_PROVIDER = settings.CHUNKING_PROVIDER
 
-# Embedding provider selection ("openai" or "tei") and TEI-specific connection config
+# Embedding provider selection ("openai" or "tei") and the connection config
+# every provider shares
 EMBEDDING_PROVIDER = settings.EMBEDDING_PROVIDER
-TEI_EMBEDDING_URL = settings.TEI_EMBEDDING_URL
-TEI_API_KEY = settings.TEI_API_KEY
+DENSE_EMBEDDING_URL = settings.DENSE_EMBEDDING_URL
+DENSE_EMBEDDING_API_KEY = settings.DENSE_EMBEDDING_API_KEY

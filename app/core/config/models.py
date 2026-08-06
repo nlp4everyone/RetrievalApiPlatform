@@ -7,5 +7,4 @@ models_config = yaml_config.get_section("models")
 
 # Model config
 DENSE_MODEL_NAME = settings.DENSE_MODEL_NAME
-VLLM_DENSE_EMBEDDING_URL = settings.VLLM_DENSE_EMBEDDING_URL
 

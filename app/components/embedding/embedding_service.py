@@ -4,11 +4,9 @@ from .provider.openai_provider import OpenAIEmbeddingProvider
 from .provider.tei_provider import TEIEmbeddingProvider
 # Config
 from app.core.config import (EMBEDDING_PROVIDER,
-                             VLLM_DENSE_EMBEDDING_URL,
-                             DENSE_MODEL_NAME,
-                             TEI_EMBEDDING_URL,
-                             TEI_API_KEY,
-                             SERVING_API_KEY)
+                             DENSE_EMBEDDING_URL,
+                             DENSE_EMBEDDING_API_KEY,
+                             DENSE_MODEL_NAME)
 # Typing
 from typing import List, Optional
 
@@ -67,11 +65,11 @@ class EmbeddingService:
             ValueError: If EMBEDDING_PROVIDER is set to an unsupported value
         """
         if EMBEDDING_PROVIDER == "tei":
-            provider = TEIEmbeddingProvider(base_url = TEI_EMBEDDING_URL,
-                                            api_key = TEI_API_KEY)
+            provider = TEIEmbeddingProvider(base_url = DENSE_EMBEDDING_URL,
+                                            api_key = DENSE_EMBEDDING_API_KEY)
         elif EMBEDDING_PROVIDER == "openai":
-            provider = OpenAIEmbeddingProvider(base_url = VLLM_DENSE_EMBEDDING_URL,
-                                               api_key = SERVING_API_KEY,
+            provider = OpenAIEmbeddingProvider(base_url = DENSE_EMBEDDING_URL,
+                                               api_key = DENSE_EMBEDDING_API_KEY,
                                                model = DENSE_MODEL_NAME)
         else:
             raise ValueError(f"Unsupported EMBEDDING_PROVIDER: {EMBEDDING_PROVIDER!r}")

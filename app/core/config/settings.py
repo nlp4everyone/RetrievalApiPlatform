@@ -36,13 +36,13 @@ class Settings(BaseSettings):
     
     # Model Config
     DENSE_MODEL_NAME: str = "Qwen/Qwen3-Embedding-0.6B"
-    VLLM_DENSE_EMBEDDING_URL: str = "http://172.17.0.1:8100/v1"
 
     # Embedding provider selection: "openai" (OpenAI-compatible endpoint, e.g. vLLM)
-    # or "tei" (raw HTTP request to a Text Embeddings Inference /embed endpoint)
+    # or "tei" (raw HTTP request to a Text Embeddings Inference /embed endpoint).
+    # Every provider reads the same endpoint/credential pair below.
     EMBEDDING_PROVIDER: str = "openai"
-    TEI_EMBEDDING_URL: str = "http://localhost:8100"
-    TEI_API_KEY: Optional[str] = Field(None, description="API key for the TEI embedding service")
+    DENSE_EMBEDDING_URL: str = "http://172.17.0.1:8100/v1"
+    DENSE_EMBEDDING_API_KEY: Optional[str] = Field(None, description="API key for the dense embedding service (TEI, vLLM, or any other backend)")
 
     # Chunking provider selection: "chonkie" or "langchain"
     CHUNKING_PROVIDER: str = "chonkie"
