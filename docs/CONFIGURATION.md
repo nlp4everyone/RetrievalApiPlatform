@@ -14,6 +14,7 @@ Four variables pick which backend serves each swappable capability. Each is vali
 | Variable | Default | Accepted values | Picks |
 |---|---|---|---|
 | `EMBEDDING_PROVIDER` | `openai` | `openai`, `tei` | `OpenAIEmbeddingProvider` (OpenAI-compatible endpoint) or `TEIEmbeddingProvider` (raw HTTP to a Text Embeddings Inference `/embed` endpoint). Both read the same `DENSE_EMBEDDING_URL` / `DENSE_EMBEDDING_API_KEY` |
+| `SPARSE_EMBEDDING_PROVIDER` | `vllm` | `vllm` | `VLLMSparseEmbeddingProvider` (token ids from vLLM's `/tokenize`, token weights from `/pooling`, on a BGE-M3 style model). Only built when `SPARSE_EMBEDDING_ENABLED` is true |
 | `CHUNKING_PROVIDER` | `chonkie` | `chonkie`, `langchain` | `ChonkieProvider` or `LangchainProvider` (`langchain_text_splitters`) |
 | `PDF_PARSER_PROVIDER` | `llamaparse` | `llamaparse` | PDF backend. Every other format (`.txt`, `.md`, `.docx`, `.doc`, images) always goes through the Unstructured API, so only PDF has a backend worth choosing |
 | `VECTOR_STORE_PROVIDER` | `qdrant` | `qdrant`, `milvus` | Backend **new** vector stores are created on. Existing stores are read back using the provider recorded on their database row, so changing this doesn't strand old collections. Milvus is wired but every method raises `NotImplementedError` |
@@ -41,6 +42,11 @@ Four variables pick which backend serves each swappable capability. Each is vali
 | `EMBEDDING_PROVIDER` | `openai` | Embedding backend — see [Provider selection](#provider-selection) |
 | `DENSE_EMBEDDING_URL` | `http://172.17.0.1:8100/v1` | Base URL of the embedding server, whichever provider is selected — the OpenAI-compatible base (vLLM, `.../v1`) or the TEI base (the `/embed` path is appended) |
 | `DENSE_EMBEDDING_API_KEY` | — | Bearer token sent to the embedding server; TEI omits the header entirely when unset |
+| `SPARSE_EMBEDDING_ENABLED` | `false` | Whether to build and probe a sparse (lexical) embedding service at startup. Off by default — it needs a second model server, and dense retrieval alone serves every vector store today |
+| `SPARSE_EMBEDDING_PROVIDER` | `vllm` | Sparse embedding backend — see [Provider selection](#provider-selection) |
+| `SPARSE_EMBEDDING_URL` | `http://172.17.0.1:8101` | Root URL of the sparse embedding server (`/tokenize` and `/pooling` are appended; a trailing `/v1` is stripped) |
+| `SPARSE_EMBEDDING_API_KEY` | — | Bearer token sent to the sparse embedding server; the header is omitted entirely when unset |
+| `SPARSE_MODEL_NAME` | `BAAI/bge-m3` | Model name sent to the sparse embedding endpoint |
 | `CHUNKING_PROVIDER` | `chonkie` | Chunking backend — see [Provider selection](#provider-selection) |
 | `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` / `POSTGRES_HOST` | — (required) | Postgres connection |
 | `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` | — (required) | MinIO credentials |
