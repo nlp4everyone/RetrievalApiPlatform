@@ -9,9 +9,9 @@ from qdrant_client import models
 # Embedding type
 from uuid import uuid4
 # Config
-from app.core.config import DENSE_MODEL_NAME
+from app.core.config import DENSE_MODEL_NAME, SPARSE_MODEL_NAME
 # Contract
-from app.db.vector_store.base import BaseAsyncVectorStore, Embedding
+from app.db.vector_store.base import BaseAsyncVectorStore, Embedding, SparseEmbedding
 from app.db.vector_store.types import RetrievedChunk, VectorStoreFilter
 from app.db.vector_store.provider.qdrant.filter_translator import to_qdrant_filter
 from app.schemas.vector_store.types import VectorStoreType
@@ -76,7 +76,9 @@ class AsyncQdrantVectorStore(BaseAsyncVectorStore):
         """
         return await self._client.collection_exists(self._collection_name)
 
-    async def ensure_collection(self, embedding_dim: int) -> bool:
+    async def ensure_collection(self,
+                                embedding_dim: int,
+                                with_sparse: bool = False) -> bool:
         """
         Create the collection if it is missing, tolerating concurrent creation.
 
@@ -88,6 +90,11 @@ class AsyncQdrantVectorStore(BaseAsyncVectorStore):
 
         Args:
             embedding_dim: Dimensionality of the vectors that will be stored.
+            with_sparse: Also create a named sparse vector field, so points can
+                carry a dense and a sparse vector at once. Ignored when the
+                collection already exists - Qdrant cannot add a vector field to
+                a live collection, so an older dense-only store stays dense-only
+                (see supports_sparse).
 
         Returns:
             bool: True if this call created the collection, False if it already existed.
@@ -102,6 +109,9 @@ class AsyncQdrantVectorStore(BaseAsyncVectorStore):
                                                                 distance = self._distance,
                                                                 on_disk = self._on_disk,
                                                                 model = DENSE_MODEL_NAME)
+        sparse_vectors_config = (self._get_sparse_embedding_config(model = SPARSE_MODEL_NAME,
+                                                                   on_disk = self._on_disk)
+                                 if with_sparse else None)
         quantization_config = self._get_quantization_config(quantization_mode = self._quantization_mode,
                                                             always_ram = True)
 
@@ -114,6 +124,7 @@ class AsyncQdrantVectorStore(BaseAsyncVectorStore):
         try:
             await self._client.create_collection(collection_name = self._collection_name,
                                                  vectors_config = dense_vectors_config,
+                                                 sparse_vectors_config = sparse_vectors_config,
                                                  shard_number = self._shard_number,
                                                  quantization_config = quantization_config,
                                                  optimizers_config = optimizers_config)
@@ -128,6 +139,25 @@ class AsyncQdrantVectorStore(BaseAsyncVectorStore):
         await self._client.update_collection(collection_name = self._collection_name,
                                              optimizer_config = models.OptimizersConfigDiff(indexing_threshold = 20000))
         return True
+
+    async def supports_sparse(self) -> bool:
+        """
+        Whether this collection was created with a sparse vector field.
+
+        Read from the live collection rather than from config: sparse embedding
+        can be switched on long after a store was created, and Qdrant cannot add
+        a vector field afterwards. Upserting a sparse vector into a collection
+        without the field fails the whole batch, so writers check here first.
+
+        Returns:
+            bool: True if the collection exists and holds the SPARSE_MODEL_NAME
+                sparse vector field.
+        """
+        if not await self.collection_exists():
+            return False
+        info = await self._client.get_collection(self._collection_name)
+        sparse_vectors = info.config.params.sparse_vectors or {}
+        return SPARSE_MODEL_NAME in sparse_vectors
 
     async def delete_collection(self) -> bool:
         """
@@ -216,6 +246,28 @@ class AsyncQdrantVectorStore(BaseAsyncVectorStore):
         return {model: dense_vectors_config}
 
     @staticmethod
+    def _get_sparse_embedding_config(model: str,
+                                     on_disk: bool) -> dict[str, models.SparseVectorParams]:
+        """
+        Generate configuration for sparse vector storage in Qdrant.
+
+        Sparse vectors get an inverted index instead of HNSW, and no
+        quantization - there is nothing to compress in a {token_id: weight}
+        mapping the way there is in a dense float array. No `modifier` is set:
+        BGE-M3 already emits learned term weights, so applying IDF on top would
+        re-weight scores that are not raw frequencies.
+
+        Args:
+            model: Name of the sparse embedding model, used as the field name.
+            on_disk: Whether to keep the inverted index on disk.
+
+        Returns:
+            dict: Sparse vector configuration, keyed by model name so it sits
+                beside the dense field rather than replacing it.
+        """
+        return {model: models.SparseVectorParams(index = models.SparseIndexParams(on_disk = on_disk))}
+
+    @staticmethod
     def _get_quantization_config(quantization_mode: Literal['binary', 'scalar', 'product', 'none'] = "scalar",
                                  always_ram: bool = True) -> Union[models.ScalarQuantization, models.BinaryQuantization, models.ProductQuantization]:
         """
@@ -258,7 +310,8 @@ class AsyncQdrantVectorStore(BaseAsyncVectorStore):
     async def insert_documents(self,
                                documents: Sequence[Document],
                                embeddings: Sequence[Embedding],
-                               batch_size: int = 16) -> int:
+                               batch_size: int = 16,
+                               sparse_embeddings: Optional[Sequence[SparseEmbedding]] = None) -> int:
         """
         Upsert documents and their vectors into an existing collection.
 
@@ -267,8 +320,12 @@ class AsyncQdrantVectorStore(BaseAsyncVectorStore):
 
         Args:
             documents: Documents to store, one per embedding.
-            embeddings: Pre-computed vectors, aligned with documents.
+            embeddings: Pre-computed dense vectors, aligned with documents.
             batch_size: Points per upsert round-trip.
+            sparse_embeddings: Optional {token_id: weight} mappings, aligned with
+                documents. Each point then carries a dense and a sparse vector
+                under their model names; the collection must have been created
+                with with_sparse (see supports_sparse).
 
         Returns:
             int: Number of documents written.
@@ -281,13 +338,18 @@ class AsyncQdrantVectorStore(BaseAsyncVectorStore):
         if len(documents) != len(embeddings):
             raise ValueError(f"Number of documents ({len(documents)}) must equal "
                              f"number of embeddings ({len(embeddings)})")
+        if sparse_embeddings is not None and len(documents) != len(sparse_embeddings):
+            raise ValueError(f"Number of documents ({len(documents)}) must equal "
+                             f"number of sparse embeddings ({len(sparse_embeddings)})")
 
         # Define payload
         payloads = self._convert_documents_to_payloads(documents)
 
         # Define points
         points = [models.PointStruct(id = str(uuid4()),
-                                     vector = {DENSE_MODEL_NAME: embeddings[i]},
+                                     vector = self._to_point_vector(
+                                         dense = embeddings[i],
+                                         sparse = sparse_embeddings[i] if sparse_embeddings is not None else None),
                                      payload = payloads[i]) for i in range(len(payloads))]
 
         # Batch upserts to bound request size instead of one giant call
@@ -296,6 +358,30 @@ class AsyncQdrantVectorStore(BaseAsyncVectorStore):
             await self._client.upsert(collection_name = self._collection_name,
                                       points = batch)
         return len(points)
+
+    @staticmethod
+    def _to_point_vector(dense: Embedding,
+                         sparse: Optional[SparseEmbedding] = None) -> dict[str, Any]:
+        """
+        Build one point's named-vector mapping.
+
+        Both representations are keyed by their model name, so a hybrid point is
+        the dense point plus one more entry - nothing about the dense field
+        changes, and a dense-only reader keeps working unchanged.
+
+        Args:
+            dense: Dense vector for this point.
+            sparse: Optional {token_id: weight} mapping for the same point.
+
+        Returns:
+            dict: Named vectors ready for models.PointStruct.
+        """
+        vector: dict[str, Any] = {DENSE_MODEL_NAME: dense}
+        if sparse:
+            # Qdrant wants two parallel arrays, not a mapping
+            vector[SPARSE_MODEL_NAME] = models.SparseVector(indices = list(sparse.keys()),
+                                                            values = list(sparse.values()))
+        return vector
 
     # ------------------------------------------------------------------
     # SEARCH

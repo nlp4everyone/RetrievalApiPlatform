@@ -16,7 +16,9 @@ from app.schemas.file.types import UploadingStatus
 from app.startup import (get_dense_embedding,
                          get_minio_service,
                          get_parsing_service,
-                         get_postgres_pool)
+                         get_postgres_pool,
+                         get_sparse_embedding,
+                         is_sparse_embedding_enabled)
 from loggers import SystemLogger
 
 
@@ -143,13 +145,17 @@ class IngestionService:
         vector_store = VectorStoreFactory.get_store(collection_name = vectorstore_id,
                                                     provider = vector_store_type)
 
+        # Sparse is opt-in and lives on a second model server, so the pipeline
+        # is handed the sparse embedder only when this worker actually has one
         pipeline = build_ingestion_pipeline(minio_client = get_minio_service().client,
                                             vector_store = vector_store,
                                             embed_fn = get_dense_embedding,
                                             parsing_service = get_parsing_service(),
                                             chunking_strategy = chunking_strategy,
                                             chunk_size = chunk_size,
-                                            chunk_overlap = chunk_overlap)
+                                            chunk_overlap = chunk_overlap,
+                                            sparse_embed_fn = (get_sparse_embedding
+                                                               if is_sparse_embedding_enabled() else None))
 
         context = IngestionContext(vector_store_id = vectorstore_id,
                                    api_key = api_key,

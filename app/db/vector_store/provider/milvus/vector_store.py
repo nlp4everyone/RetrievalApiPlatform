@@ -14,12 +14,15 @@ Implementation notes for whoever picks this up:
   the service layer is not allowed to see backend types.
 * Documents are stored with ``page_content`` and ``metadata`` fields to stay
   payload-compatible with the Qdrant backend.
+* ``supports_sparse`` must report what the *live* collection holds, not what
+  config asks for: sparse embedding can be enabled after a collection was
+  created, and ingestion skips writing sparse vectors when it reads False.
 """
 from typing import ClassVar, List, Optional, Sequence
 
 from langchain_core.documents import Document
 
-from app.db.vector_store.base import BaseAsyncVectorStore, Embedding
+from app.db.vector_store.base import BaseAsyncVectorStore, Embedding, SparseEmbedding
 from app.db.vector_store.types import RetrievedChunk, VectorStoreFilter
 from app.schemas.vector_store.types import VectorStoreType
 
@@ -49,13 +52,19 @@ class AsyncMilvusVectorStore(BaseAsyncVectorStore):
     async def collection_exists(self) -> bool:
         raise NotImplementedError(_NOT_IMPLEMENTED)
 
-    async def ensure_collection(self, embedding_dim: int) -> bool:
+    async def ensure_collection(self,
+                                embedding_dim: int,
+                                with_sparse: bool = False) -> bool:
+        raise NotImplementedError(_NOT_IMPLEMENTED)
+
+    async def supports_sparse(self) -> bool:
         raise NotImplementedError(_NOT_IMPLEMENTED)
 
     async def insert_documents(self,
                                documents: Sequence[Document],
                                embeddings: Sequence[Embedding],
-                               batch_size: int = 16) -> int:
+                               batch_size: int = 16,
+                               sparse_embeddings: Optional[Sequence[SparseEmbedding]] = None) -> int:
         raise NotImplementedError(_NOT_IMPLEMENTED)
 
     async def retrieve(self,

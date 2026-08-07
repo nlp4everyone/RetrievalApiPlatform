@@ -8,17 +8,19 @@ file's.
 """
 import asyncio
 import time
-from typing import Any, Awaitable, Callable, ClassVar, Sequence
+from typing import Any, Awaitable, Callable, ClassVar, Optional, Sequence
 
 from langchain_core.documents import Document
 
-from app.core.config import DENSE_MODEL_NAME
+from app.core.config import DENSE_MODEL_NAME, SPARSE_MODEL_NAME
 from app.db.vector_store import BaseAsyncVectorStore
+from app.db.vector_store.base import SparseEmbedding
 from app.pipelines.ingestion.base import BaseIngestionStage
 from app.pipelines.ingestion.context import IngestionContext
 from app.startup import get_dense_embedding_dim
 
 EmbedFn = Callable[[list[str]], Awaitable[list[list[float]]]]
+SparseEmbedFn = Callable[[list[str]], Awaitable[list[SparseEmbedding]]]
 
 
 def _union_duration(intervals: list[tuple[float, float]]) -> float:
@@ -50,6 +52,10 @@ class EmbedAndIndexStage(BaseIngestionStage):
     dimension (app.startup.get_dense_embedding_dim) instead of from the first
     embedding result - that's what makes streaming possible instead of
     embedding the whole file before any write can start.
+
+    With a sparse_embed_fn supplied, each batch is embedded twice - dense and
+    sparse concurrently - and both vectors ride on the same point, so hybrid
+    retrieval needs no second pass over the file.
     """
 
     name: ClassVar[str] = "embed_index"
@@ -58,18 +64,22 @@ class EmbedAndIndexStage(BaseIngestionStage):
                  vector_store: BaseAsyncVectorStore,
                  embed_fn: EmbedFn,
                  batch_size: int,
-                 concurrency: int) -> None:
+                 concurrency: int,
+                 sparse_embed_fn: Optional[SparseEmbedFn] = None) -> None:
         """
         Args:
             vector_store: Store bound to this vector store's collection
             embed_fn: Coroutine turning texts into dense vectors
             batch_size: Chunks per embed request and per upsert request
             concurrency: Batches allowed in flight at once (embed + upsert combined)
+            sparse_embed_fn: Optional coroutine turning texts into sparse vectors.
+                None (the default) keeps ingestion dense-only
         """
         self._vector_store = vector_store
         self._embed_fn = embed_fn
         self._batch_size = batch_size
         self._concurrency = concurrency
+        self._sparse_embed_fn = sparse_embed_fn
 
     async def run(self, context: IngestionContext) -> None:
         """
@@ -83,9 +93,16 @@ class EmbedAndIndexStage(BaseIngestionStage):
             return
 
         embedding_dim = await get_dense_embedding_dim()
-        created = await self._vector_store.ensure_collection(embedding_dim = embedding_dim)
+        want_sparse = self._sparse_embed_fn is not None
+        created = await self._vector_store.ensure_collection(embedding_dim = embedding_dim,
+                                                             with_sparse = want_sparse)
+        # A collection created before sparse was switched on has no sparse field
+        # and Qdrant cannot add one, so ask the collection rather than trusting
+        # config - writing a sparse vector it cannot hold would fail every batch
+        use_sparse = want_sparse and await self._vector_store.supports_sparse()
         context.metrics["collection_created"] = created
         context.metrics["embedding_dim"] = embedding_dim
+        context.metrics["sparse_enabled"] = use_sparse
 
         batches = [context.chunks[i:i + self._batch_size]
                    for i in range(0, len(context.chunks), self._batch_size)]
@@ -97,8 +114,15 @@ class EmbedAndIndexStage(BaseIngestionStage):
 
         async def process_batch(batch_chunks: Sequence[str]) -> int:
             async with semaphore:
+                texts = list(batch_chunks)
                 t0 = time.monotonic()
-                vectors = await self._embed_fn(list(batch_chunks))
+                if use_sparse:
+                    # Two independent model servers - run them together so the
+                    # batch costs the slower of the two, not their sum
+                    vectors, sparse_vectors = await asyncio.gather(self._embed_fn(texts),
+                                                                   self._sparse_embed_fn(texts))
+                else:
+                    vectors, sparse_vectors = await self._embed_fn(texts), None
                 embed_intervals.append((t0, time.monotonic()))
 
                 # Built only now, per batch, so at most `concurrency` batches'
@@ -110,7 +134,8 @@ class EmbedAndIndexStage(BaseIngestionStage):
                 t0 = time.monotonic()
                 inserted = await self._vector_store.insert_documents(documents = batch_documents,
                                                                      embeddings = vectors,
-                                                                     batch_size = self._batch_size)
+                                                                     batch_size = self._batch_size,
+                                                                     sparse_embeddings = sparse_vectors)
                 index_intervals.append((t0, time.monotonic()))
                 return inserted
 
@@ -126,6 +151,8 @@ class EmbedAndIndexStage(BaseIngestionStage):
             "vector_store.collection_created": context.metrics.get("collection_created"),
             "embedding.model": DENSE_MODEL_NAME,
             "embedding.dims": context.metrics.get("embedding_dim"),
+            "embedding.sparse_enabled": context.metrics.get("sparse_enabled"),
+            "embedding.sparse_model": SPARSE_MODEL_NAME if context.metrics.get("sparse_enabled") else None,
             "embedding.wall_clock_s": context.metrics.get("embed_wall_clock_s"),
             "index.wall_clock_s": context.metrics.get("index_wall_clock_s"),
             "index.num_documents": context.num_inserted,

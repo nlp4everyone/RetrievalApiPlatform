@@ -16,7 +16,7 @@ from app.pipelines.ingestion.stages import (ChunkStage,
                                            DownloadStage,
                                            EmbedAndIndexStage,
                                            ParseStage)
-from app.pipelines.ingestion.stages.embed_index_stage import EmbedFn
+from app.pipelines.ingestion.stages.embed_index_stage import EmbedFn, SparseEmbedFn
 from app.components.parsing import ParsingService
 
 
@@ -26,7 +26,8 @@ def build_ingestion_pipeline(minio_client: Minio,
                              parsing_service: ParsingService,
                              chunking_strategy: str = "auto",
                              chunk_size: Optional[int] = None,
-                             chunk_overlap: Optional[int] = None) -> IngestionPipeline:
+                             chunk_overlap: Optional[int] = None,
+                             sparse_embed_fn: Optional[SparseEmbedFn] = None) -> IngestionPipeline:
     """Build the download -> parse -> chunk -> embed+index pipeline.
 
     Args:
@@ -37,6 +38,8 @@ def build_ingestion_pipeline(minio_client: Minio,
         chunking_strategy: Strategy recorded on the vector store
         chunk_size: Maximum chunk size
         chunk_overlap: Overlap between chunks
+        sparse_embed_fn: Optional coroutine turning texts into sparse vectors;
+            supplying it makes the collection hybrid (dense + sparse per point)
 
     Returns:
         IngestionPipeline: Pipeline ready to run against an IngestionContext
@@ -54,5 +57,6 @@ def build_ingestion_pipeline(minio_client: Minio,
         EmbedAndIndexStage(vector_store = vector_store,
                            embed_fn = embed_fn,
                            batch_size = EMBEDDING_UPLOAD_BATCH_SIZE,
-                           concurrency = EMBEDDING_BATCH_CONCURRENCY),
+                           concurrency = EMBEDDING_BATCH_CONCURRENCY,
+                           sparse_embed_fn = sparse_embed_fn),
     ])

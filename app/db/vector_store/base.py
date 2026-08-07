@@ -14,7 +14,7 @@ ingest code had to run its first batch alone. Callers now create the collection
 once up front, after which inserts are pure and safely parallel.
 """
 from abc import ABC, abstractmethod
-from typing import Any, ClassVar, List, Optional, Sequence
+from typing import Any, ClassVar, Dict, List, Optional, Sequence
 
 from langchain_core.documents import Document
 
@@ -22,6 +22,9 @@ from app.db.vector_store.types import RetrievedChunk, VectorStoreFilter
 from app.schemas.vector_store.types import VectorStoreType
 
 Embedding = List[float]
+# Sparse vectors are {token_id: weight}; only the tokens the model gave weight
+# to are carried, so this never has a fixed length the way Embedding does
+SparseEmbedding = Dict[int, float]
 
 
 class BaseVectorStoreConnection(ABC):
@@ -78,7 +81,9 @@ class BaseAsyncVectorStore(ABC):
         """
 
     @abstractmethod
-    async def ensure_collection(self, embedding_dim: int) -> bool:
+    async def ensure_collection(self,
+                                embedding_dim: int,
+                                with_sparse: bool = False) -> bool:
         """Create the collection if it is missing.
 
         Must be idempotent and must tolerate another process creating the same
@@ -87,16 +92,34 @@ class BaseAsyncVectorStore(ABC):
 
         Args:
             embedding_dim: Dimensionality of the vectors that will be stored
+            with_sparse: Also give the collection a sparse vector field, so
+                documents can carry a dense and a sparse vector side by side.
+                Only honoured when this call creates the collection - an
+                existing one keeps whatever schema it was created with, which
+                is what ``supports_sparse`` is for
 
         Returns:
             bool: True if this call created the collection, False if it existed
         """
 
     @abstractmethod
+    async def supports_sparse(self) -> bool:
+        """Whether this collection can store sparse vectors.
+
+        A collection created before sparse embedding was switched on has no
+        sparse field, and writing one into it fails. Callers therefore ask the
+        live collection rather than assuming their own config applies to it.
+
+        Returns:
+            bool: True if the collection exists and holds a sparse vector field
+        """
+
+    @abstractmethod
     async def insert_documents(self,
                                documents: Sequence[Document],
                                embeddings: Sequence[Embedding],
-                               batch_size: int = 16) -> int:
+                               batch_size: int = 16,
+                               sparse_embeddings: Optional[Sequence[SparseEmbedding]] = None) -> int:
         """Upsert documents and their vectors.
 
         Assumes ``ensure_collection`` has already run; implementations must not
@@ -104,8 +127,11 @@ class BaseAsyncVectorStore(ABC):
 
         Args:
             documents: Documents to store, one per embedding
-            embeddings: Pre-computed vectors, aligned with documents
+            embeddings: Pre-computed dense vectors, aligned with documents
             batch_size: Points per round-trip to the backend
+            sparse_embeddings: Optional sparse vectors, aligned with documents.
+                Each point then carries both representations. Requires a
+                collection created with ``with_sparse``
 
         Returns:
             int: Number of documents written
