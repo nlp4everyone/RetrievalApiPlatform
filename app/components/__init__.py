@@ -6,7 +6,8 @@ interface, a ``provider/`` holding the implementations, and a facade service
 whose ``from_settings()`` picks one from config. Nothing here orchestrates
 anything or knows about HTTP - see app.pipelines and app.services for that.
 
-    chunking   CHUNKING_PROVIDER      chonkie | langchain
-    embedding  EMBEDDING_PROVIDER     openai  | tei
-    parsing    PDF_PARSER_PROVIDER    llamaparse
+    chunking   CHUNKING_PROVIDER          chonkie | langchain
+    embedding  EMBEDDING_PROVIDER         openai  | tei
+               SPARSE_EMBEDDING_PROVIDER  vllm  (opt-in, SPARSE_EMBEDDING_ENABLED)
+    parsing    PDF_PARSER_PROVIDER        llamaparse
 """

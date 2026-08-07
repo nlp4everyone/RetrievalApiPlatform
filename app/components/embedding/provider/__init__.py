@@ -1,2 +1,3 @@
 from .openai_provider import OpenAIEmbeddingProvider
 from .tei_provider import TEIEmbeddingProvider
+from .vllm_sparse_provider import VLLMSparseEmbeddingProvider

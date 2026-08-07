@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     
     # Model Config
     DENSE_MODEL_NAME: str = "Qwen/Qwen3-Embedding-0.6B"
+    SPARSE_MODEL_NAME: str = "BAAI/bge-m3"
 
     # Embedding provider selection: "openai" (OpenAI-compatible endpoint, e.g. vLLM)
     # or "tei" (raw HTTP request to a Text Embeddings Inference /embed endpoint).
@@ -43,6 +44,15 @@ class Settings(BaseSettings):
     EMBEDDING_PROVIDER: str = "openai"
     DENSE_EMBEDDING_URL: str = "http://172.17.0.1:8100/v1"
     DENSE_EMBEDDING_API_KEY: Optional[str] = Field(None, description="API key for the dense embedding service (TEI, vLLM, or any other backend)")
+
+    # Sparse (lexical) embedding. Off by default: it needs a second model
+    # server, and every vector store today is served by dense retrieval alone.
+    # When enabled it is initialized at startup exactly like the dense one, so
+    # an unreachable server fails the boot instead of the first ingestion.
+    SPARSE_EMBEDDING_ENABLED: bool = False
+    SPARSE_EMBEDDING_PROVIDER: str = "vllm"
+    SPARSE_EMBEDDING_URL: str = "http://172.17.0.1:8101"
+    SPARSE_EMBEDDING_API_KEY: Optional[str] = Field(None, description="API key for the sparse embedding service")
 
     # Chunking provider selection: "chonkie" or "langchain"
     CHUNKING_PROVIDER: str = "chonkie"
@@ -130,6 +140,16 @@ class Settings(BaseSettings):
         normalized = v.lower()
         if normalized not in allowed:
             raise ValueError(f'EMBEDDING_PROVIDER must be one of {sorted(allowed)}, got: {v}')
+        return normalized
+
+    @field_validator('SPARSE_EMBEDDING_PROVIDER')
+    @classmethod
+    def validate_sparse_embedding_provider(cls, v: str) -> str:
+        """Validate that the sparse embedding provider is one this app knows how to build."""
+        allowed = {"vllm"}
+        normalized = v.lower()
+        if normalized not in allowed:
+            raise ValueError(f'SPARSE_EMBEDDING_PROVIDER must be one of {sorted(allowed)}, got: {v}')
         return normalized
 
     @field_validator('CHUNKING_PROVIDER')

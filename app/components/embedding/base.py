@@ -1,5 +1,10 @@
 from abc import ABC, abstractmethod
-from typing import List
+from typing import Dict, List
+
+# A sparse embedding is a {token_id: weight} mapping rather than a fixed-length
+# vector - only the tokens the model actually assigned weight to are carried,
+# which is what makes it cheap to store and to match lexically.
+SparseVector = Dict[int, float]
 
 class BaseEmbeddingProvider(ABC):
     """
@@ -21,6 +26,35 @@ class BaseEmbeddingProvider(ABC):
 
         Returns:
             List[List[float]]: Embedding vector for each input text, same order as input
+
+        Raises:
+            Exception: If the underlying embedding backend is unreachable or returns an error
+        """
+        pass
+
+
+class BaseSparseEmbeddingProvider(ABC):
+    """
+    Interface for a sparse (lexical) embedding backend.
+
+    Kept separate from BaseEmbeddingProvider because the two return different
+    shapes - a dense vector vs a {token_id: weight} mapping - and a store can
+    legitimately be fed by one, the other, or both. SparseEmbeddingService
+    depends only on this interface, so a new backend can be added without
+    touching startup or callers.
+    """
+
+    @abstractmethod
+    async def embed(self, texts: List[str]) -> List[SparseVector]:
+        """
+        Generate a sparse embedding for each input text.
+
+        Args:
+            texts (List[str]): Texts to embed
+
+        Returns:
+            List[SparseVector]: {token_id: weight} mapping for each input text,
+                same order as input
 
         Raises:
             Exception: If the underlying embedding backend is unreachable or returns an error

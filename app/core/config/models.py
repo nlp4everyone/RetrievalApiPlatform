@@ -7,4 +7,5 @@ models_config = yaml_config.get_section("models")
 
 # Model config
 DENSE_MODEL_NAME = settings.DENSE_MODEL_NAME
+SPARSE_MODEL_NAME = settings.SPARSE_MODEL_NAME
 

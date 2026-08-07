@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 # Define startup
 from .startup import (init_embed_model,
+                      init_sparse_embed_model,
                       init_postgres,
                       init_vector_store,
                       init_minio,
@@ -118,8 +119,9 @@ async def startup_event() -> None:
 
     # Init embed model
     await init_embed_model()
+    # Init sparse embed model (no-op unless SPARSE_EMBEDDING_ENABLED)
+    await init_sparse_embed_model()
     SystemLogger.info("[APP] ✅ Serving embedding ready!")
-
 
     # Init Postgres
     postgres_client = init_postgres()

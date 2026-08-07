@@ -1,5 +1,6 @@
 # Embedding
-from app.components.embedding import EmbeddingService
+from app.components.embedding import EmbeddingService, SparseEmbeddingService
+from app.components.embedding.base import SparseVector
 # Parsing
 from app.components.parsing import ParsingService
 # DB
@@ -15,9 +16,13 @@ from app.core.tracing import init_tracing
 # Other component
 import requests, time, asyncio, asyncpg
 from concurrent.futures import ThreadPoolExecutor
-from typing import List
+from typing import List, Optional
 # Logger
 from loggers import SystemLogger
+
+# Set by init_sparse_embed_model(); stays None when SPARSE_EMBEDDING_ENABLED is
+# false, so callers can tell "sparse is switched off" from "startup never ran"
+sparse_embed_model: Optional[SparseEmbeddingService] = None
 
 async def init_embed_model() -> EmbeddingService:
     """
@@ -69,6 +74,84 @@ async def get_dense_embedding_dim() -> int:
     if embed_model.dimension is None:
         raise RuntimeError("Embedding service not initialized yet")
     return embed_model.dimension
+
+async def init_sparse_embed_model() -> Optional[SparseEmbeddingService]:
+    """
+    Initialize and test the sparse embedding service, if it is switched on.
+
+    Mirrors init_embed_model(): builds the service for the provider selected
+    via SPARSE_EMBEDDING_PROVIDER and probes it, so an unreachable server fails
+    the boot rather than the first ingestion. Unlike the dense one this is
+    opt-in - with SPARSE_EMBEDDING_ENABLED false the service is left unset and
+    startup carries on dense-only.
+
+    Returns:
+        Optional[SparseEmbeddingService]: Configured sparse embedding service,
+            or None when SPARSE_EMBEDDING_ENABLED is false
+
+    Raises:
+        Exception: If sparse embedding is enabled but the service is not
+            reachable or fails to respond
+    """
+    global sparse_embed_model
+    if not SPARSE_EMBEDDING_ENABLED:
+        sparse_embed_model = None
+        SystemLogger.info("[STARTUP] Sparse embedding service disabled (SPARSE_EMBEDDING_ENABLED=false)")
+        return None
+
+    sparse_embed_model = SparseEmbeddingService.from_settings()
+
+    try:
+        await sparse_embed_model.check_connection()
+        SystemLogger.success("[STARTUP] Sparse embedding service ready")
+    except Exception as e:
+        SystemLogger.error(f"[STARTUP] Init sparse embedding service failed: {e!r}")
+        raise
+    return sparse_embed_model
+
+async def get_sparse_embedding(texts: List[str]) -> List[SparseVector]:
+    """
+    Generate sparse embeddings for a list of texts via the configured sparse service.
+
+    Args:
+        texts (List[str]): Texts to embed
+
+    Returns:
+        List[SparseVector]: {token_id: weight} mapping for each input text
+
+    Raises:
+        RuntimeError: If sparse embedding is disabled or has not been initialized
+    """
+    return await get_sparse_embed_model().embed(texts)
+
+def get_sparse_embed_model() -> SparseEmbeddingService:
+    """
+    Get the global sparse embedding service instance.
+
+    Returns:
+        SparseEmbeddingService: The initialized sparse embedding service
+
+    Raises:
+        RuntimeError: If sparse embedding is disabled (SPARSE_EMBEDDING_ENABLED
+            is false) or init_sparse_embed_model() has not run yet
+    """
+    if sparse_embed_model is None:
+        raise RuntimeError("Sparse embedding service not available - set "
+                           "SPARSE_EMBEDDING_ENABLED=true and make sure "
+                           "init_sparse_embed_model() has run")
+    return sparse_embed_model
+
+def is_sparse_embedding_enabled() -> bool:
+    """
+    Whether a sparse embedding service is live in this process.
+
+    Lets callers branch on availability without catching the RuntimeError that
+    get_sparse_embed_model() raises when sparse embedding is switched off.
+
+    Returns:
+        bool: True once init_sparse_embed_model() has built a service
+    """
+    return sparse_embed_model is not None
 
 def init_parsing_service() -> ParsingService:
     """

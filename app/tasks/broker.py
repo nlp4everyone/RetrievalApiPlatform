@@ -21,6 +21,7 @@ from app.startup import (get_postgres_client,
                          init_minio,
                          init_parsing_service,
                          init_postgres,
+                         init_sparse_embed_model,
                          init_vector_store)
 from loggers import SystemLogger
 
@@ -58,8 +59,9 @@ async def _initialize_services() -> None:
     init_download_semaphore()
     # Vector store (registers itself with VectorStoreFactory)
     await init_vector_store()
-    # Embedding model
+    # Embedding models - sparse is a no-op unless SPARSE_EMBEDDING_ENABLED
     await init_embed_model()
+    await init_sparse_embed_model()
     # Parsing providers
     init_parsing_service()
 
