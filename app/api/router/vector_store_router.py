@@ -106,8 +106,12 @@ async def search_vector_store(vector_store_id: str,
     - `query` (Union[str, List[str]]): A query string for a search
     - `filters` (Optional[Union[ComparisonFilter, CompoundFilter]]): A filter to apply based on file attributes.
     - `max_num_results` (int, optional): The maximum number of results to return. This number should be between 1 and 50 inclusive.
-    - `ranking_options` (Optional[RankingOptions]): Ranking options for search.
-    
+    - `ranking_options` (Optional[RankingOptions]): Ranking options for search. Only `score_threshold` is honoured so far.
+    - `search_type` ("auto" | "dense" | "hybrid", optional): How the query is answered; defaults to `auto`,
+      which picks hybrid when this vector store holds sparse vectors and dense otherwise. Asking for `hybrid`
+      on a store that cannot answer it is a 400, not a silent fallback to dense. This field is an extension to
+      the OpenAI schema - the official SDK sends it via `extra_body={"search_type": "hybrid"}`.
+
     ### Returns
     - `VectorStoreSearchResponse`: A response containing the search results.
 

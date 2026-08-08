@@ -13,7 +13,10 @@ from app.schemas.vector_store.types import SearchType
 # DB
 from app.db.postgres import PostgresVectorStore
 from app.db.vector_store import VectorStoreFactory
-from app.startup import get_postgres_pool, get_dense_embedding
+from app.startup import (get_dense_embedding,
+                         get_postgres_pool,
+                         get_sparse_embedding,
+                         is_sparse_embedding_enabled)
 
 # Helper
 from app.utils.key_generator import generate_vectorstore_id
@@ -25,7 +28,8 @@ from app.utils.datetime_utils import convert_to_unix_timestamp
 # Exceptions
 from app.exceptions import AppBaseException
 from app.exceptions.postgres import PostgresConnectionException
-from app.exceptions.vector_store import UnsupportedMultipleFilesException
+from app.exceptions.vector_store import (UnsupportedMultipleFilesException,
+                                         UnsupportedSearchTypeException)
 
 # Logger
 from loggers import SystemLogger
@@ -37,7 +41,10 @@ from app.core.request_context import request_id_ctx
 from app.tasks import ingest_vector_store_files
 
 # Retrieval pipeline
-from app.pipelines.retrieval import RetrievalContext, build_retrieval_pipeline
+from app.pipelines.retrieval import (RetrievalContext,
+                                     build_retrieval_pipeline,
+                                     hybrid_unavailable_reason,
+                                     resolve_search_type)
 
 # Tracing
 from app.core.tracing import (OBSERVATION_TYPE,
@@ -518,7 +525,7 @@ class VectorStoreService:
     async def search(vector_store_id: str,
                      search_request: VectorStoreSearchRequest,
                      api_key: str,
-                     search_type: SearchType = SearchType.DENSE) -> VectorStoreSearchResponse:
+                     search_type: Optional[SearchType] = None) -> VectorStoreSearchResponse:
         """
         Search a vector store for relevant chunks based on a query.
 
@@ -529,15 +536,19 @@ class VectorStoreService:
             vector_store_id: ID of the vector store to search in
             search_request: Search request with query, filters, max_num_results, ranking_options
             api_key: API key for ownership validation
-            search_type: How the query is answered - dense vector search by
-                default; keyword and hybrid become available once a BM25
-                retriever exists
+            search_type: How the query is answered, for internal callers that
+                need to pin it. Takes precedence over the request's search_type
+                field. Left unset by both, it is resolved per search: hybrid
+                when sparse embedding is enabled *and* this collection carries
+                sparse vectors, dense otherwise
 
         Returns:
             VectorStoreSearchResponse containing search results
 
         Raises:
             PostgresConnectionException: If database connection fails
+            UnsupportedSearchTypeException: If a search type was pinned that
+                this vector store cannot answer
             HTTPException: If search operation fails
         """
         # Validate vector store id
@@ -562,8 +573,35 @@ class VectorStoreService:
         query = (search_request.query if isinstance(search_request.query, str)
                  else search_request.query[0])
 
-        # TODO: ranking_options has no effect yet - quantization rescore and
-        # score_threshold still need to be surfaced on the vector store contract.
+        # Only score_threshold is honoured so far; ranker and rewrite_query
+        # still have no effect. 0.0 is the schema default and means "keep
+        # everything", so it is not passed down as a threshold - the backends
+        # take None for "no filtering".
+        score_threshold = None
+        if search_request.ranking_options and search_request.ranking_options.score_threshold > 0:
+            score_threshold = search_request.ranking_options.score_threshold
+
+        vector_store = VectorStoreFactory.get_store(collection_name=vector_store_id,
+                                                    provider=provider)
+
+        # An explicit argument beats the request field, so an internal caller
+        # can pin a search type regardless of what the client asked for
+        if search_type is None:
+            search_type = search_request.requested_search_type
+
+        # Resolved before the span opens so the trace records the search that
+        # actually ran, not the one that was requested
+        if search_type is None:
+            search_type = await resolve_search_type(vector_store)
+        elif search_type == SearchType.HYBRID:
+            # Pinned hybrid is checked rather than attempted: without this the
+            # request dies as a ValueError out of build_retrieval_pipeline, or
+            # as a backend error on a collection with no sparse field - both
+            # surface as a 500 for what is a bad request
+            reason = await hybrid_unavailable_reason(vector_store)
+            if reason is not None:
+                raise UnsupportedSearchTypeException(search_type=str(search_type),
+                                                     reason=reason)
 
         try:
             # Root span of the search trace. The pipeline runs inside it and
@@ -582,17 +620,18 @@ class VectorStoreService:
                 set_span_attributes(search_span, {"vector_store.id": vector_store_id,
                                                   "search.type": str(search_type)})
 
-                vector_store = VectorStoreFactory.get_store(collection_name=vector_store_id,
-                                                            provider=provider)
                 pipeline = build_retrieval_pipeline(vector_store=vector_store,
                                                     embed_fn=get_dense_embedding,
-                                                    search_type=search_type)
+                                                    search_type=search_type,
+                                                    sparse_embed_fn=(get_sparse_embedding
+                                                                     if is_sparse_embedding_enabled() else None))
 
                 context = RetrievalContext(vector_store_id=vector_store_id,
                                            api_key=api_key,
                                            query=query,
                                            limit=search_request.max_num_results,
-                                           filters=neutral_filter)
+                                           filters=neutral_filter,
+                                           score_threshold=score_threshold)
                 await pipeline.run(context)
 
                 # Convert results to API response format
