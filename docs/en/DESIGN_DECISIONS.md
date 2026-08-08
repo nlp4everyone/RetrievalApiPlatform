@@ -85,6 +85,28 @@ Parsing, chunking, embedding, and the vector database each follow the same shape
 | Call each vendor SDK directly where it's needed | Backend choice leaks into services and pipelines; swapping means touching every call site |
 | A single `if provider == ...` dispatch inside each service | Works for two providers and rots at four; puts every backend's imports on the hot path whether used or not |
 
+## Why the embedding models are served by a separate deployment
+
+Every embedding is an HTTP call to a model server this repo does not run. `EmbeddingService` ([`nlp4everyone/EmbeddingService`](https://github.com/nlp4everyone/EmbeddingService)) is that server — vLLM serving `Qwen/Qwen3-Embedding-0.6B` (dense) and `BAAI/bge-m3` (sparse) behind an OpenAI-compatible API — and it is a separate repo and a separate Compose stack, not a service in `compose_*.yml`.
+
+**Advantages**
+- The web/worker image stays CPU-only: no CUDA layers, no model weights, no GPU requirement to run tests or the API. The GPU box and the API box can be different machines, or different scaling groups — a model server is expensive and shared, a stateless API replica is neither.
+- Model lifecycle decouples from application lifecycle. Swapping the embedding model, changing GPU memory split, or restarting vLLM does not redeploy this service; `check_connection()` at startup is the only coupling, and it caches the vector dimension from whatever is actually answering.
+- The contract is an API, not a library, so anything speaking OpenAI `/v1/embeddings` or TEI substitutes freely — a hosted provider, a shared cluster endpoint, someone else's server. `EmbeddingService` is the known-good default, not a dependency.
+- It keeps the two halves independently useful: that repo serves any consumer, this one consumes any server.
+
+**Disadvantages**
+- Two repos to clone and two `.env` files to keep aligned before the first ingestion works — the port/model/API-key pairing is documented in [Embedding Server](README.md#embedding-server) precisely because nothing enforces it.
+- Embedding cost now includes a network hop per batch, and a startup that used to fail on a missing library now fails on an unreachable host.
+- A dimension mismatch (server changed model, collection did not) surfaces at ingest time, not at config time.
+
+**Alternatives considered**
+
+| Option | Why not chosen |
+|---|---|
+| Add vLLM as a service in this Compose stack | Forces a GPU on anyone running the API, ties model restarts to application deploys, and makes the common "shared model server, several consumers" setup impossible |
+| Load the embedding model in-process (`sentence-transformers`) | Puts model weights and CUDA in the worker image, makes the worker's memory profile model-shaped rather than batch-shaped, and every API replica pays for its own copy |
+
 ## Why the vector store is provider-agnostic (with Qdrant as the implementation)
 
 Each vector store in the repo maps to its own collection, reached through `BaseAsyncVectorStore` rather than a Qdrant client. The provider is recorded **on the vector store row**, not read from config at query time.
@@ -93,12 +115,12 @@ Each vector store in the repo maps to its own collection, reached through `BaseA
 - Existing collections keep working after `VECTOR_STORE_PROVIDER` changes: `get_store()` is passed the provider the store was created with, so flipping the default only affects new stores.
 - Filters are expressed once as a backend-neutral tree (`FieldCondition` / `FilterGroup`) and translated per backend, so the OpenAI-compatible request schema and the query language stay decoupled.
 - `ensure_collection` is deliberately separate from `insert_documents`. Folding creation into the insert path forces every concurrent batch to race on a check-then-act — which is why the previous code had to run its first batch alone. Creating once up front makes every insert a pure write, so they all run concurrently.
-- Qdrant specifically: built-in sparse vector / BM25 support on the same collection (the hook for later hybrid search), natural per-collection isolation matching the data model, an official async client matching the fully async stack, and built-in quantization and on-disk storage.
+- Qdrant specifically: sparse vectors live on the same collection as the dense ones and it fuses both branches server-side (`prefetch` + `FusionQuery(RRF)`), so hybrid search costs one round-trip and no in-process merge; plus natural per-collection isolation matching the data model, an official async client matching the fully async stack, and built-in quantization and on-disk storage.
 
 **Disadvantages**
 - Adds another service to run in the Docker Compose stack, on top of Postgres/MinIO/Redis.
 - The abstraction is currently validated by exactly one working backend, so the interface may not be as backend-neutral as intended until a second one is actually implemented.
-- Sparse/BM25 remains only a hook in the Qdrant wrapper — the hybrid-search payoff is still potential, not realized.
+- Pushing fusion into the backend means the `BaseFusion` seam is unused by the one case it was written for; a backend that cannot fuse server-side would have to bring its own strategy back into the process.
 
 **Alternatives considered**
 
@@ -114,7 +136,11 @@ Retrieval is selected by a single `SearchType` value that the factory resolves i
 
 The two always have to agree: several retrievers with `PassthroughFusion` silently throws half the results away. Naming the combination keeps the invalid states unrepresentable, and `PassthroughFusion` raises rather than truncating if it's ever handed more than one candidate list. Search type is a per-call argument rather than configuration, because two queries against the same vector store can reasonably want different retrieval.
 
-The cost is that adding hybrid search means touching the enum and the factory rather than just passing different arguments — a deliberate trade of caller flexibility for an invariant that can't be broken by accident.
+Hybrid then arrived as one more enum value plus one branch in `_build_plan()`, exactly as the shape predicted. The API surfaces it as `search_type: "auto" | "dense" | "hybrid"`, defaulting to `"auto"` — which is `resolve_search_type()` answering per search from what the collection holds, because the honest input to that decision is the collection's schema, not the caller's preference.
+
+Pinning `"hybrid"` is checked, not attempted: `hybrid_unavailable_reason()` is consulted first and a 400 comes back naming which half is missing. Falling back to dense would be worse than refusing — a caller who asked for hybrid and silently got dense results would be measuring retrieval quality against a configuration they don't think they are running, which is far harder to notice than a rejected request. That one function answers both the "what should run" and the "why can't it" question, so the resolution and the error message cannot drift apart.
+
+The cost is that adding a search type means touching the enum and the factory rather than just passing different arguments — a deliberate trade of caller flexibility for an invariant that can't be broken by accident.
 
 ## Why embed and index are one streaming stage, not two sequential ones
 
@@ -177,11 +203,11 @@ The worker runs two `ThreadPoolExecutor`s — `IO_THREAD_POOL_SIZE=32` for MinIO
 
 - **Single-file ingestion.** More than one `file_id` is rejected with a 400 at request time, and `IngestionService` re-checks and marks the store `failed` rather than reporting `completed` on an empty store.
 - **The `"fuse"` fallback.** Sending `{"type": "auto"}` explicitly (instead of omitting `chunking_strategy`) falls through to a `"fuse"` strategy that `IngestionService` skips — the store reports `completed` while nothing was indexed. Omitting the field takes the correct `"auto"` path.
-- **`ranking_options` is inert.** Accepted by the schema, but score threshold and quantization rescore are not yet surfaced on the vector store contract. `filters` **are** applied.
+- **`ranking_options` is only partly applied.** `score_threshold` now reaches the backend (on the dense branch — applied to RRF output it would drop everything), but `ranker` and `rewrite_query` are still accepted and ignored, and quantization rescore is not surfaced on the vector store contract. `filters` **are** applied.
 - **List queries are truncated.** If `query` is a list, only the first element is used.
 - **Single-tenant auth.** One shared `FASTAPI_API_KEY`, even though rows are scoped by `api_key` as if for multi-tenancy.
 - **Orphaned objects.** If the Postgres insert fails after a successful MinIO upload, the object is left behind — logged, with no compensating cleanup.
-- **Dense-only retrieval.** `SearchType.DENSE` is the only implemented value; the `BaseRetriever` / `BaseFusion` seams exist but have no keyword/BM25 implementations.
+- **Hybrid retrieval depends on when a store was ingested.** `resolve_search_type` only returns `HYBRID` for collections that already carry sparse vectors, and Qdrant cannot add a vector field to a live collection — so enabling `SPARSE_EMBEDDING_ENABLED` leaves every existing store dense-only until it is re-ingested. A caller can now find this out by asking: `search_type: "hybrid"` on such a store returns a 400 naming the reason. There is still no way to *read* a store's mode — no field on `VectorStoreObject` says whether it holds sparse vectors, so discovering it means attempting a search.
 - **Milvus is a placeholder.** Wired through config, `VectorStoreType`, `VectorStoreFactory`, and startup, but every method raises `NotImplementedError`.
 - **The two allow-lists disagree.** `.csv`, `.json`, and `.gif` pass upload validation but have no registered parsing provider. Conversely `.md` and `.doc` can be parsed but are not in `ALLOWED_EXTENSIONS`, and `validate_file_type` gates on extension with no escape hatch — those two always get a 415 at upload.
 - **Partial writes when ingestion fails.** `EmbedAndIndexStage` upserts batch by batch, so a batch failing midway leaves earlier batches in the collection even though the store is marked `failed`; there is no cleanup.

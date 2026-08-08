@@ -24,7 +24,7 @@ Mọi endpoint đều yêu cầu `Depends(verify_api_key)`.
 | GET | `/v1/vector_stores/{id}` | `get_vector_store` | — |
 | POST | `/v1/vector_stores/{id}` | `modify_vector_store` | Kiểu OpenAI: update dùng POST, không phải PATCH |
 | DELETE | `/v1/vector_stores/{id}` | `delete_vector_store` | — |
-| POST | `/v1/vector_stores/{id}/search` | `search_vector_store` | Body `VectorStoreSearchRequest`; `filters` đã áp dụng, `ranking_options` thì chưa |
+| POST | `/v1/vector_stores/{id}/search` | `search_vector_store` | Body `VectorStoreSearchRequest`; `filters` và `search_type` đã áp dụng, trong `ranking_options` mới chỉ `score_threshold` |
 
 ### `dependencies.py`
 
@@ -83,7 +83,7 @@ Lợi ích: hình dạng trace là thuộc tính của pipeline, và nó vẫn �
 | `DownloadStage` | Lấy byte từ MinIO, dưới `get_download_semaphore()`, transfer chạy trên `get_io_executor()` | bucket/path, tên file, `file.size_bytes` |
 | `ParseStage` | `ParsingService.parse(bytes, ext)` → text (Markdown) | ghi lại provider đã xử lý, `text.num_chars` |
 | `ChunkStage` | `ChunkingService.split_text(text)` → chunks, chạy trên `get_cpu_executor()` | strategy/provider, `chunks.count`, `chunks.avg_chars` |
-| `EmbedAndIndexStage` | `ensure_collection(embedding_dim)` một lần, rồi embed + upsert **từng batch một** | collection có được tạo mới không, `embedding.dims`, `embed`/`index` wall-clock, `batch.*` |
+| `EmbedAndIndexStage` | `ensure_collection(embedding_dim, with_sparse)` một lần, rồi embed + upsert **từng batch một** | collection có được tạo mới không, `embedding.dims`, `embedding.sparse_enabled`/`sparse_model`, `embed`/`index` wall-clock, `batch.*` |
 
 `EmbedAndIndexStage` là kết quả gộp hai stage `EmbedStage` + `IndexStage` cũ thành một vòng lặp streaming:
 
@@ -91,6 +91,7 @@ Lợi ích: hình dạng trace là thuộc tính của pipeline, và nó vẫn �
 - `Document` chỉ được dựng *sau* khi lấy được semaphore, nên bộ nhớ đỉnh là `batch_size × concurrency` batch chunk/vector/Document, không phải toàn bộ file.
 - `embedding_dim` lấy từ `get_dense_embedding_dim()` — số chiều được `EmbeddingService.check_connection()` cache lúc startup — nên collection tạo được *trước* lần embed đầu tiên. Đây chính là điều kiện để streaming khả thi: `IndexStage` cũ phải suy `embedding_dim` từ `context.embeddings[0]`, tức phải chờ embed xong.
 - `embed_wall_clock_s` / `index_wall_clock_s` được tính bằng `_union_duration()`, hợp các khoảng thời gian chồng nhau, vì cộng thẳng thời lượng từng batch chạy song song sẽ đếm trùng.
+- Khi có `sparse_embed_fn`, mỗi batch được embed hai lần — dense và sparse trong cùng một `asyncio.gather`, nên batch tốn thời gian của server chậm hơn chứ không phải tổng hai lượt — và cả hai vector được ghi lên cùng một point, nên retrieval hybrid không cần quét file lần hai. Việc đó có xảy ra hay không được quyết định bằng cách hỏi chính *collection* (`supports_sparse()`) sau `ensure_collection`, chứ không tin vào config: collection tạo trước khi bật sparse thì không có field sparse, Qdrant không thêm được, và upsert sparse vector vào đó sẽ fail cả batch. Kết quả được ghi vào `metrics["sparse_enabled"]`.
 - Lưu ý: stage gộp này không override `observation_type`, nên nó xuất hiện trên Langfuse dưới `ObservationType.SPAN`, khác với `EmbedStage` trước đây (`EMBEDDING`).
 
 `IngestionContext` cũng theo đó: không còn field `embeddings` — vector chỉ tồn tại trong phạm vi một batch, và `num_inserted` là output duy nhất của bước cuối.
@@ -99,7 +100,7 @@ Lợi ích: hình dạng trace là thuộc tính của pipeline, và nó vẫn �
 
 ### Retrieval (`pipelines/retrieval/`)
 
-`RetrievalContext` mang vào query, `limit`, `filters` trung lập và `score_threshold`; mang ra `dense_vector`, `candidates` (hit theo tên retriever) và `results`.
+`RetrievalContext` mang vào query, `limit`, `filters` trung lập và `score_threshold`; mang ra `dense_vector`, `sparse_vector` (chỉ khi hybrid), `candidates` (hit theo tên retriever) và `results`.
 
 | Stage | Làm gì | Ghi chú span |
 |---|---|---|
@@ -107,11 +108,19 @@ Lợi ích: hình dạng trace là thuộc tính của pipeline, và nó vẫn �
 | `RetrieveStage` | Chạy mọi retriever song song, gom hit theo tên retriever | `ObservationType.RETRIEVER`; gộp `span_attributes()` của từng retriever dưới prefix tên riêng |
 | `FuseStage` | Trộn các danh sách candidate thành danh sách xếp hạng cuối | bỏ span khi không có gì để trộn |
 
-`BaseRetriever` là seam cho hybrid search — `RetrievalQuery` cố ý mang cả nội dung query gốc *lẫn* dense vector, để một retriever tự tokenise có đủ thứ nó cần mà pipeline không phải biết retriever nào dùng biểu diễn nào. `DenseRetriever` là implementation duy nhất; collection không tồn tại thì trả `[]` chứ không raise, vì row của vector store có thể tồn tại trước khi ingestion kịp tạo collection.
+`BaseRetriever` là seam để gắn hybrid search — `RetrievalQuery` mang cùng lúc mọi biểu diễn của query (text gốc, dense vector, sparse vector), để mỗi retriever tự lấy cái nó hiểu mà pipeline không cần biết đó là cái nào. `DenseRetriever` và `HybridRetriever` là hai implementation; cả hai trả `[]` khi collection chưa tồn tại chứ không raise, vì row của vector store có thể tồn tại trước khi ingestion kịp tạo collection.
 
-`BaseFusion` là seam tương ứng cho việc trộn. `PassthroughFusion` là implementation duy nhất và sẽ **raise** nếu nhận nhiều hơn một danh sách candidate, thay vì âm thầm vứt bớt kết quả — thêm retriever thứ hai buộc bạn phải chọn một chiến lược fusion thật.
+`HybridRetriever` là **một** retriever chứ không phải hai: nó đưa cả hai vector cho store trong đúng một lời gọi `retrieve()`, và Qdrant trộn nhánh dense với nhánh sparse ngay phía server bằng reciprocal rank (`prefetch` + `FusionQuery(RRF)`). Nhờ vậy hybrid chỉ tốn một round-trip, và hai thang điểm không so sánh được với nhau — cosine và tích vô hướng của term weight — không bao giờ phải quy về cùng thang, chỉ có thứ hạng được trộn. Span attribute `used_sparse` của nó là chỗ cần xem đầu tiên khi kết quả hybrid trông y hệt dense.
 
-`build_retrieval_pipeline(vector_store, embed_fn, search_type)` phân giải một `SearchType` thành `_RetrievalPlan(retrievers, fusion)`. Retriever và fusion được chọn *cùng nhau* để không thể vô tình ghép ra một tổ hợp sai. Search type là tham số theo từng lời gọi chứ không phải cấu hình — hai query trên cùng một store hoàn toàn có thể muốn kiểu retrieval khác nhau.
+`BaseFusion` là seam tương ứng cho việc trộn *trong process*. `PassthroughFusion` là implementation duy nhất — mọi search đều chạy đúng một retriever, kể cả hybrid — và sẽ **raise** nếu nhận nhiều hơn một danh sách candidate thay vì âm thầm vứt bớt kết quả. Seam vẫn giữ cho trường hợp khác: một backend không trộn được ở phía server.
+
+`build_retrieval_pipeline(vector_store, embed_fn, search_type, sparse_embed_fn)` phân giải một `SearchType` thành `_RetrievalPlan(retrievers, fusion)`. Retriever và fusion được chọn *cùng nhau* để không thể vô tình ghép ra một tổ hợp sai. Sparse embedder bị giữ lại khi search là dense, để query không bị embed hai lần cho một biểu diễn không ai đọc.
+
+`hybrid_unavailable_reason(vector_store)` là nguồn sự thật duy nhất cho câu hỏi hybrid có chạy được hay không: trả `None` nếu chạy được, ngược lại trả về một câu nêu rõ đang thiếu nửa nào — `SPARSE_EMBEDDING_ENABLED` đang tắt (phía server), hoặc collection không mang sparse vector (phía store). Điều kiện thứ hai không suy ra được từ điều kiện thứ nhất — store đã ingest trước khi bật sparse thì không có field sparse, và Qdrant không thêm được field vector vào collection đang sống — nên phải hỏi collection chứ không giả định. Nó trả về lý do thay vì một bool bởi hai kiểu thất bại cần hai cách sửa khác nhau: bật sparse, so với ingest lại store.
+
+`resolve_search_type(vector_store)` chỉ là lớp bọc mỏng quanh hàm trên cho caller không có ý kiến riêng: `HYBRID` khi lý do là `None`, còn lại `DENSE`. Phân giải theo từng search chính là thứ cho phép store dense cũ và store hybrid mới cùng được phục vụ bởi một process.
+
+`VectorStoreService.search` chọn theo thứ tự ba nguồn: tham số `search_type` tường minh (caller nội bộ), rồi tới field `search_type` của request (`"auto" | "dense" | "hybrid"`, mặc định `"auto"`), rồi mới tới `resolve_search_type`. `HYBRID` được chỉ định thẳng sẽ bị kiểm tra lại bằng `hybrid_unavailable_reason` và bị từ chối bằng `UnsupportedSearchTypeException` (400) thay vì rơi về dense — âm thầm trả kết quả dense cho một request hybrid sẽ khiến caller đo chất lượng retrieval trên một cấu hình họ không nghĩ là mình đang chạy. Toàn bộ quyết định này diễn ra trước khi span trace được mở, nên trace ghi lại đúng search đã chạy.
 
 `chunks_to_trace_json` chỉ render hit thành `{chunk_id, score}` cho span attribute: trace không phải nơi để nhân bản nội dung tài liệu.
 
@@ -125,6 +134,8 @@ Mọi package ở đây theo cùng một khuôn — một `base.py` khai báo in
 | `chunking/` | `BaseChunkingProvider` | `ChonkieProvider`, `LangchainProvider` | `CHUNKING_PROVIDER` |
 | `embedding/` | `BaseEmbeddingProvider` | `OpenAIEmbeddingProvider`, `TEIEmbeddingProvider` | `EMBEDDING_PROVIDER` |
 | `embedding/` | `BaseSparseEmbeddingProvider` | `VLLMSparseEmbeddingProvider` | `SPARSE_EMBEDDING_PROVIDER` (chỉ khi `SPARSE_EMBEDDING_ENABLED`) |
+
+Cả hai provider embedding đều chỉ là HTTP client — không model nào được nạp trong tiến trình này, nên cả web service lẫn worker đều không cần GPU. `OpenAIEmbeddingProvider` gọi `{DENSE_EMBEDDING_URL}/embeddings`, `TEIEmbeddingProvider` gọi `{DENSE_EMBEDDING_URL}/embed`, còn `VLLMSparseEmbeddingProvider` gọi `/tokenize` + `/pooling` trên root của sparse. Thứ trả lời các URL đó là một deployment riêng: [`nlp4everyone/EmbeddingService`](https://github.com/nlp4everyone/EmbeddingService) là bản tham chiếu — vLLM phục vụ `Qwen/Qwen3-Embedding-0.6B` trên `:8100` và `BAAI/bge-m3` trên `:8101`, đúng bằng giá trị mặc định mà các setting này mang sẵn (xem [Embedding Server](README_vi.md#embedding-server)).
 
 `ParsingService.from_settings()` map extension tới *provider factory*, không phải instance: `.pdf` đi tới backend được `PDF_PARSER_PROVIDER` đặt tên, **mọi định dạng còn lại** (`.txt`, `.md`, `.docx`, `.doc`, `.png`, `.jpg`, `.jpeg`) đi tới Unstructured API. Vì `.txt`/`.md` được đăng ký cùng *một object factory*, chúng dùng chung một instance provider — dict `_instances` được key theo factory chứ không theo extension chính vì thế. Tên backend PDF được kiểm tra lúc startup (nên gõ sai là fail ngay) nhưng provider chỉ được khởi tạo khi thực sự có file cần parse, và `UNSTRUCTURED_API_KEY` cũng chỉ được kiểm tra ở thời điểm đó — một deployment chỉ ingest PDF không nên fail khi khởi động vì thiếu key của Unstructured. `supports()`, `supported_extensions` và `provider_for()` phơi bày registry; extension không có trong map sẽ raise `ValueError("Unsupported file format: ...")`.
 
@@ -195,7 +206,7 @@ Gốc là `AppBaseException(status_code, response: BaseResponse, log_message)`. 
 - `base/` — `BaseModel` dùng chung (`extra="forbid"`), `PaginationParams`, `PaginatedResponse[T]` generic.
 - `file/` — `FileObject`, `FileListObject`, các biến thể request/response, enum `UploadingStatus`.
 - `vector_store/` — `VectorStoreCreateRequest`/`ModifyRequest`/`QueryRequest`/`SearchRequest`, các union type chunking-strategy, `ComparisonFilter`/`CompoundFilter`, `VectorStoreObject`, `VectorStoreSearchResponse`.
-- `vector_store/types.py` — `VectorStoreType` (`qdrant`, `milvus`) và `SearchType` (hiện chỉ có `dense`). `SearchType` đặt tên cho *toàn bộ* hình dạng retrieval thay vì phơi riêng danh sách retriever và chiến lược fusion, vì hai thứ đó luôn phải khớp nhau — đặt tên cho tổ hợp khiến các trạng thái sai không biểu diễn được.
+- `vector_store/types.py` — `VectorStoreType` (`qdrant`, `milvus`) và `SearchType` (`dense`, `hybrid`; caller chỉ định thẳng, hoặc gửi `"auto"` để phân giải theo từng search). `SearchType` đặt tên cho *toàn bộ* hình dạng retrieval thay vì phơi riêng danh sách retriever và chiến lược fusion, vì hai thứ đó luôn phải khớp nhau — đặt tên cho tổ hợp khiến các trạng thái sai không biểu diễn được.
 - `chunking/` — enum `ChunkingStrategy`, `ChonkieChunkingConfig`, `LangchainChunkingConfig`.
 
 ## Startup / bootstrap (`app/startup.py`)

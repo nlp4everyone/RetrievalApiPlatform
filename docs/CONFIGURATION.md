@@ -29,7 +29,7 @@ Four variables pick which backend serves each swappable capability. Each is vali
 | `MINIO_API_PORT` | 9000 | MinIO S3 API port |
 | `MINIO_CONSOLE_PORT` | 9001 | MinIO web console port |
 | `QDRANT_PORT` | 6333 | Qdrant HTTP port (6334 gRPC is fixed in compose, not env-configurable) |
-| `SERVING_API_KEY` | — (required) | API key used when calling the embedding endpoint |
+| `SERVING_API_KEY` | — (required) | Required and validated non-empty at startup, but not read by any caller — the key actually sent to the embedding server is `DENSE_EMBEDDING_API_KEY` / `SPARSE_EMBEDDING_API_KEY` |
 | `FASTAPI_API_KEY` | — (required) | Bearer token required on every `/v1/*` request (`Authorization: Bearer <value>`) |
 | `UNDATASIO_API_KEY` | — | Unused — leftover from the removed UndatasIO parser |
 | `LLAMAPARSE_API_KEY` | — | Required by `LlamaParseProvider` when a PDF is first parsed; used only when `PDF_PARSER_PROVIDER=llamaparse` |
@@ -40,11 +40,11 @@ Four variables pick which backend serves each swappable capability. Each is vali
 | `LOG_FORMAT` | `auto` | `auto` (detect TTY) \| `console` (colorized) \| `json` (structured, for Docker/prod) |
 | `DENSE_MODEL_NAME` | `Qwen/Qwen3-Embedding-0.6B` | Model name sent to the embedding endpoint |
 | `EMBEDDING_PROVIDER` | `openai` | Embedding backend — see [Provider selection](#provider-selection) |
-| `DENSE_EMBEDDING_URL` | `http://172.17.0.1:8100/v1` | Base URL of the embedding server, whichever provider is selected — the OpenAI-compatible base (vLLM, `.../v1`) or the TEI base (the `/embed` path is appended) |
+| `DENSE_EMBEDDING_URL` | `http://172.17.0.1:8100/v1` | Base URL of the embedding server, whichever provider is selected — the OpenAI-compatible base (vLLM, `.../v1`) or the TEI base (the `/embed` path is appended). The default port is [EmbeddingService](https://github.com/nlp4everyone/EmbeddingService)'s `VLLM_DENSE_EMBEDDING_PORT` — see [Embedding server](#embedding-server) |
 | `DENSE_EMBEDDING_API_KEY` | — | Bearer token sent to the embedding server; TEI omits the header entirely when unset |
 | `SPARSE_EMBEDDING_ENABLED` | `false` | Whether to build and probe a sparse (lexical) embedding service at startup. Off by default — it needs a second model server, and dense retrieval alone serves every vector store today |
 | `SPARSE_EMBEDDING_PROVIDER` | `vllm` | Sparse embedding backend — see [Provider selection](#provider-selection) |
-| `SPARSE_EMBEDDING_URL` | `http://172.17.0.1:8101` | Root URL of the sparse embedding server (`/tokenize` and `/pooling` are appended; a trailing `/v1` is stripped) |
+| `SPARSE_EMBEDDING_URL` | `http://172.17.0.1:8101` | Root URL of the sparse embedding server (`/tokenize` and `/pooling` are appended; a trailing `/v1` is stripped). The default port is [EmbeddingService](https://github.com/nlp4everyone/EmbeddingService)'s `VLLM_SPARSE_EMBEDDING_PORT`, served by `make up sparse` or `make up hybrid` |
 | `SPARSE_EMBEDDING_API_KEY` | — | Bearer token sent to the sparse embedding server; the header is omitted entirely when unset |
 | `SPARSE_MODEL_NAME` | `BAAI/bge-m3` | Model name sent to the sparse embedding endpoint |
 | `CHUNKING_PROVIDER` | `chonkie` | Chunking backend — see [Provider selection](#provider-selection) |
@@ -60,6 +60,20 @@ Four variables pick which backend serves each swappable capability. Each is vali
 | `LANGFUSE_BASE_URL` | — (required) | Self-hosted (or cloud) Langfuse base URL; traces post to `{this}/api/public/otel/v1/traces` |
 | `API_VERSION` | `v1` | Router path prefix; must start with `v` |
 | `NUM_WORKERS` | 1 | Uvicorn worker count (`--workers` in the web Compose command) |
+
+## Embedding server
+
+None of the embedding settings above start a model server — they only say where one is. The reference server is [`nlp4everyone/EmbeddingService`](https://github.com/nlp4everyone/EmbeddingService) (branch `engine/vllm`): vLLM behind an OpenAI-compatible `/v1/embeddings` API, shipping the same two models this repo defaults to. Its defaults were chosen to match, so a stock `.env` on both sides connects without edits:
+
+| Here | There | Value both sides default to |
+|---|---|---|
+| `DENSE_EMBEDDING_URL` | `VLLM_DENSE_EMBEDDING_PORT` | `8100` |
+| `SPARSE_EMBEDDING_URL` | `VLLM_SPARSE_EMBEDDING_PORT` | `8101` |
+| `DENSE_MODEL_NAME` | `DENSE_MODEL_NAME` | `Qwen/Qwen3-Embedding-0.6B` |
+| `SPARSE_MODEL_NAME` | `SPARSE_MODEL_NAME` | `BAAI/bge-m3` |
+| `DENSE_EMBEDDING_API_KEY` / `SPARSE_EMBEDDING_API_KEY` | `SERVING_API_KEY` | `token` — change both together |
+
+`make up dense` serves the dense endpoint alone; `make up hybrid` runs both models as separate containers, which is what `SPARSE_EMBEDDING_ENABLED=true` here requires. `EMBEDDING_PROVIDER=openai` + `SPARSE_EMBEDDING_PROVIDER=vllm` are the providers that speak to it. The host address in the URLs (`172.17.0.1`) is the Docker bridge gateway — correct when the model server runs on the same host as this stack; use its real address when the GPU lives on another machine. Nothing in this repo is coupled to that project: any OpenAI-compatible or TEI endpoint works.
 
 ## `config/config.yaml` (version-controlled)
 

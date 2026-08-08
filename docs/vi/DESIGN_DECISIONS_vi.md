@@ -85,6 +85,28 @@ Parsing, chunking, embedding và vector database đều theo cùng một khuôn:
 | Gọi thẳng SDK của từng nhà cung cấp tại nơi cần | Lựa chọn backend rò rỉ vào service và pipeline; đổi backend là phải sửa mọi call site |
 | Một khối `if provider == ...` bên trong mỗi service | Ổn với hai provider và mục ruỗng ở bốn; đồng thời đặt import của mọi backend lên đường chạy nóng dù có dùng hay không |
 
+## Vì sao model embedding được phục vụ bởi một deployment riêng
+
+Mọi embedding đều là một lời gọi HTTP tới model server mà repo này không chạy. `EmbeddingService` ([`nlp4everyone/EmbeddingService`](https://github.com/nlp4everyone/EmbeddingService)) chính là server đó — vLLM phục vụ `Qwen/Qwen3-Embedding-0.6B` (dense) và `BAAI/bge-m3` (sparse) sau một API tương thích OpenAI — và nó là một repo riêng, một stack Compose riêng, không phải một service trong `compose_*.yml`.
+
+**Ưu điểm**
+- Image web/worker giữ nguyên dạng CPU-only: không layer CUDA, không trọng số model, không cần GPU để chạy test hay chạy API. Máy GPU và máy API có thể là hai máy khác nhau, hoặc hai nhóm scale khác nhau — model server thì đắt và dùng chung, còn replica API stateless thì không.
+- Vòng đời model tách khỏi vòng đời ứng dụng. Đổi model embedding, chỉnh tỉ lệ VRAM hay restart vLLM đều không phải deploy lại service này; `check_connection()` lúc startup là điểm ràng buộc duy nhất, và nó cache số chiều vector từ chính cái đang thực sự trả lời.
+- Hợp đồng ở đây là một API chứ không phải một thư viện, nên bất cứ thứ gì nói được OpenAI `/v1/embeddings` hoặc TEI đều thay thế được — một dịch vụ hosted, một endpoint cụm dùng chung, hay server của người khác. `EmbeddingService` là lựa chọn mặc định đã kiểm chứng, không phải một dependency.
+- Nó giữ cho hai nửa độc lập mà vẫn hữu ích: repo kia phục vụ mọi consumer, repo này tiêu thụ mọi server.
+
+**Nhược điểm**
+- Phải clone hai repo và giữ hai file `.env` khớp nhau trước khi lần ingest đầu tiên chạy được — cặp port/model/API key được ghi rõ trong [Embedding Server](README_vi.md#embedding-server) chính vì không có gì tự ép chúng phải khớp.
+- Chi phí embedding giờ có thêm một network hop cho mỗi batch, và một startup trước kia fail vì thiếu thư viện thì nay fail vì host không tới được.
+- Lệch số chiều (server đổi model, collection thì không) chỉ lộ ra lúc ingest chứ không phải lúc cấu hình.
+
+**Phương án đã cân nhắc**
+
+| Phương án | Vì sao không chọn |
+|---|---|
+| Thêm vLLM thành một service trong stack Compose này | Bắt buộc ai chạy API cũng phải có GPU, buộc việc restart model dính vào deploy ứng dụng, và làm mô hình phổ biến "một model server dùng chung, nhiều consumer" trở nên bất khả thi |
+| Nạp model embedding ngay trong tiến trình (`sentence-transformers`) | Đưa trọng số model và CUDA vào image worker, khiến profile bộ nhớ của worker phụ thuộc model thay vì phụ thuộc batch, và mỗi replica API phải trả giá cho một bản copy riêng |
+
 ## Vì sao vector store không phụ thuộc provider (với Qdrant là implementation)
 
 Mỗi vector store trong repo ứng với một collection riêng, truy cập qua `BaseAsyncVectorStore` chứ không phải qua client Qdrant. Provider được ghi **trên chính row của vector store**, không đọc từ config lúc truy vấn.
@@ -93,12 +115,12 @@ Mỗi vector store trong repo ứng với một collection riêng, truy cập qu
 - Collection cũ vẫn chạy sau khi `VECTOR_STORE_PROVIDER` đổi: `get_store()` nhận provider mà store đó được tạo cùng, nên đổi mặc định chỉ ảnh hưởng store mới.
 - Filter được biểu diễn một lần dưới dạng cây trung lập (`FieldCondition` / `FilterGroup`) rồi dịch riêng cho từng backend, nên schema request tương thích OpenAI và ngôn ngữ truy vấn tách rời nhau.
 - `ensure_collection` được tách khỏi `insert_documents` một cách có chủ đích. Gộp việc tạo vào đường insert buộc mọi batch song song tranh nhau một check-then-act — đó chính là lý do code cũ phải chạy batch đầu tiên một mình. Tạo một lần từ đầu khiến mọi insert đều thuần, nên chúng chạy song song được.
-- Riêng với Qdrant: hỗ trợ sẵn sparse vector / BM25 trên cùng một collection (chỗ móc cho hybrid search sau này), cô lập tự nhiên theo collection đúng với mô hình dữ liệu, client async chính thức khớp với stack async hoàn toàn, cùng quantization và lưu trữ on-disk có sẵn.
+- Riêng với Qdrant: sparse vector nằm chung collection với dense, và nó trộn cả hai nhánh ngay phía server (`prefetch` + `FusionQuery(RRF)`), nên hybrid search chỉ tốn một round-trip và không phải trộn trong process; thêm nữa là cô lập tự nhiên theo collection đúng với mô hình dữ liệu, client async chính thức khớp với stack async hoàn toàn, cùng quantization và lưu trữ on-disk có sẵn.
 
 **Nhược điểm**
 - Thêm một service phải chạy trong stack Docker Compose, bên cạnh Postgres/MinIO/Redis.
 - Lớp trừu tượng hiện chỉ được kiểm chứng bởi đúng một backend hoạt động, nên interface có thể chưa trung lập như kỳ vọng cho tới khi backend thứ hai thực sự được triển khai.
-- Sparse/BM25 vẫn chỉ là chỗ móc trong wrapper Qdrant — lợi ích hybrid search còn là tiềm năng, chưa hiện thực.
+- Đẩy fusion xuống backend đồng nghĩa seam `BaseFusion` không được dùng bởi chính trường hợp nó sinh ra để phục vụ; một backend không trộn được ở server sẽ phải mang chiến lược fusion trở lại vào process.
 
 **Phương án đã cân nhắc**
 
@@ -114,7 +136,11 @@ Retrieval được chọn bằng một giá trị `SearchType` duy nhất, rồi
 
 Hai thứ đó luôn phải khớp nhau: nhiều retriever đi cùng `PassthroughFusion` sẽ âm thầm vứt đi một nửa kết quả. Đặt tên cho tổ hợp khiến các trạng thái sai không biểu diễn được, và `PassthroughFusion` sẽ raise chứ không cắt bớt nếu bị đưa nhiều hơn một danh sách candidate. Search type là tham số theo từng lời gọi chứ không phải cấu hình, vì hai query trên cùng một vector store hoàn toàn có thể muốn kiểu retrieval khác nhau.
 
-Cái giá là thêm hybrid search phải động vào enum và factory thay vì chỉ truyền tham số khác — một sự đánh đổi có chủ đích: bớt linh hoạt cho caller để đổi lấy một bất biến không thể vô tình phá vỡ.
+Hybrid sau đó vào đúng như hình dạng này dự đoán: thêm một giá trị enum và một nhánh trong `_build_plan()`. API phơi nó ra dưới dạng `search_type: "auto" | "dense" | "hybrid"`, mặc định là `"auto"` — tức là để `resolve_search_type()` trả lời theo từng search dựa trên thứ collection đang có, vì đầu vào trung thực cho quyết định đó là schema của collection chứ không phải mong muốn của caller.
+
+Chỉ định thẳng `"hybrid"` thì được KIỂM TRA chứ không được thử: `hybrid_unavailable_reason()` được hỏi trước, và trả về 400 nêu rõ đang thiếu nửa nào. Âm thầm rơi về dense còn tệ hơn từ chối — caller đã đòi hybrid mà nhận kết quả dense sẽ đang đo chất lượng retrieval trên một cấu hình họ không nghĩ là mình đang chạy, và điều đó khó nhận ra hơn nhiều so với một request bị từ chối. Đúng một hàm đó trả lời cả câu "cái gì nên chạy" lẫn "vì sao không chạy được", nên kết quả phân giải và thông báo lỗi không thể lệch nhau.
+
+Cái giá là thêm một search type phải động vào enum và factory thay vì chỉ truyền tham số khác — một sự đánh đổi có chủ đích: bớt linh hoạt cho caller để đổi lấy một bất biến không thể vô tình phá vỡ.
 
 ## Vì sao embed và index là một stage streaming, không phải hai stage tuần tự
 
@@ -177,11 +203,11 @@ Worker chạy hai `ThreadPoolExecutor` riêng — `IO_THREAD_POOL_SIZE=32` cho t
 
 - **Chỉ ingest một file.** Nhiều hơn một `file_id` bị từ chối với lỗi 400 ngay tại request, và `IngestionService` kiểm tra lại rồi đánh dấu store `failed` thay vì báo `completed` trên một store rỗng.
 - **Nhánh dự phòng `"fuse"`.** Gửi tường minh `{"type": "auto"}` (thay vì bỏ trống `chunking_strategy`) sẽ rơi vào strategy `"fuse"` mà `IngestionService` bỏ qua — store báo `completed` trong khi chưa có gì được index. Bỏ trống field này thì đi đúng nhánh `"auto"`.
-- **`ranking_options` chưa có tác dụng.** Được schema chấp nhận, nhưng score threshold và quantization rescore chưa được phơi bày trên contract của vector store. `filters` thì **đã** được áp dụng.
+- **`ranking_options` mới có tác dụng một phần.** `score_threshold` giờ đã đi tới backend (gắn vào nhánh dense — áp lên output RRF thì sẽ loại sạch mọi thứ), nhưng `ranker` và `rewrite_query` vẫn được nhận rồi bỏ qua, còn quantization rescore chưa được phơi bày trên contract của vector store. `filters` thì **đã** được áp dụng.
 - **Query dạng list bị cắt.** Nếu `query` là một list, chỉ phần tử đầu tiên được dùng.
 - **Auth single-tenant.** Một `FASTAPI_API_KEY` dùng chung, dù các row đã được scope theo `api_key` như thể đã multi-tenant.
 - **Object mồ côi.** Nếu insert Postgres thất bại sau khi upload MinIO thành công, object bị bỏ lại — chỉ được log, không có cơ chế dọn dẹp bù trừ.
-- **Chỉ retrieval dense.** `SearchType.DENSE` là giá trị duy nhất được triển khai; seam `BaseRetriever` / `BaseFusion` đã có nhưng chưa có implementation keyword/BM25.
+- **Hybrid retrieval phụ thuộc vào thời điểm store được ingest.** `resolve_search_type` chỉ trả `HYBRID` cho collection đã có sẵn sparse vector, mà Qdrant lại không thêm được field vector vào collection đang sống — nên bật `SPARSE_EMBEDDING_ENABLED` xong thì mọi store cũ vẫn dense-only cho tới khi ingest lại. Caller giờ có thể biết được điều đó bằng cách hỏi: `search_type: "hybrid"` trên một store như vậy sẽ trả 400 kèm lý do. Nhưng vẫn chưa có cách *đọc* trực tiếp chế độ của một store — `VectorStoreObject` không có field nào cho biết nó có sparse vector hay không, nên muốn biết thì phải thử search.
 - **Milvus là placeholder.** Đã nối dây qua config, `VectorStoreType`, `VectorStoreFactory` và startup, nhưng mọi method đều raise `NotImplementedError`.
 - **Upload và parsing chưa khớp allow-list.** `.csv`, `.json` và `.gif` vượt qua validation lúc upload nhưng không có provider parsing nào đăng ký. Ngược lại, `.md` và `.doc` parse được nhưng không nằm trong `ALLOWED_EXTENSIONS`, và `validate_file_type` chặn theo extension nên không có đường lách — hai định dạng đó luôn bị 415 ngay ở bước upload.
 - **Ghi một phần khi ingestion lỗi.** `EmbedAndIndexStage` upsert theo từng batch, nên một batch fail giữa đường vẫn để lại các batch trước trong collection dù store bị đánh dấu `failed`; không có cơ chế dọn dẹp.

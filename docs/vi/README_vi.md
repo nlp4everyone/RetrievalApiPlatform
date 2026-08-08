@@ -21,7 +21,7 @@ Một **Retrieval Engine** tương thích OpenAI API dành cho các hệ thống
 1. **Software**
    - Docker và Docker Compose
    - Python 3.11–3.13 nếu chạy ngoài Docker (`requires-python = ">=3.11,<3.14"`, theo ràng buộc của `unstructured`)
-   - Một endpoint dense embedding tại `DENSE_EMBEDDING_URL` — hoặc tương thích OpenAI (ví dụ vLLM phục vụ `Qwen/Qwen3-Embedding-0.6B`), hoặc một server Text Embeddings Inference
+   - Một endpoint dense embedding tại `DENSE_EMBEDDING_URL` — hoặc tương thích OpenAI (ví dụ vLLM phục vụ `Qwen/Qwen3-Embedding-0.6B`), hoặc một server Text Embeddings Inference. [`nlp4everyone/EmbeddingService`](https://github.com/nlp4everyone/EmbeddingService) là repo đồng hành phục vụ đúng phần này, trên chính các port mà repo này mặc định trỏ tới — xem [Embedding Server](#embedding-server)
    - API key cho các service parsing thực sự dùng: `LLAMAPARSE_API_KEY` cho PDF, `UNSTRUCTURED_API_KEY` (+ `UNSTRUCTURED_API_URL`) cho mọi định dạng còn lại. Key chỉ được kiểm tra khi provider tương ứng được dùng lần đầu, nên deployment chỉ ingest PDF không cần key của Unstructured
    - Một instance [Langfuse](https://langfuse.com) (self-hosted hoặc cloud) cho tracing
 
@@ -44,6 +44,41 @@ cp .env.sample .env
 make up      # build và khởi động postgres, redis, qdrant, minio, worker, web
 make logs    # xem log của web service
 ```
+
+Endpoint embedding phải sẵn sàng *trước* khi chạy `make up` — quá trình startup có thăm dò nó và sẽ fail nếu không kết nối được. Xem [Embedding Server](#embedding-server) bên dưới.
+
+<br />
+
+## Embedding Server
+
+Repo này không tự tính vector — mọi embedding đều là một lời gọi HTTP tới model server chạy riêng, và đó là lý do `DENSE_EMBEDDING_URL` mặc định là `http://172.17.0.1:8100/v1` (máy host của Docker, không phải một service Compose). [`nlp4everyone/EmbeddingService`](https://github.com/nlp4everyone/EmbeddingService) là repo đồng hành cho phần đó: vLLM đứng sau một API `/v1/embeddings` tương thích OpenAI, đã dựng sẵn đúng hai model mà repo này mặc định dùng — `Qwen/Qwen3-Embedding-0.6B` (dense, 1024 chiều) và `BAAI/bge-m3` (sparse). Port mặc định của nó cũng chính là port phía này chờ sẵn, nên hai bên khớp nhau mà không cần cấu hình thêm.
+
+```bash
+git clone -b engine/vllm https://github.com/nlp4everyone/EmbeddingService.git
+cd EmbeddingService
+cp .env.sample .env   # SERVING_API_KEY phải trùng với DENSE_EMBEDDING_API_KEY của repo này
+make up dense         # chỉ dense           → :8100
+# make up hybrid      # dense + sparse      → :8100 + :8101, bắt buộc nếu SPARSE_EMBEDDING_ENABLED=true
+make status           # health check → OK
+make test             # gửi thử một request /v1/embeddings
+```
+
+Sau đó trỏ repo này sang nó:
+
+| Bên này (`.env`) | Bên kia (`.env`) | Mặc định |
+|---|---|---|
+| `DENSE_EMBEDDING_URL` | `VLLM_DENSE_EMBEDDING_PORT` | `http://172.17.0.1:8100/v1` ← `8100` |
+| `SPARSE_EMBEDDING_URL` | `VLLM_SPARSE_EMBEDDING_PORT` | `http://172.17.0.1:8101` ← `8101` |
+| `DENSE_MODEL_NAME` | `DENSE_MODEL_NAME` | `Qwen/Qwen3-Embedding-0.6B` |
+| `SPARSE_MODEL_NAME` | `SPARSE_MODEL_NAME` | `BAAI/bge-m3` |
+| `DENSE_EMBEDDING_API_KEY` / `SPARSE_EMBEDDING_API_KEY` | `SERVING_API_KEY` | phải trùng nhau |
+
+Lưu ý:
+
+- `EMBEDDING_PROVIDER=openai` là provider nói chuyện với nó; `tei` dành cho server Text Embeddings Inference. Phía sparse dùng `SPARSE_EMBEDDING_PROVIDER=vllm`, đọc token id từ `/tokenize` và trọng số từ `/pooling` của vLLM — đều là endpoint vLLM có sẵn, nên `make up sparse`/`hybrid` không cần thêm gì
+- Yêu cầu GPU Nvidia (Compute Capability 7.0+, ≥8GB VRAM), driver Nvidia 535.54.03+ và Nvidia Container Toolkit. Hãy chạy nó trên máy có GPU, còn repo này chạy ở bất cứ đâu gọi được HTTP tới đó
+- Chạy cả hai model trên cùng một GPU thì VRAM được chia theo `DENSE_GPU_MEM_UTIL`/`SPARSE_GPU_MEM_UTIL` (mặc định `0.6`/`0.3`) — hãy chỉnh cho vừa card của bạn
+- Không có ràng buộc cứng nào với repo đó: bất kỳ endpoint tương thích OpenAI hoặc TEI nào cũng dùng được. Đây chỉ là cặp đã kiểm chứng là chạy tốt
 
 <br />
 
@@ -83,7 +118,7 @@ Upload trả về ngay lập tức; ingestion (download → parse → chunk → 
 | Task queue | Redis Streams + TaskIQ | — |
 | Parsing | LlamaParse (`.pdf`), Unstructured API (`.txt`, `.md`, `.docx`, `.doc`, ảnh) — cả hai đều trả Markdown | `PDF_PARSER_PROVIDER` (chỉ cho PDF) |
 | Chunking | [Chonkie](https://docs.chonkie.ai) hoặc `langchain_text_splitters` | `CHUNKING_PROVIDER` |
-| Embeddings | endpoint tương thích OpenAI hoặc Text Embeddings Inference | `EMBEDDING_PROVIDER` |
+| Embeddings | endpoint tương thích OpenAI hoặc Text Embeddings Inference — ví dụ [EmbeddingService](https://github.com/nlp4everyone/EmbeddingService) (vLLM) | `EMBEDDING_PROVIDER` |
 | Tracing | Langfuse qua OpenTelemetry OTLP | — |
 | Runtime | Docker Compose | — |
 
@@ -104,8 +139,8 @@ Upload trả về ngay lập tức; ingestion (download → parse → chunk → 
 Xem chi tiết tại [Design Decisions](DESIGN_DECISIONS_vi.md).
 
 - Vector store chỉ ingest được đúng **một file**; nhiều hơn một `file_id` giờ bị từ chối ngay tại thời điểm request với lỗi 400, thay vì bị âm thầm bỏ qua
-- `ranking_options` trên `POST /v1/vector_stores/{id}/search` được schema chấp nhận nhưng chưa được áp dụng (`filters` **đã** được áp dụng)
-- Mới chỉ có `SearchType.DENSE` được triển khai — retrieval kiểu keyword/BM25 và hybrid đã có sẵn seam (`BaseRetriever`, `BaseFusion`) nhưng chưa có implementation
+- Trong `ranking_options` của `POST /v1/vector_stores/{id}/search`, mới chỉ `score_threshold` được áp dụng; `ranker` và `rewrite_query` vẫn được nhận rồi bỏ qua (`filters` **đã** được áp dụng)
+- Hybrid search (dense + sparse) chỉ chạy khi có đủ cả hai nửa: `SPARSE_EMBEDDING_ENABLED` **và** collection đã ingest kèm sparse vector. Store tạo trước khi bật sparse vẫn dense-only — Qdrant không thêm được field vector vào collection đang sống, nên muốn hybrid thì phải ingest lại. `search_type: "auto"` (mặc định) tự phân giải theo từng store; còn đòi `"hybrid"` trên store không đáp ứng được thì nhận lỗi 400 chứ không âm thầm rơi về dense
 - Milvus đã được nối dây qua config, `VectorStoreType` và `VectorStoreFactory`, nhưng mọi method đều raise `NotImplementedError`
 - Auth dùng chung một `FASTAPI_API_KEY` duy nhất — chưa phải multi-tenant theo từng người dùng, dù các row đã được scope theo `api_key`
 - Chưa có endpoint sub-resource "vector store files" kiểu OpenAI (attach/list/detach một file trên vector store đã tồn tại)
@@ -128,8 +163,9 @@ Xem chi tiết tại [Design Decisions](DESIGN_DECISIONS_vi.md).
 - [x] Ingestion streaming: gộp embed + index thành một stage, bộ nhớ đỉnh không phụ thuộc kích thước file
 - [x] Tách pool thread I/O và CPU, chặn trần download đồng thời trong worker
 - [ ] Ingest nhiều file cho một vector store
-- [ ] Hybrid search (retriever keyword/BM25 + chiến lược fusion)
-- [ ] Áp dụng ranking option trong search
+- [x] Hybrid search (sparse vector BGE-M3, trộn với dense bằng RRF của Qdrant)
+- [x] `search_type` theo từng request (`auto`/`dense`/`hybrid`), chỉ định hybrid trên store không đáp ứng được thì bị từ chối bằng 400
+- [ ] Áp dụng nốt phần còn lại của `ranking_options` trong search (`score_threshold` xong; `ranker`, `rewrite_query` vẫn bị bỏ qua)
 - [ ] Triển khai backend Milvus
 - [ ] Endpoint sub-resource cho vector store file (attach/list/detach)
 - [ ] Đồng bộ hai allow-list: parser cho `.csv`/`.json`/`.gif` (hoặc gỡ chúng khỏi upload), và thêm `.md`/`.doc` vào `ALLOWED_EXTENSIONS`

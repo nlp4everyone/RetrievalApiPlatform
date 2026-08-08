@@ -12,6 +12,13 @@ App Startup  (FastAPI "startup" event, app/app.py → app/startup.py)
         │                                  ↳ check_connection() embeds a throwaway string and CACHES
         │                                    the vector dimension on embed_model.dimension
         │                                    (read later via get_dense_embedding_dim())
+        ├── init_sparse_embed_model()      opt-in mirror of the above, gated on SPARSE_EMBEDDING_ENABLED
+        │                                  false → logs, leaves sparse_embed_model = None, boots dense-only
+        │                                  true  → SparseEmbeddingService.from_settings() → check_connection()
+        │                                          an unreachable sparse server fails the BOOT, not the
+        │                                          first search — same contract as the dense one
+        │                                  ↳ callers branch on is_sparse_embedding_enabled(); calling
+        │                                    get_sparse_embed_model() while off raises RuntimeError
         ├── init_postgres() + wait_for_postgres()   create pool, retry 5x / 0.5s, then _create_table()
         ├── init_vector_store()            connection for VECTOR_STORE_PROVIDER → check_connection()
         │                                  → VectorStoreFactory.register_connection(provider, conn)
@@ -29,10 +36,18 @@ Worker Startup  (TaskIQ WORKER_STARTUP, app/tasks/broker.py::_initialize_service
         ├── init_download_semaphore()      asyncio.Semaphore(DOWNLOAD_CONCURRENCY=4)
         │                                  caps concurrent downloads so one burst of ingestion jobs
         │                                  cannot exhaust the I/O pool on its own
-        ├── init_vector_store() · init_embed_model()
+        ├── init_vector_store() · init_embed_model() · init_sparse_embed_model()
+        │                                  the worker embeds too, so it builds the same two services
+        │                                  the web process does — sparse still a no-op when disabled
+        │                                  ⓘ init_postgres() here only creates the pool: wait_for_postgres()
+        │                                    and _create_table() run on the web process alone
         └── init_parsing_service()         ParsingService.from_settings() ← worker-only
                                            the whole sequence runs once, guarded by _initialized
+```
 
+Note that `init_embed_model()` (and `init_sparse_embed_model()` when `SPARSE_EMBEDDING_ENABLED`) probes a server *outside* this stack, so the embedding server must already be up or **both processes fail to boot** — deliberately, since an unreachable model server would otherwise surface as a failed ingestion much later. Start [EmbeddingService](https://github.com/nlp4everyone/EmbeddingService) (`make up dense`, or `make up hybrid` for sparse too) before `make up` here; see [Embedding Server](README.md#embedding-server).
+
+```text
 Client  (OpenAI SDK / HTTP client)
         │  multipart/form-data (upload) or JSON
         ▼
@@ -123,7 +138,12 @@ FastAPI HTTP Gateway
         │               vector_store = VectorStoreFactory.get_store(collection_name=vectorstore_id,
         │                                                           provider=vector_store_type)
         │               pipeline = build_ingestion_pipeline(minio_client, vector_store, embed_fn=get_dense_embedding,
-        │                                                   parsing_service, chunking_strategy, chunk_size, chunk_overlap)
+        │                                                   parsing_service, chunking_strategy, chunk_size, chunk_overlap,
+        │                                                   sparse_embed_fn=get_sparse_embedding
+        │                                                                   if is_sparse_embedding_enabled() else None)
+        │                                                   ↳ the worker hands over a sparse embedder only when it
+        │                                                     actually has one; supplying it is what makes the
+        │                                                     collection hybrid (dense + sparse on the same point)
         │               context  = IngestionContext(vector_store_id, api_key, file_id, file_metadata, ...)
         │               await pipeline.run(context, parent_carrier=trace_context)
         │                                                   ↳ nests every stage inside the HTTP request's trace
@@ -158,12 +178,23 @@ FastAPI HTTP Gateway
         │               │                (dimension cached at startup — NOT inferred from the    │
         │               │                 first embedding result; that is what makes streaming   │
         │               │                 possible)                                              │
-        │               │             ② ensure_collection(embedding_dim) ONCE, up front          │
+        │               │             ② ensure_collection(embedding_dim, with_sparse=…) ONCE     │
+        │               │                with_sparse = a sparse_embed_fn was supplied            │
         │               │                → context.metrics["collection_created"]                 │
+        │               │             ②ᵇ use_sparse = want_sparse and await supports_sparse()    │
+        │               │                the COLLECTION is asked, not the config: an existing    │
+        │               │                collection made before sparse was switched on has no    │
+        │               │                sparse field and Qdrant cannot add one, and upserting   │
+        │               │                a sparse vector it cannot hold fails every batch        │
+        │               │                → context.metrics["sparse_enabled"]                     │
         │               │             ③ chunks → batches of EMBEDDING_UPLOAD_BATCH_SIZE (16),    │
         │               │                asyncio.gather under Semaphore(BATCH_CONCURRENCY=4);    │
         │               │                per batch: embed → build Documents → insert_documents,  │
         │               │                ALL while holding the same semaphore slot               │
+        │               │                use_sparse → dense and sparse embedded together in one  │
+        │               │                  asyncio.gather, so the batch costs the SLOWER server  │
+        │               │                  rather than both in turn, and both vectors ride on    │
+        │               │                  the same point (no second pass over the file)         │
         │               │                → peak memory ≈ batch_size × concurrency, independent   │
         │               │                  of file size; writes start with the first batch       │
         │               │                  instead of after the whole file is embedded           │
@@ -181,9 +212,9 @@ FastAPI HTTP Gateway
         │
         └──▶ Step 4: PostgresVectorStore.update(status=COMPLETED, usage_bytes, last_active_at=now())
 
-③ POST /v1/vector_stores/{id}/search   {query, max_num_results, filters, ranking_options}
+③ POST /v1/vector_stores/{id}/search   {query, max_num_results, filters, ranking_options, search_type}
         ▼
-    VectorStoreService.search(vector_store_id, search_request, api_key, search_type=SearchType.DENSE)
+    VectorStoreService.search(vector_store_id, search_request, api_key, search_type=None)
         ├── validate_vector_store_prefix(id)    no "vs" prefix?  → WrongPrefixVectorstoreException
         ├── PostgresVectorStore.get_by_id(id, api_key)   not found? → VectorStoreNotFoundException
         │       provider = record["vector_store_type"]   ← the backend this collection actually lives on
@@ -195,49 +226,92 @@ FastAPI HTTP Gateway
         │
         │  query = search_request.query if str, else search_request.query[0]
         │      ⚠ if query is a List[str], ONLY the first element is used — the rest are dropped
-        │  ⓘ TODO: ranking_options still has no effect — score_threshold and quantization rescore
-        │     are not yet surfaced on the vector store contract
+        │
+        ├── score_threshold = ranking_options.score_threshold  (only when > 0, else None)
+        │       0.0 is the schema default and means "keep everything", so it is NOT passed down —
+        │       the backends read None as "no filtering"
+        │       ⓘ of ranking_options, only score_threshold reaches the backend; ranker and
+        │         rewrite_query are still accepted and ignored
+        │
+        ├── vector_store = VectorStoreFactory.get_store(collection_name=id, provider=provider)
+        │
+        ├── which search actually runs — resolved BEFORE the span opens, so the trace records
+        │   what ran rather than what was asked for:
+        │       1. the search_type ARGUMENT (internal callers only) wins outright
+        │       2. else search_request.requested_search_type — the request's "auto"|"dense"|"hybrid"
+        │             field, mapped to None|DENSE|HYBRID ("auto" is the default)
+        │             ⓘ not part of the OpenAI schema; the stock SDK sends it through
+        │               extra_body={"search_type": "hybrid"}
+        │       3. still None ("auto") → resolve_search_type(vector_store)
+        │             hybrid_unavailable_reason(vector_store) is None → HYBRID, otherwise DENSE
+        │       4. pinned HYBRID → hybrid_unavailable_reason(vector_store) is re-checked, and a
+        │             reason means UnsupportedSearchTypeException (400) instead of a silent
+        │             fallback to dense — a caller who named hybrid and got dense results would
+        │             be measuring retrieval quality on a config they don't think they're running
+        │                 "sparse embedding is not enabled on this server"            (server-side)
+        │                 "this vector store holds no sparse vectors — ingested before …" (store-side)
+        │             two reasons because they need different fixes: enable sparse, vs re-ingest
+        │       (pinned DENSE always runs: a hybrid-capable store can still be searched dense)
         │
         ├── traced_span("POST /v1/vector_stores/{id}/search")   ROOT span
         │       trace attributes: user_id=api_key, tags=["vector_store_search"],
         │                         input={query, max_num_results}, metadata={vector_store_id,
         │                         vector_store_type, search_type}
         │
-        │       vector_store = VectorStoreFactory.get_store(collection_name=id, provider=provider)
-        │       pipeline     = build_retrieval_pipeline(vector_store, embed_fn=get_dense_embedding, search_type)
-        │              └── _build_plan(search_type):
-        │                      SearchType.DENSE → [DenseRetriever], PassthroughFusion
-        │                      anything else    → ValueError("Unsupported search type")
+        │       pipeline     = build_retrieval_pipeline(vector_store, embed_fn=get_dense_embedding,
+        │                                               search_type, sparse_embed_fn)
+        │              └── _build_plan(search_type, vector_store):
+        │                      SearchType.DENSE  → [DenseRetriever],  PassthroughFusion
+        │                      SearchType.HYBRID → [HybridRetriever], PassthroughFusion
+        │                      anything else     → ValueError("Unsupported search type")
+        │                  HYBRID without a sparse_embed_fn → ValueError
+        │                      (unreachable from the API: step 4 above rejects it as a 400 first)
         │       context      = RetrievalContext(vector_store_id, api_key, query, limit=max_num_results,
-        │                                       filters=neutral_filter)
+        │                                       filters=neutral_filter, score_threshold=score_threshold)
         │       await pipeline.run(context)      ← no parent_carrier: already inside this request's span
         │
         │       ┌── RetrievalPipeline stages (one Langfuse observation each) ──────────────────┐
         │       │                                                                              │
         │       │  embed_query   embed_fn([query]) → context.dense_vector                      │
+        │       │                HYBRID: + sparse_embed_fn([query]) → context.sparse_vector    │
+        │       │                    (both awaited together — costs the slower server)         │
         │       │                                            [ObservationType.EMBEDDING]       │
         │       │                                                                              │
-        │       │  retrieve      every retriever runs concurrently (asyncio.gather)            │
+        │       │  retrieve      every retriever runs concurrently (asyncio.gather), each      │
+        │       │                handed the same RetrievalQuery (text, limit, both vectors,    │
+        │       │                filters, score_threshold)                                     │
         │       │                → context.candidates = {retriever.name: [RetrievedChunk]}     │
-        │       │                DenseRetriever: collection_exists()? NO → []                  │
+        │       │                Dense/HybridRetriever: collection_exists()? NO → []           │
         │       │                    (store row can exist before ingestion created the         │
         │       │                     collection — empty result, not an error)                 │
+        │       │                HybridRetriever: one retrieve() carrying both vectors;        │
+        │       │                    Qdrant prefetches each branch (limit×2, so a doc just     │
+        │       │                    outside the dense top-k can still win on rank) and        │
+        │       │                    merges them with FusionQuery(RRF) server-side → ONE list  │
+        │       │                    score_threshold rides on the DENSE prefetch only — it is  │
+        │       │                    a similarity score, and against RRF output (~1/(60+rank)) │
+        │       │                    it would drop everything                                  │
+        │       │                    no sparse vector on the query? → degrades to dense rather │
+        │       │                    than failing; the span says retrieval.hybrid.used_sparse  │
         │       │                                            [ObservationType.RETRIEVER]       │
         │       │                                                                              │
         │       │  fuse          fusion.fuse(candidates, limit) → context.results              │
         │       │                PassthroughFusion: >1 candidate list → ValueError             │
-        │       │                    (adding a retriever forces choosing a real fusion)        │
+        │       │                    (hybrid still yields one list — the backend fused it)     │
         │       │                emits_span() == False when there is nothing to fuse           │
         │       │                                                                              │
         │       └──────────────────────────────────────────────────────────────────────────────┘
         │
         │       data = convert_retrieved_chunks_to_search_results(context.results)
+        │              content whitespace-normalised, score rounded to 5 decimals HERE and only
+        │              here — the threshold above and the RRF ranking both used the full score
         │
         └── return VectorStoreSearchResponse(search_query, data, has_more = len(data) >= max_num_results)
 
 Worker Shutdown  (TaskIQ WORKER_SHUTDOWN, app/tasks/broker.py)
-        ├── get_postgres_client().close()        closes the asyncpg pool
+        ├── get_postgres_client().close()        closes the asyncpg pool — only if _initialized
         └── VectorStoreFactory.close_all()       closes every registered vector store connection
+                                                 (runs unconditionally, even on a failed startup)
 ```
 
 ## Where the tracing comes from

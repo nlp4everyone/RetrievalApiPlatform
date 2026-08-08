@@ -21,7 +21,7 @@ An OpenAI-API-compatible **Retrieval Engine** for Retrieval-Augmented Generation
 1. **Software**
    - Docker and Docker Compose
    - Python 3.11–3.13 if running outside Docker (`requires-python = ">=3.11,<3.14"`, per `unstructured`'s constraint)
-   - A dense embedding endpoint at `DENSE_EMBEDDING_URL` — either OpenAI-compatible (e.g. vLLM serving `Qwen/Qwen3-Embedding-0.6B`) or a Text Embeddings Inference server
+   - A dense embedding endpoint at `DENSE_EMBEDDING_URL` — either OpenAI-compatible (e.g. vLLM serving `Qwen/Qwen3-Embedding-0.6B`) or a Text Embeddings Inference server. [`nlp4everyone/EmbeddingService`](https://github.com/nlp4everyone/EmbeddingService) is the companion repo that serves exactly this, on the ports this repo already defaults to — see [Embedding Server](#embedding-server)
    - API keys for the parsing services you actually use: `LLAMAPARSE_API_KEY` for PDFs, `UNSTRUCTURED_API_KEY` (+ `UNSTRUCTURED_API_URL`) for every other format. Each key is only checked when its provider is first used, so a PDF-only deployment needs no Unstructured key
    - A self-hosted (or cloud) [Langfuse](https://langfuse.com) instance for tracing
 
@@ -44,6 +44,41 @@ cp .env.sample .env
 make up      # builds and starts postgres, redis, qdrant, minio, worker, web
 make logs    # tail the web service
 ```
+
+The embedding endpoint has to be reachable *before* `make up` — startup probes it and fails the boot if it isn't. See [Embedding Server](#embedding-server) below.
+
+<br />
+
+## Embedding Server
+
+This repo computes no vectors itself — every embedding is an HTTP call to a model server you run separately, which is why `DENSE_EMBEDDING_URL` defaults to `http://172.17.0.1:8100/v1` (the Docker host, not a Compose service). [`nlp4everyone/EmbeddingService`](https://github.com/nlp4everyone/EmbeddingService) is the companion repo for that side: vLLM behind an OpenAI-compatible `/v1/embeddings` API, with the same two models this repo defaults to already wired up — `Qwen/Qwen3-Embedding-0.6B` (dense, 1024-dim) and `BAAI/bge-m3` (sparse). Its default ports are the ones expected here, so the two line up with no extra configuration.
+
+```bash
+git clone -b engine/vllm https://github.com/nlp4everyone/EmbeddingService.git
+cd EmbeddingService
+cp .env.sample .env   # SERVING_API_KEY must match this repo's DENSE_EMBEDDING_API_KEY
+make up dense         # dense only            → :8100
+# make up hybrid      # dense + sparse        → :8100 + :8101, required for SPARSE_EMBEDDING_ENABLED=true
+make status           # health check → OK
+make test             # sample /v1/embeddings request
+```
+
+Then point this repo at it:
+
+| Here (`.env`) | There (`.env`) | Default |
+|---|---|---|
+| `DENSE_EMBEDDING_URL` | `VLLM_DENSE_EMBEDDING_PORT` | `http://172.17.0.1:8100/v1` ← `8100` |
+| `SPARSE_EMBEDDING_URL` | `VLLM_SPARSE_EMBEDDING_PORT` | `http://172.17.0.1:8101` ← `8101` |
+| `DENSE_MODEL_NAME` | `DENSE_MODEL_NAME` | `Qwen/Qwen3-Embedding-0.6B` |
+| `SPARSE_MODEL_NAME` | `SPARSE_MODEL_NAME` | `BAAI/bge-m3` |
+| `DENSE_EMBEDDING_API_KEY` / `SPARSE_EMBEDDING_API_KEY` | `SERVING_API_KEY` | must match |
+
+Notes:
+
+- `EMBEDDING_PROVIDER=openai` is the provider that speaks to it; `tei` is for a Text Embeddings Inference server instead. Sparse uses `SPARSE_EMBEDDING_PROVIDER=vllm`, which reads token ids from vLLM's `/tokenize` and weights from `/pooling` — endpoints vLLM exposes natively, so `make up sparse`/`hybrid` needs nothing extra
+- It needs an Nvidia GPU (Compute Capability 7.0+, ≥8GB VRAM), Nvidia drivers 535.54.03+, and the Nvidia Container Toolkit. Run it on the GPU host and this repo anywhere that can reach it over HTTP
+- Serving both models on one GPU splits VRAM via `DENSE_GPU_MEM_UTIL`/`SPARSE_GPU_MEM_UTIL` (default `0.6`/`0.3`) — tune those to your card
+- Nothing here is coupled to that repo: any OpenAI-compatible or TEI endpoint works. It is simply the known-good pairing
 
 <br />
 
@@ -83,7 +118,7 @@ The upload returns immediately; ingestion (download → parse → chunk → embe
 | Task queue | Redis Streams + TaskIQ | — |
 | Parsing | LlamaParse (`.pdf`), Unstructured API (`.txt`, `.md`, `.docx`, `.doc`, images) — both return Markdown | `PDF_PARSER_PROVIDER` (PDF only) |
 | Chunking | [Chonkie](https://docs.chonkie.ai) or `langchain_text_splitters` | `CHUNKING_PROVIDER` |
-| Embeddings | OpenAI-compatible endpoint or Text Embeddings Inference | `EMBEDDING_PROVIDER` |
+| Embeddings | OpenAI-compatible endpoint or Text Embeddings Inference — e.g. [EmbeddingService](https://github.com/nlp4everyone/EmbeddingService) (vLLM) | `EMBEDDING_PROVIDER` |
 | Tracing | Langfuse via OpenTelemetry OTLP | — |
 | Runtime | Docker Compose | — |
 
@@ -104,8 +139,8 @@ The upload returns immediately; ingestion (download → parse → chunk → embe
 See [Design Decisions](DESIGN_DECISIONS.md) for detail.
 
 - Vector stores ingest **exactly one file**; more than one `file_id` is now rejected at request time with a 400 rather than silently skipped
-- `ranking_options` on `POST /v1/vector_stores/{id}/search` is accepted by the schema but not yet applied (`filters` **are** applied)
-- Only `SearchType.DENSE` is implemented — keyword/BM25 and hybrid retrieval have seams (`BaseRetriever`, `BaseFusion`) but no implementations
+- Of `ranking_options` on `POST /v1/vector_stores/{id}/search`, only `score_threshold` is applied; `ranker` and `rewrite_query` are accepted and ignored (`filters` **are** applied)
+- Hybrid (dense + sparse) search runs only where both halves exist: `SPARSE_EMBEDDING_ENABLED` **and** a collection ingested with sparse vectors. Stores created before sparse was switched on stay dense-only — Qdrant cannot add a vector field to a live collection, so they need re-ingesting to go hybrid. `search_type: "auto"` (the default) resolves this per store; asking for `"hybrid"` on a store that cannot answer it is a 400 rather than a silent fallback
 - Milvus is wired through config, `VectorStoreType`, and `VectorStoreFactory`, but every method raises `NotImplementedError`
 - Auth is a single shared `FASTAPI_API_KEY` — not per-user multi-tenancy, even though rows are scoped by `api_key`
 - No OpenAI "vector store files" sub-resource endpoints (attach/list/detach a file on an existing vector store)
@@ -128,8 +163,9 @@ See [Design Decisions](DESIGN_DECISIONS.md) for detail.
 - [x] Streaming ingestion: embed and index merged into one stage, peak memory independent of file size
 - [x] Split I/O and CPU thread pools, cap concurrent downloads in the worker
 - [ ] Multi-file ingest per vector store
-- [ ] Hybrid search (keyword/BM25 retriever + fusion strategy)
-- [ ] Apply ranking options in search
+- [x] Hybrid search (BGE-M3 sparse vectors, fused with dense by Qdrant RRF)
+- [x] Per-request `search_type` (`auto`/`dense`/`hybrid`), with pinned hybrid refused as a 400 on stores that cannot answer it
+- [ ] Apply the rest of `ranking_options` in search (`score_threshold` done; `ranker`, `rewrite_query` still ignored)
 - [ ] Milvus backend implementation
 - [ ] Vector store file sub-resource endpoints (attach/list/detach)
 - [ ] Reconcile the two allow-lists: parsers for `.csv`/`.json`/`.gif` (or drop them from upload), and add `.md`/`.doc` to `ALLOWED_EXTENSIONS`

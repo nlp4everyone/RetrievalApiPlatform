@@ -8,7 +8,7 @@ Production-oriented backend implementing OpenAI's **Files** and **Vector Stores*
 - A pluggable vector database behind `BaseAsyncVectorStore` — one collection per vector store. Qdrant is implemented; Milvus is wired but stubbed
 - Redis Streams + TaskIQ for asynchronous ingestion, running outside the request/response lifecycle
 - Two external parsing services: LlamaParse for `.pdf`, the Unstructured API for every other format — both return Markdown
-- An external dense embedding endpoint (OpenAI-compatible vLLM, or Text Embeddings Inference) for actual vector computation
+- An external dense embedding endpoint (OpenAI-compatible vLLM, or Text Embeddings Inference) for actual vector computation — [EmbeddingService](https://github.com/nlp4everyone/EmbeddingService) is the companion repo that serves it
 - Langfuse (via OpenTelemetry OTLP) for end-to-end tracing across upload/ingestion/search
 
 ---
@@ -133,7 +133,7 @@ Both pipelines are the same machinery (`app/pipelines/pipeline.py`) with differe
 | Assembled by | `build_ingestion_pipeline(...)` | `build_retrieval_pipeline(..., search_type)` |
 | Parent trace | `trace_context` carried through the task | the ambient request span |
 
-Adding a step is adding a `BaseStage` subclass and one line in the factory. Adding hybrid search is adding a `BaseRetriever` and a `BaseFusion`, plus a branch in `_build_plan()` — the stages and the pipeline stay untouched.
+Adding a step is adding a `BaseStage` subclass and one line in the factory. Hybrid search was exactly that: a `HybridRetriever` plus a branch in `_build_plan()`, with the stages and the pipeline untouched — and no new fusion strategy, since Qdrant merges the dense and sparse branches by RRF inside the query itself.
 
 ---
 
@@ -152,7 +152,7 @@ Every route is prefixed with `/v1` and requires `Authorization: Bearer <FASTAPI_
 | `GET` | `/vector_stores/{vector_store_id}` | Retrieve a vector store, including `status`/`file_counts` |
 | `POST` | `/vector_stores/{vector_store_id}` | Modify a vector store (OpenAI-style: uses `POST`, not `PATCH`) |
 | `DELETE` | `/vector_stores/{vector_store_id}` | Delete a vector store |
-| `POST` | `/vector_stores/{vector_store_id}/search` | Search by `query`, `max_num_results`, `filters` (`ranking_options` accepted but not yet applied) |
+| `POST` | `/vector_stores/{vector_store_id}/search` | Search by `query`, `max_num_results`, `filters`, `search_type` (`auto`\|`dense`\|`hybrid`, non-OpenAI extension); of `ranking_options` only `score_threshold` is applied |
 
 Both routers speak the OpenAI object model (`FileObject`, `VectorStoreObject`, paginated `object="list"` responses), OpenAI's ID convention (`file-{8 hex}`, `vs-{32 hex}` — `app/utils/key_generator/key_generator.py`), and an OpenAI-style error envelope (`{message, type, params, code}`) on every `AppBaseException`.
 
@@ -236,7 +236,7 @@ Three compose files combined by the `Makefile`:
 - **`compose_tracking.yml`** — `minio` (9000 API / 9001 console) — object storage, despite the filename
 - **`compose_web.yml`** — `web` (uvicorn, 8005; depends on `postgres` healthy + `worker` started) and `worker` (TaskIQ; depends on `postgres`, `redis`, `minio` healthy)
 
-Langfuse itself is **not** part of this Compose stack — configuration points at an external/self-hosted instance. Same for the embedding server — `DENSE_EMBEDDING_URL` defaults to `http://172.17.0.1:8100/v1` (the host machine, not a Compose service).
+Langfuse itself is **not** part of this Compose stack — configuration points at an external/self-hosted instance. Same for the embedding server — `DENSE_EMBEDDING_URL` defaults to `http://172.17.0.1:8100/v1` (the host machine, not a Compose service). That default is the published port of [EmbeddingService](https://github.com/nlp4everyone/EmbeddingService), a separate vLLM-based Compose stack run on the GPU host (`make up dense`, or `make up hybrid` for `:8100` dense + `:8101` sparse); keeping it out of this stack is what lets the GPU box and the API box be different machines. See [Embedding Server](README.md#embedding-server).
 
 Both `web` and `worker` run from the same image (`docker/Dockerfile`, multi-stage `uv sync --frozen` build, non-root `appuser`), just with different entrypoint commands (`uvicorn app.app:app` vs `taskiq worker app.tasks.broker:broker`). Each independently runs the same bootstrap out of `app/startup.py`, so both processes end up with the same live services reached through the same getters.
 

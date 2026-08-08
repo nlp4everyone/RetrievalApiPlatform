@@ -24,7 +24,7 @@ All endpoints require `Depends(verify_api_key)`.
 | GET | `/v1/vector_stores/{id}` | `get_vector_store` | — |
 | POST | `/v1/vector_stores/{id}` | `modify_vector_store` | OpenAI-style: update uses POST, not PATCH |
 | DELETE | `/v1/vector_stores/{id}` | `delete_vector_store` | — |
-| POST | `/v1/vector_stores/{id}/search` | `search_vector_store` | Body `VectorStoreSearchRequest`; `filters` applied, `ranking_options` not yet |
+| POST | `/v1/vector_stores/{id}/search` | `search_vector_store` | Body `VectorStoreSearchRequest`; `filters` and `search_type` applied, of `ranking_options` only `score_threshold` |
 
 ### `dependencies.py`
 
@@ -83,7 +83,7 @@ The payoff: the trace shape is a property of the pipeline, and it stays correct 
 | `DownloadStage` | Fetches bytes from MinIO under `get_download_semaphore()`, transfer on `get_io_executor()` | bucket/path, filename, `file.size_bytes` |
 | `ParseStage` | `ParsingService.parse(bytes, ext)` → text (Markdown) | records the provider that handled it, `text.num_chars` |
 | `ChunkStage` | `ChunkingService.split_text(text)` → chunks, on `get_cpu_executor()` | strategy/provider, `chunks.count`, `chunks.avg_chars` |
-| `EmbedAndIndexStage` | `ensure_collection(embedding_dim)` once, then embeds + upserts **one batch at a time** | whether the collection was created, `embedding.dims`, `embed`/`index` wall-clock, `batch.*` |
+| `EmbedAndIndexStage` | `ensure_collection(embedding_dim, with_sparse)` once, then embeds + upserts **one batch at a time** | whether the collection was created, `embedding.dims`, `embedding.sparse_enabled`/`sparse_model`, `embed`/`index` wall-clock, `batch.*` |
 
 `EmbedAndIndexStage` is the former `EmbedStage` + `IndexStage` merged into one streaming loop:
 
@@ -91,6 +91,7 @@ The payoff: the trace shape is a property of the pipeline, and it stays correct 
 - `Document` objects are built *after* the semaphore slot is acquired, so peak memory is `batch_size × concurrency` batches' worth of chunks/vectors/Documents, not the whole file's.
 - `embedding_dim` comes from `get_dense_embedding_dim()` — the dimension `EmbeddingService.check_connection()` cached at startup — so the collection can be created *before* the first embed call. That is the precondition streaming needs: the old `IndexStage` had to infer `embedding_dim` from `context.embeddings[0]`, which meant waiting for embedding to finish.
 - `embed_wall_clock_s` / `index_wall_clock_s` are computed by `_union_duration()`, which merges overlapping intervals, because summing each concurrent batch's raw duration would double-count.
+- With a `sparse_embed_fn` supplied, each batch is embedded twice — dense and sparse in one `asyncio.gather`, so the batch costs the slower server rather than both in turn — and both vectors are written onto the same point, so hybrid retrieval needs no second pass over the file. Whether that happens is decided by asking the *collection* (`supports_sparse()`) after `ensure_collection`, not by trusting config: a collection created before sparse was switched on has no sparse field, Qdrant cannot add one, and upserting a sparse vector it cannot hold would fail every batch. The outcome lands in `metrics["sparse_enabled"]`.
 - Note: the merged stage does not override `observation_type`, so it shows up in Langfuse as `ObservationType.SPAN`, unlike the previous `EmbedStage` (`EMBEDDING`).
 
 `IngestionContext` follows suit: there is no `embeddings` field any more — vectors live only within a single batch, and `num_inserted` is the last step's only output.
@@ -99,7 +100,7 @@ The payoff: the trace shape is a property of the pipeline, and it stays correct 
 
 ### Retrieval (`pipelines/retrieval/`)
 
-`RetrievalContext` carries the query, `limit`, neutral `filters`, and `score_threshold` in; `dense_vector`, `candidates` (hits keyed by retriever name), and `results` out.
+`RetrievalContext` carries the query, `limit`, neutral `filters`, and `score_threshold` in; `dense_vector`, `sparse_vector` (hybrid only), `candidates` (hits keyed by retriever name), and `results` out.
 
 | Stage | Does | Span notes |
 |---|---|---|
@@ -107,11 +108,19 @@ The payoff: the trace shape is a property of the pipeline, and it stays correct 
 | `RetrieveStage` | Runs every retriever concurrently, keys hits by retriever name | `ObservationType.RETRIEVER`; merges each retriever's `span_attributes()` under its own name prefix |
 | `FuseStage` | Merges candidate lists into the final ranked list | skips its span when there is nothing to fuse |
 
-`BaseRetriever` is the seam for hybrid search — `RetrievalQuery` deliberately carries the raw query text *and* the dense vector, so a retriever doing its own tokenising has what it needs without the pipeline knowing which representation each retriever consumes. `DenseRetriever` is the one implementation; a missing collection returns `[]` rather than raising, since a vector store row can exist in Postgres before ingestion has created the collection.
+`BaseRetriever` is the seam hybrid search is added at — `RetrievalQuery` carries every representation of the query at once (raw text, dense vector, sparse vector), so each retriever picks the one it understands without the pipeline knowing which that is. `DenseRetriever` and `HybridRetriever` are the implementations; both return `[]` for a missing collection rather than raising, since a vector store row can exist in Postgres before ingestion has created the collection.
 
-`BaseFusion` is the matching seam for merging. `PassthroughFusion` is the only implementation and **raises** if handed more than one candidate list, rather than silently dropping results — adding a second retriever forces you to choose a real fusion strategy.
+`HybridRetriever` is **one** retriever, not two: it hands the store both vectors in a single `retrieve()` call and Qdrant fuses the dense and sparse branches server-side by reciprocal rank (`prefetch` + `FusionQuery(RRF)`). That keeps hybrid to one round-trip, and means the two incomparable score scales — cosine and term-weight dot product — never have to be reconciled, only their ranks. Its `used_sparse` span attribute is the first thing to check when hybrid results look identical to dense ones.
 
-`build_retrieval_pipeline(vector_store, embed_fn, search_type)` resolves a `SearchType` into a `_RetrievalPlan(retrievers, fusion)`. Retrievers and fusion are chosen *together* so an invalid combination cannot be assembled by accident. Search type is a per-call argument, not configuration — two queries against the same store can reasonably want different retrieval.
+`BaseFusion` is the matching seam for merging in the process instead. `PassthroughFusion` is the only implementation — every search runs one retriever, hybrid included — and **raises** if handed more than one candidate list rather than silently dropping results. The seam stays for the case that changes: a backend that cannot fuse server-side.
+
+`build_retrieval_pipeline(vector_store, embed_fn, search_type, sparse_embed_fn)` resolves a `SearchType` into a `_RetrievalPlan(retrievers, fusion)`. Retrievers and fusion are chosen *together* so an invalid combination cannot be assembled by accident. The sparse embedder is withheld on a dense search so the query is not embedded twice for a representation nothing will read.
+
+`hybrid_unavailable_reason(vector_store)` is the single source of truth for whether hybrid can run: it returns `None` when it can, otherwise a sentence saying which half is missing — `SPARSE_EMBEDDING_ENABLED` off (server-side), or a collection carrying no sparse vectors (store-side). The second condition is not implied by the first — a store ingested before sparse was switched on has no sparse field, and Qdrant cannot add one to a live collection — so the collection is asked rather than assumed. It returns a reason rather than a bool because the two failures need different fixes: enable sparse, versus re-ingest the store.
+
+`resolve_search_type(vector_store)` is the thin wrapper over it for callers with no opinion: `HYBRID` when the reason is `None`, `DENSE` otherwise. Resolving per search is what lets old dense-only stores and new hybrid ones be served by the same process.
+
+`VectorStoreService.search` picks from three inputs in order: an explicit `search_type` argument (internal callers), then the request's `search_type` field (`"auto" | "dense" | "hybrid"`, defaulting to `"auto"`), then `resolve_search_type`. A pinned `HYBRID` is re-checked against `hybrid_unavailable_reason` and rejected with `UnsupportedSearchTypeException` (400) rather than falling back to dense — silently answering a hybrid request with dense results would leave the caller measuring retrieval quality on a configuration they do not think they are running. The whole decision happens before the trace span opens, so the trace records the search that ran.
 
 `chunks_to_trace_json` renders hits for a span attribute as `{chunk_id, score}` only: a trace is not the place to duplicate document contents.
 
@@ -125,6 +134,8 @@ Every package here follows the same shape — a `base.py` declaring the interfac
 | `chunking/` | `BaseChunkingProvider` | `ChonkieProvider`, `LangchainProvider` | `CHUNKING_PROVIDER` |
 | `embedding/` | `BaseEmbeddingProvider` | `OpenAIEmbeddingProvider`, `TEIEmbeddingProvider` | `EMBEDDING_PROVIDER` |
 | `embedding/` | `BaseSparseEmbeddingProvider` | `VLLMSparseEmbeddingProvider` | `SPARSE_EMBEDDING_PROVIDER` (only when `SPARSE_EMBEDDING_ENABLED`) |
+
+Both embedding providers are HTTP clients — no model is loaded in this process, so neither the web service nor the worker needs a GPU. `OpenAIEmbeddingProvider` posts to `{DENSE_EMBEDDING_URL}/embeddings`, `TEIEmbeddingProvider` to `{DENSE_EMBEDDING_URL}/embed`, and `VLLMSparseEmbeddingProvider` to `/tokenize` + `/pooling` on the sparse root. What answers those URLs is a separate deployment: [`nlp4everyone/EmbeddingService`](https://github.com/nlp4everyone/EmbeddingService) is the reference one — vLLM serving `Qwen/Qwen3-Embedding-0.6B` on `:8100` and `BAAI/bge-m3` on `:8101`, matching the defaults these settings ship with (see [Embedding Server](README.md#embedding-server)).
 
 `ParsingService.from_settings()` maps extensions to *provider factories*, not instances: `.pdf` goes to the backend named by `PDF_PARSER_PROVIDER`, and **every other format** (`.txt`, `.md`, `.docx`, `.doc`, `.png`, `.jpg`, `.jpeg`) goes to the Unstructured API. Because `.txt`/`.md` are registered against the *same factory object*, they share a single provider instance — that is why the `_instances` dict is keyed by factory rather than by extension. The PDF backend's name is validated at startup (so a typo fails fast), but providers are only constructed on first use, and `UNSTRUCTURED_API_KEY` is likewise only checked then — a deployment that ingests nothing but PDFs should not fail to start over a missing Unstructured key. `supports()`, `supported_extensions`, and `provider_for()` expose the registry; an unmapped extension raises `ValueError("Unsupported file format: ...")`.
 
@@ -195,7 +206,7 @@ Root `AppBaseException(status_code, response: BaseResponse, log_message)`. Domai
 - `base/` — shared `BaseModel` (`extra="forbid"`), `PaginationParams`, generic `PaginatedResponse[T]`.
 - `file/` — `FileObject`, `FileListObject`, request/response variants, `UploadingStatus` enum.
 - `vector_store/` — `VectorStoreCreateRequest`/`ModifyRequest`/`QueryRequest`/`SearchRequest`, chunking-strategy union types, `ComparisonFilter`/`CompoundFilter`, `VectorStoreObject`, `VectorStoreSearchResponse`.
-- `vector_store/types.py` — `VectorStoreType` (`qdrant`, `milvus`) and `SearchType` (`dense` only today). `SearchType` names the whole retrieval shape rather than exposing a retriever list plus a fusion strategy separately, because those two always have to agree — naming the combination keeps the invalid ones unrepresentable.
+- `vector_store/types.py` — `VectorStoreType` (`qdrant`, `milvus`) and `SearchType` (`dense`, `hybrid`; pinned by the caller or resolved per search when they send `"auto"`). `SearchType` names the whole retrieval shape rather than exposing a retriever list plus a fusion strategy separately, because those two always have to agree — naming the combination keeps the invalid ones unrepresentable.
 - `chunking/` — `ChunkingStrategy` enum, `ChonkieChunkingConfig`, `LangchainChunkingConfig`.
 
 ## Startup / bootstrap (`app/startup.py`)

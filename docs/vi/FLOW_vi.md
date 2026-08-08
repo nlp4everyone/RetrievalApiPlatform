@@ -11,6 +11,13 @@ App Startup  (FastAPI "startup" event, app/app.py → app/startup.py)
         ├── init_embed_model()             EmbeddingService.from_settings() → check_connection()
         │                                  ↳ check_connection() embed thử một câu và CACHE số chiều
         │                                    vector vào embed_model.dimension (get_dense_embedding_dim())
+        ├── init_sparse_embed_model()      bản sao opt-in của bước trên, phụ thuộc SPARSE_EMBEDDING_ENABLED
+        │                                  false → ghi log, để sparse_embed_model = None, boot dense-only
+        │                                  true  → SparseEmbeddingService.from_settings() → check_connection()
+        │                                          server sparse không tới được thì FAIL NGAY LÚC BOOT, không
+        │                                          phải tới lần search đầu tiên — cùng giao kèo với dense
+        │                                  ↳ caller rẽ nhánh bằng is_sparse_embedding_enabled(); gọi
+        │                                    get_sparse_embed_model() khi đang tắt sẽ raise RuntimeError
         ├── init_postgres() + wait_for_postgres()   tạo pool, thử lại 5 lần / 0.5s, rồi _create_table()
         ├── init_vector_store()            connection cho VECTOR_STORE_PROVIDER → check_connection()
         │                                  → VectorStoreFactory.register_connection(provider, conn)
@@ -28,10 +35,18 @@ Worker Startup  (TaskIQ WORKER_STARTUP, app/tasks/broker.py::_initialize_service
         ├── init_download_semaphore()      asyncio.Semaphore(DOWNLOAD_CONCURRENCY=4)
         │                                  chặn trần số file tải song song, để một loạt job ingestion
         │                                  không tự làm cạn pool I/O
-        ├── init_vector_store() · init_embed_model()
+        ├── init_vector_store() · init_embed_model() · init_sparse_embed_model()
+        │                                  worker cũng embed, nên nó dựng đúng hai service như tiến trình
+        │                                  web — sparse vẫn là no-op khi bị tắt
+        │                                  ⓘ init_postgres() ở đây chỉ tạo pool: wait_for_postgres() và
+        │                                    _create_table() chỉ chạy trên tiến trình web
         └── init_parsing_service()         ParsingService.from_settings() ← chỉ worker cần
                                            toàn bộ chuỗi trên chạy một lần, chốt bằng _initialized
+```
 
+Lưu ý rằng `init_embed_model()` (và `init_sparse_embed_model()` khi bật `SPARSE_EMBEDDING_ENABLED`) thăm dò một server *nằm ngoài* stack này, nên embedding server phải chạy sẵn, nếu không **cả hai tiến trình đều không boot được** — đây là chủ đích, vì một model server không tới được mà không phát hiện sớm thì sẽ chỉ lộ ra dưới dạng một lần ingest thất bại rất lâu sau đó. Hãy khởi động [EmbeddingService](https://github.com/nlp4everyone/EmbeddingService) (`make up dense`, hoặc `make up hybrid` nếu cần cả sparse) trước khi `make up` ở đây; xem [Embedding Server](README_vi.md#embedding-server).
+
+```text
 Client  (OpenAI SDK / HTTP client)
         │  multipart/form-data (upload) hoặc JSON
         ▼
@@ -122,7 +137,12 @@ FastAPI HTTP Gateway
         │               vector_store = VectorStoreFactory.get_store(collection_name=vectorstore_id,
         │                                                           provider=vector_store_type)
         │               pipeline = build_ingestion_pipeline(minio_client, vector_store, embed_fn=get_dense_embedding,
-        │                                                   parsing_service, chunking_strategy, chunk_size, chunk_overlap)
+        │                                                   parsing_service, chunking_strategy, chunk_size, chunk_overlap,
+        │                                                   sparse_embed_fn=get_sparse_embedding
+        │                                                                   if is_sparse_embedding_enabled() else None)
+        │                                                   ↳ worker chỉ đưa sparse embedder khi nó thực sự có một cái;
+        │                                                     việc đưa vào chính là thứ làm collection thành hybrid
+        │                                                     (dense + sparse trên cùng một point)
         │               context  = IngestionContext(vector_store_id, api_key, file_id, file_metadata, ...)
         │               await pipeline.run(context, parent_carrier=trace_context)
         │                                                   ↳ lồng mọi stage vào trace của HTTP request
@@ -154,12 +174,22 @@ FastAPI HTTP Gateway
         │               │             ① embedding_dim = await get_dense_embedding_dim()            │
         │               │                (số chiều đã cache lúc startup — KHÔNG suy ra từ kết quả  │
         │               │                 embed đầu tiên, đó chính là điều cho phép streaming)     │
-        │               │             ② ensure_collection(embedding_dim) MỘT LẦN, từ đầu           │
+        │               │             ② ensure_collection(embedding_dim, with_sparse=…) MỘT LẦN    │
+        │               │                with_sparse = có sparse_embed_fn được truyền vào hay không│
         │               │                → context.metrics["collection_created"]                   │
+        │               │             ②ᵇ use_sparse = want_sparse and await supports_sparse()      │
+        │               │                HỎI COLLECTION chứ không tin config: collection tạo trước │
+        │               │                khi bật sparse thì không có field sparse, Qdrant không    │
+        │               │                thêm được, và upsert sparse vào đó sẽ fail cả batch       │
+        │               │                → context.metrics["sparse_enabled"]                       │
         │               │             ③ chunks → batch cỡ EMBEDDING_UPLOAD_BATCH_SIZE (16),        │
         │               │                asyncio.gather dưới Semaphore(BATCH_CONCURRENCY=4);       │
         │               │                mỗi batch: embed → dựng Document → insert_documents,      │
         │               │                TẤT CẢ bên trong cùng một lượt giữ semaphore              │
+        │               │                use_sparse → dense và sparse được embed cùng lúc trong    │
+        │               │                  một asyncio.gather, nên batch tốn thời gian của server  │
+        │               │                  CHẬM HƠN chứ không phải tổng hai lượt, và cả hai vector │
+        │               │                  cùng nằm trên một point (không cần quét file lần hai)   │
         │               │                → bộ nhớ đỉnh ≈ batch_size × concurrency, không phụ       │
         │               │                  thuộc kích thước file; ghi bắt đầu ngay từ batch đầu    │
         │               │                  chứ không chờ embed xong toàn file                      │
@@ -177,9 +207,9 @@ FastAPI HTTP Gateway
         │
         └──▶ Bước 4: PostgresVectorStore.update(status=COMPLETED, usage_bytes, last_active_at=now())
 
-③ POST /v1/vector_stores/{id}/search   {query, max_num_results, filters, ranking_options}
+③ POST /v1/vector_stores/{id}/search   {query, max_num_results, filters, ranking_options, search_type}
         ▼
-    VectorStoreService.search(vector_store_id, search_request, api_key, search_type=SearchType.DENSE)
+    VectorStoreService.search(vector_store_id, search_request, api_key, search_type=None)
         ├── validate_vector_store_prefix(id)    không có prefix "vs"?  → WrongPrefixVectorstoreException
         ├── PostgresVectorStore.get_by_id(id, api_key)   không tìm thấy? → VectorStoreNotFoundException
         │       provider = record["vector_store_type"]   ← backend mà collection này thực sự nằm trên
@@ -191,49 +221,92 @@ FastAPI HTTP Gateway
         │
         │  query = search_request.query nếu là str, ngược lại search_request.query[0]
         │      ⚠ nếu query là List[str], CHỈ phần tử đầu tiên được dùng — phần còn lại bị bỏ
-        │  ⓘ TODO: ranking_options vẫn chưa có tác dụng — score_threshold và quantization rescore
-        │     chưa được phơi bày trên contract của vector store
+        │
+        ├── score_threshold = ranking_options.score_threshold  (chỉ khi > 0, ngược lại None)
+        │       0.0 là giá trị mặc định của schema, nghĩa là "giữ tất cả", nên KHÔNG truyền xuống —
+        │       backend hiểu None là "không lọc"
+        │       ⓘ trong ranking_options, chỉ score_threshold đi tới được backend; ranker và
+        │         rewrite_query vẫn được nhận rồi bỏ qua
+        │
+        ├── vector_store = VectorStoreFactory.get_store(collection_name=id, provider=provider)
+        │
+        ├── search nào thực sự chạy — phân giải TRƯỚC khi mở span, để trace ghi cái đã chạy
+        │   chứ không phải cái được yêu cầu:
+        │       1. THAM SỐ search_type (chỉ dành cho caller nội bộ) thắng tuyệt đối
+        │       2. nếu không, search_request.requested_search_type — field "auto"|"dense"|"hybrid"
+        │             của request, ánh xạ thành None|DENSE|HYBRID ("auto" là mặc định)
+        │             ⓘ không thuộc schema OpenAI; SDK gốc gửi nó qua
+        │               extra_body={"search_type": "hybrid"}
+        │       3. vẫn None ("auto") → resolve_search_type(vector_store)
+        │             hybrid_unavailable_reason(vector_store) là None → HYBRID, ngược lại DENSE
+        │       4. HYBRID được chỉ định → hybrid_unavailable_reason(vector_store) được kiểm tra lại,
+        │             và nếu có lý do thì raise UnsupportedSearchTypeException (400) thay vì âm thầm
+        │             rơi về dense — caller đã gọi tên hybrid mà nhận kết quả dense sẽ đang đo chất
+        │             lượng retrieval trên một cấu hình họ không nghĩ là mình đang chạy
+        │                 "sparse embedding is not enabled on this server"              (phía server)
+        │                 "this vector store holds no sparse vectors — ingested before …" (phía store)
+        │             hai lý do vì cách sửa khác nhau: bật sparse, so với ingest lại
+        │       (DENSE được chỉ định thì luôn chạy: store có hybrid vẫn search dense được)
         │
         ├── traced_span("POST /v1/vector_stores/{id}/search")   ROOT span
         │       attribute mức trace: user_id=api_key, tags=["vector_store_search"],
         │                            input={query, max_num_results}, metadata={vector_store_id,
         │                            vector_store_type, search_type}
         │
-        │       vector_store = VectorStoreFactory.get_store(collection_name=id, provider=provider)
-        │       pipeline     = build_retrieval_pipeline(vector_store, embed_fn=get_dense_embedding, search_type)
-        │              └── _build_plan(search_type):
-        │                      SearchType.DENSE → [DenseRetriever], PassthroughFusion
-        │                      còn lại          → ValueError("Unsupported search type")
+        │       pipeline     = build_retrieval_pipeline(vector_store, embed_fn=get_dense_embedding,
+        │                                               search_type, sparse_embed_fn)
+        │              └── _build_plan(search_type, vector_store):
+        │                      SearchType.DENSE  → [DenseRetriever],  PassthroughFusion
+        │                      SearchType.HYBRID → [HybridRetriever], PassthroughFusion
+        │                      còn lại           → ValueError("Unsupported search type")
+        │                  HYBRID mà không có sparse_embed_fn → ValueError
+        │                      (không thể chạm tới từ API: bước 4 ở trên đã chặn bằng 400 trước rồi)
         │       context      = RetrievalContext(vector_store_id, api_key, query, limit=max_num_results,
-        │                                       filters=neutral_filter)
+        │                                       filters=neutral_filter, score_threshold=score_threshold)
         │       await pipeline.run(context)      ← không cần parent_carrier: đã nằm trong span của request
         │
         │       ┌── Các stage của RetrievalPipeline (mỗi stage một observation Langfuse) ─────────┐
         │       │                                                                                 │
         │       │  embed_query   embed_fn([query]) → context.dense_vector                         │
+        │       │                HYBRID: + sparse_embed_fn([query]) → context.sparse_vector       │
+        │       │                    (await cùng lúc — tốn thời gian của server chậm hơn)         │
         │       │                                            [ObservationType.EMBEDDING]          │
         │       │                                                                                 │
-        │       │  retrieve      mọi retriever chạy song song (asyncio.gather)                    │
+        │       │  retrieve      mọi retriever chạy song song (asyncio.gather), cùng nhận một     │
+        │       │                RetrievalQuery (text, limit, cả hai vector, filters,             │
+        │       │                score_threshold)                                                 │
         │       │                → context.candidates = {retriever.name: [RetrievedChunk]}        │
-        │       │                DenseRetriever: collection_exists()? KHÔNG → []                  │
+        │       │                Dense/HybridRetriever: collection_exists()? KHÔNG → []           │
         │       │                    (row của store có thể tồn tại trước khi ingestion tạo        │
         │       │                     collection — kết quả rỗng, không phải lỗi)                  │
+        │       │                HybridRetriever: một retrieve() mang cả hai vector;              │
+        │       │                    Qdrant prefetch từng nhánh (limit×2, để một document nằm     │
+        │       │                    ngay ngoài top-k dense vẫn còn cơ hội thắng theo rank) rồi   │
+        │       │                    trộn bằng FusionQuery(RRF) ngay ở server → MỘT danh sách     │
+        │       │                    score_threshold CHỈ gắn vào nhánh prefetch dense — nó là     │
+        │       │                    điểm similarity, đem so với output RRF (~1/(60+rank)) thì    │
+        │       │                    sẽ loại sạch mọi thứ                                         │
+        │       │                    query không có sparse vector? → tự hạ xuống dense thay vì    │
+        │       │                    fail; span ghi lại ở retrieval.hybrid.used_sparse            │
         │       │                                            [ObservationType.RETRIEVER]          │
         │       │                                                                                 │
         │       │  fuse          fusion.fuse(candidates, limit) → context.results                 │
         │       │                PassthroughFusion: >1 danh sách candidate → ValueError           │
-        │       │                    (thêm retriever buộc phải chọn fusion thật)                  │
+        │       │                    (hybrid vẫn trả một danh sách — backend đã trộn rồi)         │
         │       │                emits_span() == False khi không có gì để trộn                    │
         │       │                                                                                 │
         │       └─────────────────────────────────────────────────────────────────────────────────┘
         │
         │       data = convert_retrieved_chunks_to_search_results(context.results)
+        │              content được chuẩn hoá khoảng trắng, score làm tròn 5 chữ số THẬP PHÂN ở ĐÂY và
+        │              chỉ ở đây — ngưỡng lọc phía trên và thứ hạng RRF đều dùng score đầy đủ
         │
         └── trả VectorStoreSearchResponse(search_query, data, has_more = len(data) >= max_num_results)
 
 Worker Shutdown  (TaskIQ WORKER_SHUTDOWN, app/tasks/broker.py)
-        ├── get_postgres_client().close()        đóng pool asyncpg
+        ├── get_postgres_client().close()        đóng pool asyncpg — chỉ khi _initialized
         └── VectorStoreFactory.close_all()       đóng mọi connection vector store đã đăng ký
+                                                 (luôn chạy, kể cả khi startup đã fail)
 ```
 
 ## Tracing đến từ đâu

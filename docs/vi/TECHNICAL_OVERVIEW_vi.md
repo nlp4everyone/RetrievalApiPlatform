@@ -8,7 +8,7 @@ Backend hướng production, hiện thực mô hình tài nguyên **Files** và 
 - Một vector database có thể thay thế, nằm sau `BaseAsyncVectorStore` — mỗi vector store là một collection. Qdrant đã triển khai; Milvus đã nối dây nhưng còn là stub
 - Redis Streams + TaskIQ cho ingestion bất đồng bộ, chạy ngoài vòng đời request/response
 - Hai service parsing bên ngoài: LlamaParse cho `.pdf`, Unstructured API cho mọi định dạng còn lại — cả hai đều trả Markdown
-- Một endpoint dense embedding bên ngoài (vLLM tương thích OpenAI, hoặc Text Embeddings Inference) để tính vector
+- Một endpoint dense embedding bên ngoài (vLLM tương thích OpenAI, hoặc Text Embeddings Inference) để tính vector — [EmbeddingService](https://github.com/nlp4everyone/EmbeddingService) là repo đồng hành đảm nhiệm phần này
 - Langfuse (qua OpenTelemetry OTLP) cho tracing end-to-end xuyên suốt upload/ingestion/search
 
 ---
@@ -133,7 +133,7 @@ Cả hai pipeline dùng chung một bộ máy (`app/pipelines/pipeline.py`), ch�
 | Dựng bởi | `build_ingestion_pipeline(...)` | `build_retrieval_pipeline(..., search_type)` |
 | Trace cha | `trace_context` đi kèm task | span của request hiện tại |
 
-Thêm một bước là thêm một subclass `BaseStage` và một dòng trong factory. Thêm hybrid search là thêm một `BaseRetriever` và một `BaseFusion`, cộng một nhánh trong `_build_plan()` — stage và pipeline giữ nguyên.
+Thêm một bước là thêm một subclass `BaseStage` và một dòng trong factory. Hybrid search đúng y như vậy: một `HybridRetriever` cộng một nhánh trong `_build_plan()`, stage và pipeline giữ nguyên — và không cần chiến lược fusion mới, vì Qdrant trộn nhánh dense với sparse bằng RRF ngay trong chính câu truy vấn.
 
 ---
 
@@ -152,7 +152,7 @@ Mọi route đều có prefix `/v1` và yêu cầu `Authorization: Bearer <FASTA
 | `GET` | `/vector_stores/{vector_store_id}` | Lấy thông tin vector store, gồm `status`/`file_counts` |
 | `POST` | `/vector_stores/{vector_store_id}` | Sửa vector store (kiểu OpenAI: dùng `POST`, không phải `PATCH`) |
 | `DELETE` | `/vector_stores/{vector_store_id}` | Xoá vector store |
-| `POST` | `/vector_stores/{vector_store_id}/search` | Search theo `query`, `max_num_results`, `filters` (`ranking_options` được chấp nhận nhưng chưa áp dụng) |
+| `POST` | `/vector_stores/{vector_store_id}/search` | Search theo `query`, `max_num_results`, `filters`, `search_type` (`auto`\|`dense`\|`hybrid`, phần mở rộng ngoài OpenAI); trong `ranking_options` mới chỉ `score_threshold` được áp dụng |
 
 Cả hai router đều dùng object model của OpenAI (`FileObject`, `VectorStoreObject`, response phân trang `object="list"`), quy ước ID của OpenAI (`file-{8 hex}`, `vs-{32 hex}` — `app/utils/key_generator/key_generator.py`), và error envelope kiểu OpenAI (`{message, type, params, code}`) cho mọi `AppBaseException`.
 
@@ -236,7 +236,7 @@ Ba file compose được `Makefile` gộp lại:
 - **`compose_tracking.yml`** — `minio` (9000 API / 9001 console) — object storage, dù tên file gợi ý khác
 - **`compose_web.yml`** — `web` (uvicorn, 8005; phụ thuộc `postgres` khoẻ mạnh + `worker` đã khởi động) và `worker` (TaskIQ; phụ thuộc `postgres`, `redis`, `minio` khoẻ mạnh)
 
-Bản thân Langfuse **không** nằm trong stack Compose này — cấu hình trỏ tới một instance bên ngoài/self-hosted. Tương tự với embedding server — `DENSE_EMBEDDING_URL` mặc định là `http://172.17.0.1:8100/v1` (máy host, không phải một service Compose).
+Bản thân Langfuse **không** nằm trong stack Compose này — cấu hình trỏ tới một instance bên ngoài/self-hosted. Tương tự với embedding server — `DENSE_EMBEDDING_URL` mặc định là `http://172.17.0.1:8100/v1` (máy host, không phải một service Compose). Giá trị mặc định đó chính là port được publish của [EmbeddingService](https://github.com/nlp4everyone/EmbeddingService), một stack Compose riêng dựa trên vLLM chạy trên máy có GPU (`make up dense`, hoặc `make up hybrid` để có `:8100` dense + `:8101` sparse); việc để nó nằm ngoài stack này chính là thứ cho phép máy GPU và máy chạy API là hai máy khác nhau. Xem [Embedding Server](README_vi.md#embedding-server).
 
 Cả `web` và `worker` chạy từ cùng một image (`docker/Dockerfile`, build multi-stage `uv sync --frozen`, user `appuser` không phải root), chỉ khác lệnh entrypoint (`uvicorn app.app:app` so với `taskiq worker app.tasks.broker:broker`). Mỗi tiến trình chạy độc lập cùng một quy trình bootstrap trong `app/startup.py`, nên cả hai đều có cùng bộ service sống, truy cập qua cùng các getter.
 
