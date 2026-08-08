@@ -41,10 +41,11 @@ def convert_retrieved_chunks_to_search_results(retrieved_chunks: List[RetrievedC
             if line.strip()
         )
 
-        # Create standardized SearchResult object
+        # Create standardized SearchResult object. Rounded only here, at the
+        # response boundary - threshold and fusion rank on the full score.
         documents.append(
             SearchResult(
-                score=chunk.score,
+                score=round(chunk.score, 5),
                 attributes=chunk.metadata,
                 content=[ContentChunk(text=cleaned_content)]
             )
