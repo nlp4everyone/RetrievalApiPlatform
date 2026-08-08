@@ -1,10 +1,11 @@
 """How results from several retrievers are merged into one ranked list.
 
-Only PassthroughFusion exists, because only one retriever runs today. It is
-still a real seam rather than inlined code: adding a keyword/BM25 retriever
-means writing a fusion strategy here (reciprocal rank fusion, weighted score
-fusion, ...) and selecting it in the factory, with no change to the stage that
-calls it.
+Only PassthroughFusion exists, because every search runs one retriever - even
+hybrid, whose reciprocal rank fusion happens inside the vector store, where
+both branches can be merged in a single query. This stays a real seam rather
+than inlined code for the case that changes: a backend that cannot fuse
+server-side, or a strategy the backend does not offer, would be written here
+and selected in the factory, with no change to the stage that calls it.
 """
 from abc import ABC, abstractmethod
 from typing import ClassVar, Dict, List
@@ -61,9 +62,9 @@ class PassthroughFusion(BaseFusion):
         if len(candidates) > 1:
             raise ValueError(
                 f"PassthroughFusion received {len(candidates)} candidate lists "
-                f"({', '.join(sorted(candidates))}). Hybrid search needs a fusion "
-                f"strategy - implement one in app.pipelines.retrieval.fusion and "
-                f"select it in build_retrieval_pipeline()."
+                f"({', '.join(sorted(candidates))}). Several retrievers need a real "
+                f"fusion strategy - implement one in app.pipelines.retrieval.fusion "
+                f"and select it in build_retrieval_pipeline()."
             )
         if not candidates:
             return []

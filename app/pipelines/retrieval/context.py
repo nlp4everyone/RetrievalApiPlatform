@@ -38,9 +38,10 @@ class RetrievalContext:
     score_threshold: Optional[float] = None
 
     # --- Filled in progressively by the stages ---------------------------
-    # Dense query vector (embed stage). A future sparse/BM25 retriever would
-    # add its own representation beside this one rather than replacing it.
+    # Query representations (embed stage). Each retriever consumes the one it
+    # understands; sparse stays None unless the search resolved to hybrid.
     dense_vector: Optional[list[float]] = None
+    sparse_vector: Optional[dict[int, float]] = None
 
     # Hits per retriever, keyed by retriever name (retrieve stage). Hybrid
     # search shows up here as more than one entry; fusion collapses them.

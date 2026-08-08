@@ -20,6 +20,11 @@ from loggers import SystemLogger
 # Other component
 import asyncio
 
+# How many candidates each branch of a hybrid search fetches, as a multiple of
+# the requested limit. Fusion can only reorder the pool it is handed, so each
+# branch has to reach past its own top-k for the other's finds to compete.
+_HYBRID_PREFETCH_MULTIPLIER = 2
+
 
 class AsyncQdrantVectorStore(BaseAsyncVectorStore):
     """
@@ -390,34 +395,106 @@ class AsyncQdrantVectorStore(BaseAsyncVectorStore):
                        query_vectors: Sequence[Embedding],
                        limit: int = 10,
                        filters: Optional[VectorStoreFilter] = None,
-                       score_threshold: Optional[float] = None) -> List[List[RetrievedChunk]]:
+                       score_threshold: Optional[float] = None,
+                       sparse_query_vectors: Optional[Sequence[SparseEmbedding]] = None) -> List[List[RetrievedChunk]]:
         """
         Search for similar vectors in the collection.
 
+        With sparse vectors supplied this becomes a hybrid search: Qdrant runs
+        the dense and the sparse branch as prefetches and fuses them with RRF
+        server-side, so it stays one round-trip and the two incomparable score
+        scales are never mixed - only their ranks are.
+
         Args:
-            query_vectors: One vector per query.
+            query_vectors: One dense vector per query.
             limit: Maximum number of results to return per query.
             filters: Optional backend-neutral metadata filter.
-            score_threshold: Minimum score threshold for results.
+            score_threshold: Minimum score threshold, in dense-score scale.
+            sparse_query_vectors: Optional sparse vector per query, aligned with
+                query_vectors. The collection must hold a sparse field.
 
         Returns:
             List[List[RetrievedChunk]]: Hits per query, in query order.
+
+        Raises:
+            ValueError: If sparse vectors are given but do not match the dense ones in number.
         """
+        if sparse_query_vectors is not None and len(sparse_query_vectors) != len(query_vectors):
+            raise ValueError(f"Number of dense query vectors ({len(query_vectors)}) must equal "
+                             f"number of sparse query vectors ({len(sparse_query_vectors)})")
+
         query_filter = to_qdrant_filter(filters)
 
         # Define task
-        tasks = [self._client.query_points(collection_name=self._collection_name,
-                                           query=vector,
-                                           using=DENSE_MODEL_NAME,
-                                           limit=limit,
-                                           score_threshold=score_threshold,
-                                           query_filter=query_filter,
-                                           with_payload=True,
-                                           with_vectors=False) for vector in query_vectors]
+        tasks = [self._build_query(dense_vector = vector,
+                                   sparse_vector = sparse_query_vectors[i] if sparse_query_vectors else None,
+                                   limit = limit,
+                                   query_filter = query_filter,
+                                   score_threshold = score_threshold)
+                 for i, vector in enumerate(query_vectors)]
         # Handle multiple at once
         responses = await asyncio.gather(*tasks)
         # Normalise into backend-neutral chunks
         return [self._to_retrieved_chunks(response) for response in responses]
+
+    def _build_query(self,
+                     dense_vector: Embedding,
+                     sparse_vector: Optional[SparseEmbedding],
+                     limit: int,
+                     query_filter: Optional[models.Filter],
+                     score_threshold: Optional[float]) -> Any:
+        """
+        Issue one query - dense-only, or dense+sparse fused by Qdrant.
+
+        The hybrid form asks each branch for more than `limit` candidates
+        (_HYBRID_PREFETCH_MULTIPLIER): fusion can only reorder what it is given,
+        so a document ranked just outside the dense top-k but first on the
+        sparse side has to be in the pool to be able to win.
+
+        score_threshold rides on the dense prefetch rather than the fused query,
+        because it is expressed in similarity scale - applied to RRF output it
+        would compare against ~1/(60+rank) values and drop everything.
+
+        Args:
+            dense_vector: Dense query vector.
+            sparse_vector: Optional sparse query vector; None means dense-only.
+            limit: Maximum hits to return.
+            query_filter: Translated metadata filter, or None.
+            score_threshold: Minimum dense score, or None.
+
+        Returns:
+            Awaitable resolving to the Qdrant query response.
+        """
+        if not sparse_vector:
+            return self._client.query_points(collection_name = self._collection_name,
+                                             query = dense_vector,
+                                             using = DENSE_MODEL_NAME,
+                                             limit = limit,
+                                             score_threshold = score_threshold,
+                                             query_filter = query_filter,
+                                             with_payload = True,
+                                             with_vectors = False)
+
+        prefetch_limit = limit * _HYBRID_PREFETCH_MULTIPLIER
+        prefetch = [
+            models.Prefetch(query = dense_vector,
+                            using = DENSE_MODEL_NAME,
+                            limit = prefetch_limit,
+                            filter = query_filter,
+                            score_threshold = score_threshold),
+            models.Prefetch(query = models.SparseVector(indices = list(sparse_vector.keys()),
+                                                        values = list(sparse_vector.values())),
+                            using = SPARSE_MODEL_NAME,
+                            limit = prefetch_limit,
+                            filter = query_filter),
+        ]
+        return self._client.query_points(collection_name = self._collection_name,
+                                         prefetch = prefetch,
+                                         query = models.FusionQuery(fusion = models.Fusion.RRF),
+                                         limit = limit,
+                                         query_filter = query_filter,
+                                         with_payload = True,
+                                         with_vectors = False)
 
     @staticmethod
     def _to_retrieved_chunks(response: models.QueryResponse) -> List[RetrievedChunk]:

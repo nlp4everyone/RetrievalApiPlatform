@@ -2,6 +2,8 @@ from typing import Optional, Union, List, Dict, Any, Literal
 from pydantic import BaseModel, Field
 from enum import Enum
 
+from app.schemas.vector_store.types import SearchType
+
 class ComparisonType(str, Enum):
     EQ = "eq"
     NE = "ne"
@@ -70,3 +72,24 @@ class VectorStoreSearchRequest(BaseModel):
         default=None,
         description="Options for controlling search result ranking."
     )
+    search_type: Literal["auto", "dense", "hybrid"] = Field(
+        default="auto",
+        description="How the query is answered. 'auto' resolves per collection: "
+                    "hybrid when sparse vectors are available for it, dense "
+                    "otherwise. 'hybrid' is rejected when the collection cannot "
+                    "answer it, rather than silently falling back to dense. "
+                    "Not part of the OpenAI schema - the official SDK sends it "
+                    "via extra_body={'search_type': ...}."
+    )
+
+    @property
+    def requested_search_type(self) -> Optional[SearchType]:
+        """The search type this request pins, if any.
+
+        Returns:
+            Optional[SearchType]: The pinned search type, or None for 'auto',
+                which leaves the choice to resolve_search_type()
+        """
+        if self.search_type == "auto":
+            return None
+        return SearchType(self.search_type)

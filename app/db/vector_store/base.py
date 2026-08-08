@@ -145,17 +145,29 @@ class BaseAsyncVectorStore(ABC):
                        query_vectors: Sequence[Embedding],
                        limit: int = 10,
                        filters: Optional[VectorStoreFilter] = None,
-                       score_threshold: Optional[float] = None) -> List[List[RetrievedChunk]]:
+                       score_threshold: Optional[float] = None,
+                       sparse_query_vectors: Optional[Sequence[SparseEmbedding]] = None) -> List[List[RetrievedChunk]]:
         """Run a similarity search for each query vector.
 
+        Passing sparse vectors as well makes this one hybrid search rather than
+        two searches: the backend queries both fields and merges them by rank
+        (reciprocal rank fusion), which it can do in a single round-trip and
+        without the two score scales - cosine and term-weight dot product -
+        ever having to be made comparable.
+
         Args:
-            query_vectors: One vector per query
+            query_vectors: One dense vector per query
             limit: Maximum hits per query
             filters: Optional metadata filter, translated by the backend
-            score_threshold: Drop hits scoring below this value
+            score_threshold: Drop hits scoring below this value. Applies to the
+                dense scores only, since it is expressed in their scale
+            sparse_query_vectors: Optional {token_id: weight} mapping per query,
+                aligned with query_vectors. Requires a collection holding a
+                sparse field (see supports_sparse)
 
         Returns:
-            List[List[RetrievedChunk]]: Hits per query, in query order
+            List[List[RetrievedChunk]]: Hits per query, in query order. Scores
+                are fusion scores, not similarities, when sparse vectors are given
         """
 
     @abstractmethod

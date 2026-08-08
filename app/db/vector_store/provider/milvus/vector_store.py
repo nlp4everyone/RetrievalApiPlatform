@@ -17,6 +17,9 @@ Implementation notes for whoever picks this up:
 * ``supports_sparse`` must report what the *live* collection holds, not what
   config asks for: sparse embedding can be enabled after a collection was
   created, and ingestion skips writing sparse vectors when it reads False.
+* ``retrieve`` with ``sparse_query_vectors`` must fuse the dense and sparse
+  branches by rank inside the backend, as the Qdrant store does with an RRF
+  prefetch - the caller gets one ranked list, never two to merge itself.
 """
 from typing import ClassVar, List, Optional, Sequence
 
@@ -71,7 +74,8 @@ class AsyncMilvusVectorStore(BaseAsyncVectorStore):
                        query_vectors: Sequence[Embedding],
                        limit: int = 10,
                        filters: Optional[VectorStoreFilter] = None,
-                       score_threshold: Optional[float] = None) -> List[List[RetrievedChunk]]:
+                       score_threshold: Optional[float] = None,
+                       sparse_query_vectors: Optional[Sequence[SparseEmbedding]] = None) -> List[List[RetrievedChunk]]:
         raise NotImplementedError(_NOT_IMPLEMENTED)
 
     async def delete_collection(self) -> bool:

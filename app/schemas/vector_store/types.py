@@ -13,7 +13,12 @@ class SearchType(StrEnum):
     throws half the results away. Naming the whole shape keeps the invalid
     combinations unrepresentable.
 
-    Adding a keyword/BM25 retriever would add KEYWORD (BM25 alone) and HYBRID
-    (dense + BM25 merged by a real fusion strategy).
+    A caller may pin either value on a search request, but does not have to:
+    left unset, the search type is resolved per search from what the target
+    collection actually holds (see resolve_search_type), since a store ingested
+    before sparse embedding was enabled has no sparse field to search. Pinning
+    HYBRID on such a store is refused rather than quietly answered with dense
+    results (see hybrid_unavailable_reason).
     """
     DENSE = "dense"
+    HYBRID = "hybrid"

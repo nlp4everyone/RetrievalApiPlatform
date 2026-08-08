@@ -1,17 +1,17 @@
 """The contract every retriever implements.
 
 A retriever turns one query into a ranked list of chunks. This is the seam
-hybrid search would be added at: today the pipeline runs a single dense
-retriever, and a keyword/BM25 backend would be a second implementation of this
-interface registered alongside it - no change to the stages or the pipeline.
+hybrid search is added at: HybridRetriever is a second implementation the
+factory swaps in, so the stages and the pipeline never learn that a search
+consulted two representations instead of one.
 
-RetrievalQuery deliberately carries the raw query text as well as the dense
-vector, so a retriever that does its own tokenising has what it needs without
-the pipeline knowing which representation each retriever consumes.
+RetrievalQuery carries every representation of the query at once (raw text,
+dense vector, sparse vector), so each retriever picks the one it understands
+without the pipeline knowing which that is.
 """
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, ClassVar, List, Optional
+from typing import Any, ClassVar, Dict, List, Optional
 
 from app.db.vector_store.types import RetrievedChunk, VectorStoreFilter
 
@@ -23,6 +23,7 @@ class RetrievalQuery:
     text: str
     limit: int
     dense_vector: Optional[List[float]] = None
+    sparse_vector: Optional[Dict[int, float]] = None
     filters: Optional[VectorStoreFilter] = None
     score_threshold: Optional[float] = None
 

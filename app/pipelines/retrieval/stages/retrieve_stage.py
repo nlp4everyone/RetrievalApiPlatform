@@ -37,6 +37,7 @@ class RetrieveStage(BaseRetrievalStage):
         query = RetrievalQuery(text = context.query,
                                limit = context.limit,
                                dense_vector = context.dense_vector,
+                               sparse_vector = context.sparse_vector,
                                filters = context.filters,
                                score_threshold = context.score_threshold)
 
