@@ -1,6 +1,14 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from typing import Optional
+
+
+# Settings each backend cannot connect without. Doubles as the allowed set for
+# VECTOR_STORE_PROVIDER, so adding a backend is one edit.
+_VECTOR_STORE_REQUIRED_SETTINGS: dict[str, tuple[str, ...]] = {
+    "qdrant": ("QDRANT_URL", "QDRANT_API_KEY"),
+    "milvus": ("MILVUS_URI",),
+}
 
 
 class Settings(BaseSettings):
@@ -72,17 +80,18 @@ class Settings(BaseSettings):
     MINIO_CONSOLE_PORT: int = 9001
 
     # Vector store provider selection: "qdrant" or "milvus" (milvus not implemented yet).
-    # Only affects newly created vector stores - existing ones are read back with
-    # the provider recorded on their database row.
+    # Startup connects exactly this backend, so collections whose row names a
+    # different provider fail loudly rather than hitting the wrong backend.
     VECTOR_STORE_PROVIDER: str = "qdrant"
 
+    # Only the selected backend's block is required - see validate_vector_store_credentials.
     # Qdrant Config
-    QDRANT_URL: str = Field(..., description="Qdrant server URL")
-    QDRANT_API_KEY: str = Field(..., description="Qdrant API key")
+    QDRANT_URL: Optional[str] = Field(None, description="Qdrant server URL; required when VECTOR_STORE_PROVIDER=qdrant")
+    QDRANT_API_KEY: Optional[str] = Field(None, description="Qdrant API key; required when VECTOR_STORE_PROVIDER=qdrant")
     QDRANT_PORT: int = 6333
 
     # Milvus Config (unused until the Milvus backend is implemented)
-    MILVUS_URI: str = "http://localhost:19530"
+    MILVUS_URI: Optional[str] = Field("http://localhost:19530", description="Milvus server URI; required when VECTOR_STORE_PROVIDER=milvus")
     MILVUS_TOKEN: Optional[str] = Field(None, description="Milvus auth token")
 
     # Langfuse Config (tracing, exported via OpenTelemetry OTLP)
@@ -113,8 +122,9 @@ class Settings(BaseSettings):
             raise ValueError(f'Port must be positive, got: {v}')
         return v
 
+    # QDRANT_API_KEY is absent on purpose: required only when Qdrant is selected.
     @field_validator('SERVING_API_KEY', 'FASTAPI_API_KEY', 'POSTGRES_PASSWORD',
-                    'MINIO_ROOT_PASSWORD', 'QDRANT_API_KEY', 'LANGFUSE_SECRET_KEY')
+                    'MINIO_ROOT_PASSWORD', 'LANGFUSE_SECRET_KEY')
     @classmethod
     def validate_required_secrets(cls, v: str) -> str:
         """Validate that required secrets are not empty."""
@@ -176,7 +186,7 @@ class Settings(BaseSettings):
     @classmethod
     def validate_vector_store_provider(cls, v: str) -> str:
         """Validate that the vector store provider is one this app knows how to build."""
-        allowed = {"qdrant", "milvus"}
+        allowed = set(_VECTOR_STORE_REQUIRED_SETTINGS)
         normalized = v.lower()
         if normalized not in allowed:
             raise ValueError(f'VECTOR_STORE_PROVIDER must be one of {sorted(allowed)}, got: {v}')
@@ -191,6 +201,23 @@ class Settings(BaseSettings):
         if normalized not in allowed:
             raise ValueError(f'LOG_FORMAT must be one of {sorted(allowed)}, got: {v}')
         return normalized
+
+    # Depends on another field, so it cannot be a field_validator. A Milvus
+    # deployment must not have to invent Qdrant credentials, and vice versa.
+    @model_validator(mode='after')
+    def validate_vector_store_credentials(self) -> 'Settings':
+        """Require the connection settings of the selected vector store backend.
+
+        Raises:
+            ValueError: If the selected backend is missing a setting it cannot
+                connect without
+        """
+        required = _VECTOR_STORE_REQUIRED_SETTINGS[self.VECTOR_STORE_PROVIDER]
+        missing = [name for name in required if not (getattr(self, name) or "").strip()]
+        if missing:
+            raise ValueError(f'VECTOR_STORE_PROVIDER={self.VECTOR_STORE_PROVIDER} requires '
+                             f'{", ".join(missing)} to be set')
+        return self
 
 
 # Global settings instance
