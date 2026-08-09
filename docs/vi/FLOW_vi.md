@@ -280,7 +280,7 @@ FastAPI HTTP Gateway
         │       │                    (row của store có thể tồn tại trước khi ingestion tạo        │
         │       │                     collection — kết quả rỗng, không phải lỗi)                  │
         │       │                HybridRetriever: một retrieve() mang cả hai vector;              │
-        │       │                    Qdrant prefetch từng nhánh (limit×2, để một document nằm     │
+        │       │                    Qdrant prefetch từng nhánh (limit×N, để một document nằm     │
         │       │                    ngay ngoài top-k dense vẫn còn cơ hội thắng theo rank) rồi   │
         │       │                    trộn bằng FusionQuery(RRF) ngay ở server → MỘT danh sách     │
         │       │                    score_threshold CHỈ gắn vào nhánh prefetch dense — nó là     │

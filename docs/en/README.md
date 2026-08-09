@@ -36,16 +36,82 @@ An OpenAI-API-compatible **Retrieval Engine** for Retrieval-Augmented Generation
 ```bash
 git clone -b retrieval/naive-rag https://github.com/nlp4everyone/RetrievalApiPlatform.git
 cd RetrievalApiPlatform
+```
+
+**1. Start Qdrant first.** It is an external service, not part of `make up`, and the app has nothing to connect to without it — see [Vector Store (Qdrant)](#vector-store-qdrant) for the details:
+
+```bash
+docker run -d --name qdrant_db --restart always \
+  -p 6333:6333 -p 6334:6334 \
+  -e QDRANT__SERVICE__API_KEY=change-me \
+  -v qdrant_data:/qdrant/storage \
+  qdrant/qdrant:v1.19
+
+curl -s http://localhost:6333/healthz    # → healthz check passed
+```
+
+**2. Then configure and start the app stack:**
+
+```bash
 cp .env.sample .env
 # edit .env: API keys, Postgres/MinIO/Qdrant/Langfuse credentials, embedding endpoint,
 #            parsing keys (LLAMAPARSE_API_KEY, UNSTRUCTURED_API_KEY/UNSTRUCTURED_API_URL),
 #            and the provider switches (EMBEDDING_PROVIDER, CHUNKING_PROVIDER,
 #            PDF_PARSER_PROVIDER, VECTOR_STORE_PROVIDER)
-make up      # builds and starts postgres, redis, qdrant, minio, worker, web
+# QDRANT_URL=http://172.17.0.1:6333 and QDRANT_API_KEY must match the key set in step 1
+make up      # builds and starts postgres, redis, minio, worker, web
 make logs    # tail the web service
 ```
 
-The embedding endpoint has to be reachable *before* `make up` — startup probes it and fails the boot if it isn't. See [Embedding Server](#embedding-server) below.
+The embedding endpoint has to be reachable *before* `make up` too — startup probes it and fails the boot if it isn't. See [Embedding Server](#embedding-server) below.
+
+<br />
+
+## Vector Store (Qdrant)
+
+Qdrant is **not** part of this stack. It is an external service the app addresses by URL — `QDRANT_URL` + `QDRANT_API_KEY`, nothing else — so it has its own lifecycle: `make up` and `make down` never touch it, and a redeploy of the app never drops the index. Run it on this host, on another host, or use Qdrant Cloud.
+
+Single container, no Compose file needed:
+
+```bash
+docker run -d --name qdrant_db --restart always \
+  -p 6333:6333 -p 6334:6334 \
+  -e QDRANT__SERVICE__API_KEY=change-me \
+  -v qdrant_data:/qdrant/storage \
+  qdrant/qdrant:v1.19
+```
+
+| Flag | Why |
+|---|---|
+| `-p 6333:6333` | HTTP API — the port in `QDRANT_URL` |
+| `-p 6334:6334` | gRPC API — optional, only if you talk to Qdrant directly |
+| `-e QDRANT__SERVICE__API_KEY` | Enables auth. Must match the app's `QDRANT_API_KEY`; without it Qdrant is wide open |
+| `-v qdrant_data:/qdrant/storage` | Named volume — collections survive `docker rm` and image upgrades |
+
+Managing it:
+
+```bash
+curl -s http://localhost:6333/healthz    # → healthz check passed (no API key needed)
+docker logs -f qdrant_db
+docker stop qdrant_db && docker start qdrant_db
+docker rm -f qdrant_db                   # keeps the qdrant_data volume, and the collections in it
+```
+
+Then point the app's `.env` at it:
+
+| Where Qdrant runs | `QDRANT_URL` in the app's `.env` |
+|---|---|
+| Same host, app in Compose | `http://172.17.0.1:6333` (Docker bridge gateway — **not** `localhost`, which is the app container itself) |
+| Another host | `http://<host>:6333` |
+| Qdrant Cloud | the cluster URL, `https://` |
+
+Notes:
+
+- **Version floor: `v1.17` or newer.** Plain RRF fusion works on anything from `v1.10`, but **weighted RRF** — per-branch weights on the fusion query, so the dense branch can count for more than the sparse one — landed in Qdrant `v1.17.0`. `v1.19` is the current stable release and what the pinned `qdrant-client` is matched to; running an older server means falling back to unweighted RRF
+- **`QDRANT_API_KEY` must be identical on both sides.** The app's value is checked at startup, so a mismatch fails the boot rather than the first search
+- **Publishing 6333 binds all interfaces.** The API key is the only thing in front of it — firewall the port, or bind to a private address (`-p 10.0.0.5:6333:6333`), before running this anywhere public
+- **Upgrading** is `docker rm -f qdrant_db` then the same `docker run` with a newer tag; the named volume carries the data across
+- **Swapping to Milvus** means running that instead and setting `VECTOR_STORE_PROVIDER=milvus` in the app's `.env` — the app's Compose files do not change
 
 <br />
 

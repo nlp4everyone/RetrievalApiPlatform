@@ -36,16 +36,82 @@ Một **Retrieval Engine** tương thích OpenAI API dành cho các hệ thống
 ```bash
 git clone -b retrieval/naive-rag https://github.com/nlp4everyone/RetrievalApiPlatform.git
 cd RetrievalApiPlatform
+```
+
+**1. Khởi động Qdrant trước.** Nó là service bên ngoài, không nằm trong `make up`, và nếu chưa có nó thì ứng dụng không có gì để kết nối tới — xem [Vector Store (Qdrant)](#vector-store-qdrant) để biết chi tiết:
+
+```bash
+docker run -d --name qdrant_db --restart always \
+  -p 6333:6333 -p 6334:6334 \
+  -e QDRANT__SERVICE__API_KEY=change-me \
+  -v qdrant_data:/qdrant/storage \
+  qdrant/qdrant:v1.19
+
+curl -s http://localhost:6333/healthz    # → healthz check passed
+```
+
+**2. Sau đó cấu hình và khởi động stack ứng dụng:**
+
+```bash
 cp .env.sample .env
 # chỉnh .env: API key, credential Postgres/MinIO/Qdrant/Langfuse, endpoint embedding,
 #             key parsing (LLAMAPARSE_API_KEY, UNSTRUCTURED_API_KEY/UNSTRUCTURED_API_URL),
 #             và các công tắc provider (EMBEDDING_PROVIDER, CHUNKING_PROVIDER,
 #             PDF_PARSER_PROVIDER, VECTOR_STORE_PROVIDER)
-make up      # build và khởi động postgres, redis, qdrant, minio, worker, web
+# QDRANT_URL=http://172.17.0.1:6333 và QDRANT_API_KEY phải trùng với key đặt ở bước 1
+make up      # build và khởi động postgres, redis, minio, worker, web
 make logs    # xem log của web service
 ```
 
-Endpoint embedding phải sẵn sàng *trước* khi chạy `make up` — quá trình startup có thăm dò nó và sẽ fail nếu không kết nối được. Xem [Embedding Server](#embedding-server) bên dưới.
+Endpoint embedding cũng phải sẵn sàng *trước* khi chạy `make up` — quá trình startup có thăm dò nó và sẽ fail nếu không kết nối được. Xem [Embedding Server](#embedding-server) bên dưới.
+
+<br />
+
+## Vector Store (Qdrant)
+
+Qdrant **không** thuộc stack này. Nó là service bên ngoài mà ứng dụng chỉ biết qua URL — `QDRANT_URL` + `QDRANT_API_KEY`, không gì khác — nên nó có vòng đời riêng: `make up` và `make down` không bao giờ đụng tới nó, và việc redeploy ứng dụng không làm mất index. Chạy nó trên chính máy này, trên máy khác, hoặc dùng Qdrant Cloud.
+
+Chỉ một container, không cần file Compose:
+
+```bash
+docker run -d --name qdrant_db --restart always \
+  -p 6333:6333 -p 6334:6334 \
+  -e QDRANT__SERVICE__API_KEY=change-me \
+  -v qdrant_data:/qdrant/storage \
+  qdrant/qdrant:v1.19
+```
+
+| Tham số | Vì sao |
+|---|---|
+| `-p 6333:6333` | HTTP API — chính là port trong `QDRANT_URL` |
+| `-p 6334:6334` | gRPC API — không bắt buộc, chỉ cần khi bạn gọi thẳng Qdrant |
+| `-e QDRANT__SERVICE__API_KEY` | Bật xác thực. Phải trùng `QDRANT_API_KEY` của ứng dụng; không có nó thì Qdrant mở toang |
+| `-v qdrant_data:/qdrant/storage` | Named volume — collection sống sót qua `docker rm` và qua các lần nâng image |
+
+Vận hành:
+
+```bash
+curl -s http://localhost:6333/healthz    # → healthz check passed (không cần API key)
+docker logs -f qdrant_db
+docker stop qdrant_db && docker start qdrant_db
+docker rm -f qdrant_db                   # vẫn giữ volume qdrant_data, và các collection trong đó
+```
+
+Sau đó trỏ `.env` của ứng dụng sang nó:
+
+| Qdrant chạy ở đâu | `QDRANT_URL` trong `.env` của ứng dụng |
+|---|---|
+| Cùng host, ứng dụng chạy trong Compose | `http://172.17.0.1:6333` (gateway của Docker bridge — **không** phải `localhost`, vì đó là chính container ứng dụng) |
+| Host khác | `http://<host>:6333` |
+| Qdrant Cloud | URL của cluster, `https://` |
+
+Lưu ý:
+
+- **Version tối thiểu: `v1.17` trở lên.** RRF thường thì bản `v1.10` đã có, nhưng **weighted RRF** — gán trọng số cho từng nhánh trong fusion query, để nhánh dense có thể nặng ký hơn nhánh sparse — chỉ có từ Qdrant `v1.17.0`. `v1.19` là bản stable hiện tại và cũng là bản mà `qdrant-client` đang pin khớp theo; chạy server cũ hơn nghĩa là quay về RRF không trọng số
+- **`QDRANT_API_KEY` phải giống hệt nhau ở cả hai phía.** Giá trị phía ứng dụng được kiểm tra lúc startup, nên lệch key sẽ fail ngay lúc boot chứ không phải tới lần search đầu tiên
+- **Publish port 6333 là bind lên mọi interface.** API key là thứ duy nhất chắn phía trước — hãy firewall port đó, hoặc bind vào địa chỉ nội bộ (`-p 10.0.0.5:6333:6333`), trước khi chạy ở môi trường công khai
+- **Nâng cấp** là `docker rm -f qdrant_db` rồi chạy lại đúng lệnh `docker run` với tag mới hơn; named volume mang dữ liệu đi theo
+- **Đổi sang Milvus** nghĩa là chạy Milvus thay cho cái này và đặt `VECTOR_STORE_PROVIDER=milvus` trong `.env` của ứng dụng — các file Compose của ứng dụng không đổi
 
 <br />
 

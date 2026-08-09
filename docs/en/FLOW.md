@@ -285,7 +285,7 @@ FastAPI HTTP Gateway
         │       │                    (store row can exist before ingestion created the         │
         │       │                     collection — empty result, not an error)                 │
         │       │                HybridRetriever: one retrieve() carrying both vectors;        │
-        │       │                    Qdrant prefetches each branch (limit×2, so a doc just     │
+        │       │                    Qdrant prefetches each branch (limit×N, so a doc just     │
         │       │                    outside the dense top-k can still win on rank) and        │
         │       │                    merges them with FusionQuery(RRF) server-side → ONE list  │
         │       │                    score_threshold rides on the DENSE prefetch only — it is  │

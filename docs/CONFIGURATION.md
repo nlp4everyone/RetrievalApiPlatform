@@ -5,7 +5,9 @@ Config is loaded from two sources, merged per-domain in `app/core/config/`:
 1. **Environment variables / `.env`** (`app/core/config/settings.py`, pydantic-settings) — credentials, hosts, ports, and provider selection. Not version-controlled (`.env` is git-ignored; `.env.sample` documents the shape).
 2. **`config/config.yaml`** (`YamlConfigLoader`, dot-notation `get(key, default)`) — stable, version-controlled tunables.
 
-Required settings (no default — startup fails fast if missing/empty): `SERVING_API_KEY`, `FASTAPI_API_KEY`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `POSTGRES_HOST`, `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD`, `MINIO_ENDPOINT_URL`, `QDRANT_URL`, `QDRANT_API_KEY`, `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_BASE_URL`.
+Required settings (no default — startup fails fast if missing/empty): `SERVING_API_KEY`, `FASTAPI_API_KEY`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `POSTGRES_HOST`, `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD`, `MINIO_ENDPOINT_URL`, `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_BASE_URL`.
+
+Conditionally required by `validate_vector_store_credentials` — only for the selected `VECTOR_STORE_PROVIDER`: `QDRANT_URL` + `QDRANT_API_KEY` for `qdrant`, `MILVUS_URI` for `milvus`.
 
 ## Provider selection
 
@@ -17,7 +19,7 @@ Four variables pick which backend serves each swappable capability. Each is vali
 | `SPARSE_EMBEDDING_PROVIDER` | `vllm` | `vllm` | `VLLMSparseEmbeddingProvider` (token ids from vLLM's `/tokenize`, token weights from `/pooling`, on a BGE-M3 style model). Only built when `SPARSE_EMBEDDING_ENABLED` is true |
 | `CHUNKING_PROVIDER` | `chonkie` | `chonkie`, `langchain` | `ChonkieProvider` or `LangchainProvider` (`langchain_text_splitters`) |
 | `PDF_PARSER_PROVIDER` | `llamaparse` | `llamaparse` | PDF backend. Every other format (`.txt`, `.md`, `.docx`, `.doc`, images) always goes through the Unstructured API, so only PDF has a backend worth choosing |
-| `VECTOR_STORE_PROVIDER` | `qdrant` | `qdrant`, `milvus` | Backend **new** vector stores are created on. Existing stores are read back using the provider recorded on their database row, so changing this doesn't strand old collections. Milvus is wired but every method raises `NotImplementedError` |
+| `VECTOR_STORE_PROVIDER` | `qdrant` | `qdrant`, `milvus` | Backend **new** vector stores are created on. Startup connects only this one, so switching strands collections on the previous backend — their row still names the old provider and `get_connection` raises `RuntimeError` instead of querying the wrong backend. Milvus is wired but every method raises `NotImplementedError` |
 
 ## Environment variables (`.env`)
 
@@ -28,7 +30,6 @@ Four variables pick which backend serves each swappable capability. Each is vali
 | `POSTGRES_PORT` | 5432 | Postgres port |
 | `MINIO_API_PORT` | 9000 | MinIO S3 API port |
 | `MINIO_CONSOLE_PORT` | 9001 | MinIO web console port |
-| `QDRANT_PORT` | 6333 | Qdrant HTTP port (6334 gRPC is fixed in compose, not env-configurable) |
 | `SERVING_API_KEY` | — (required) | Required and validated non-empty at startup, but not read by any caller — the key actually sent to the embedding server is `DENSE_EMBEDDING_API_KEY` / `SPARSE_EMBEDDING_API_KEY` |
 | `FASTAPI_API_KEY` | — (required) | Bearer token required on every `/v1/*` request (`Authorization: Bearer <value>`) |
 | `UNDATASIO_API_KEY` | — | Unused — leftover from the removed UndatasIO parser |
@@ -52,9 +53,9 @@ Four variables pick which backend serves each swappable capability. Each is vali
 | `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` | — (required) | MinIO credentials |
 | `MINIO_ENDPOINT_URL` | — (required) | MinIO endpoint, e.g. `http://minio:9000` |
 | `VECTOR_STORE_PROVIDER` | `qdrant` | Vector database backend — see [Provider selection](#provider-selection) |
-| `QDRANT_URL` | — (required) | Qdrant endpoint, e.g. `http://qdrant:6333` |
-| `QDRANT_API_KEY` | — (required) | Qdrant API key |
-| `MILVUS_URI` | `http://localhost:19530` | Milvus endpoint; unused until the Milvus backend is implemented |
+| `QDRANT_URL` | — (required when `VECTOR_STORE_PROVIDER=qdrant`) | Qdrant endpoint of an external service, e.g. `http://172.17.0.1:6333` (Docker bridge gateway) when it runs on the same host, or the cluster URL for Qdrant Cloud. Run one with [Vector Store (Qdrant)](en/README.md#vector-store-qdrant) — `v1.17`+ (weighted RRF), `v1.19` matched to the pinned client |
+| `QDRANT_API_KEY` | — (required when `VECTOR_STORE_PROVIDER=qdrant`) | Qdrant API key |
+| `MILVUS_URI` | `http://localhost:19530` (required non-empty when `VECTOR_STORE_PROVIDER=milvus`) | Milvus endpoint; unused until the Milvus backend is implemented |
 | `MILVUS_TOKEN` | — | Milvus auth token; unused until the Milvus backend is implemented |
 | `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | — (required) | Langfuse OTLP Basic-Auth credentials |
 | `LANGFUSE_BASE_URL` | — (required) | Self-hosted (or cloud) Langfuse base URL; traces post to `{this}/api/public/otel/v1/traces` |
@@ -90,6 +91,8 @@ None of the embedding settings above start a model server — they only say wher
 | `embedding.batch_concurrency` | 4 | Batches in flight at once (embed + upsert combined) — peak memory stays roughly `upload_batch_size * batch_concurrency`, not file-sized |
 | `ingestion.cpu_thread_pool_size` | 4 | Threads for CPU-bound chunking; sized to cores rather than to the I/O pool, since oversubscribing CPU work only adds context switching |
 | `ingestion.download_concurrency` | 4 | Max files a worker process downloads from MinIO at once, so a burst of ingestion jobs can't exhaust the I/O pool |
+| `retrieval.hybrid_prefetch_multiplier` | 2 | Candidates each hybrid branch fetches = this × `max_num_results`. RRF can only reorder the pool it is handed, so a document ranked just outside both top-k lists needs the extra depth to compete; `1` effectively disables the cross-branch consensus hybrid exists for. Must be an integer ≥ 1 — anything else raises at import. Recorded per search as the `retrieval.hybrid.prefetch_multiplier` span attribute |
+| `retrieval.rrf_k` | empty | RRF `k`. Larger rewards documents found by *both* branches, smaller rewards one strong single-branch hit. Empty leaves Qdrant's default (60) and sends `FusionQuery(fusion=RRF)` — the exact request used before this was tunable; a value switches to `RrfQuery(rrf=Rrf(k=…))`, so only an opted-in deployment meets the newer request shape. Must be an integer ≥ 1 or empty. Recorded as `retrieval.hybrid.rrf_k`, absent when left empty. Tune it **after** `hybrid_prefetch_multiplier` — both control how much cross-branch agreement is worth, from different angles |
 
 Override the YAML file location via the `SETTINGS_YAML` mechanism in `YamlConfigLoader`, or edit `config/config.yaml` directly (it's mounted/copied into the image and version-controlled).
 
@@ -109,4 +112,5 @@ Defined in `app/core/config/storage.py`, used by `app/api/dependencies.py`:
 | `REDIS_URL` | `app/tasks/broker.py` — both the broker and the result backend |
 | `EMBEDDING_UPLOAD_BATCH_SIZE` / `EMBEDDING_BATCH_CONCURRENCY` | `build_ingestion_pipeline()` → `EmbedAndIndexStage` |
 | `IO_THREAD_POOL_SIZE` / `CPU_THREAD_POOL_SIZE` / `DOWNLOAD_CONCURRENCY` | `init_io_executor()` / `init_cpu_executor()` / `init_download_semaphore()` in `app/startup.py`; read back by `MinioFileStore`, the chunking providers, and `DownloadStage` |
+| `HYBRID_PREFETCH_MULTIPLIER` / `RRF_K` | `AsyncQdrantVectorStore.__init__` defaults — overridable per instance, e.g. to sweep values in an eval harness without touching the API |
 | Langfuse credentials | `init_tracing()`, called independently by the web app and the worker |

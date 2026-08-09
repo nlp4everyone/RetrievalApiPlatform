@@ -232,9 +232,15 @@ examples/file_upload_example.py  # end-to-end demo using the openai SDK
 
 Three compose files combined by the `Makefile`:
 
-- **`compose_db.yml`** — `postgres` (5432), `redis` (6379), `qdrant` (6333 HTTP / 6334 gRPC)
+- **`compose_db.yml`** — `postgres` (5432), `redis` (6379)
 - **`compose_tracking.yml`** — `minio` (9000 API / 9001 console) — object storage, despite the filename
 - **`compose_web.yml`** — `web` (uvicorn, 8005; depends on `postgres` healthy + `worker` started) and `worker` (TaskIQ; depends on `postgres`, `redis`, `minio` healthy)
+
+The **vector store is not in this stack**. Like the embedding server, it is an external service the app addresses by URL — `QDRANT_URL` + `QDRANT_API_KEY`, nothing else. It can run on this host, another host, or Qdrant Cloud; on the same host it is one `docker run` (see [Vector Store (Qdrant)](README.md#vector-store-qdrant)), sharing no network, volume or lifecycle with the app stack. `make up` and `make down` do not touch it, so a redeploy never drops the index.
+
+That is what makes the backend swappable in practice: replacing Qdrant with Milvus is a new external container plus `VECTOR_STORE_PROVIDER=milvus`, with no change to the app's Compose files.
+
+Because there is no `depends_on` reaching across, the vector store must already be up when `web`/`worker` boot — `init_vector_store()` connects during startup and fails the boot if it cannot, the same contract as the embedding server.
 
 Langfuse itself is **not** part of this Compose stack — configuration points at an external/self-hosted instance. Same for the embedding server — `DENSE_EMBEDDING_URL` defaults to `http://172.17.0.1:8100/v1` (the host machine, not a Compose service). That default is the published port of [EmbeddingService](https://github.com/nlp4everyone/EmbeddingService), a separate vLLM-based Compose stack run on the GPU host (`make up dense`, or `make up hybrid` for `:8100` dense + `:8101` sparse); keeping it out of this stack is what lets the GPU box and the API box be different machines. See [Embedding Server](README.md#embedding-server).
 

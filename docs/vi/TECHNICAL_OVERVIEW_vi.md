@@ -232,9 +232,15 @@ examples/file_upload_example.py  # demo end-to-end dùng SDK openai
 
 Ba file compose được `Makefile` gộp lại:
 
-- **`compose_db.yml`** — `postgres` (5432), `redis` (6379), `qdrant` (6333 HTTP / 6334 gRPC)
+- **`compose_db.yml`** — `postgres` (5432), `redis` (6379)
 - **`compose_tracking.yml`** — `minio` (9000 API / 9001 console) — object storage, dù tên file gợi ý khác
 - **`compose_web.yml`** — `web` (uvicorn, 8005; phụ thuộc `postgres` khoẻ mạnh + `worker` đã khởi động) và `worker` (TaskIQ; phụ thuộc `postgres`, `redis`, `minio` khoẻ mạnh)
+
+**Vector store không nằm trong stack này.** Giống embedding server, nó là service bên ngoài mà ứng dụng chỉ biết qua URL — `QDRANT_URL` + `QDRANT_API_KEY`, không gì khác. Nó có thể chạy trên cùng host, host khác, hoặc Qdrant Cloud; trên cùng host thì chỉ là một lệnh `docker run` (xem [Vector Store (Qdrant)](README_vi.md#vector-store-qdrant)), không chia sẻ network, volume hay vòng đời nào với stack ứng dụng. `make up` và `make down` không đụng tới nó, nên redeploy không bao giờ làm mất index.
+
+Đó chính là thứ khiến việc thay backend khả thi trên thực tế: đổi Qdrant sang Milvus là dựng một container bên ngoài mới cộng với `VECTOR_STORE_PROVIDER=milvus`, không phải sửa file Compose nào của ứng dụng.
+
+Vì không có `depends_on` vươn qua được, vector store phải sẵn sàng trước khi `web`/`worker` boot — `init_vector_store()` kết nối trong lúc startup và fail nếu không tới được, đúng cùng một giao kèo như embedding server.
 
 Bản thân Langfuse **không** nằm trong stack Compose này — cấu hình trỏ tới một instance bên ngoài/self-hosted. Tương tự với embedding server — `DENSE_EMBEDDING_URL` mặc định là `http://172.17.0.1:8100/v1` (máy host, không phải một service Compose). Giá trị mặc định đó chính là port được publish của [EmbeddingService](https://github.com/nlp4everyone/EmbeddingService), một stack Compose riêng dựa trên vLLM chạy trên máy có GPU (`make up dense`, hoặc `make up hybrid` để có `:8100` dense + `:8101` sparse); việc để nó nằm ngoài stack này chính là thứ cho phép máy GPU và máy chạy API là hai máy khác nhau. Xem [Embedding Server](README_vi.md#embedding-server).
 
