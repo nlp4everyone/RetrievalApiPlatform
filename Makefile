@@ -1,3 +1,5 @@
+# The vector store and the embedding server are external services, each with its
+# own lifecycle - see the Vector Store and Embedding Server sections of the README.
 COMPOSE = sudo docker compose --env-file .env -f docker/compose_db.yml -f docker/compose_web.yml -f docker/compose_tracking.yml
 
 .PHONY: up down logs ps restart

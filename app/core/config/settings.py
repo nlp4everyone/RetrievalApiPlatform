@@ -88,7 +88,6 @@ class Settings(BaseSettings):
     # Qdrant Config
     QDRANT_URL: Optional[str] = Field(None, description="Qdrant server URL; required when VECTOR_STORE_PROVIDER=qdrant")
     QDRANT_API_KEY: Optional[str] = Field(None, description="Qdrant API key; required when VECTOR_STORE_PROVIDER=qdrant")
-    QDRANT_PORT: int = 6333
 
     # Milvus Config (unused until the Milvus backend is implemented)
     MILVUS_URI: Optional[str] = Field("http://localhost:19530", description="Milvus server URI; required when VECTOR_STORE_PROVIDER=milvus")
@@ -114,7 +113,7 @@ class Settings(BaseSettings):
         return v
 
     @field_validator('NUM_WORKERS', 'POSTGRES_PORT', 'MINIO_API_PORT', 'MINIO_CONSOLE_PORT',
-                    'QDRANT_PORT', 'REDIS_PORT', 'FASTAPI_PORT')
+                    'REDIS_PORT', 'FASTAPI_PORT')
     @classmethod
     def validate_positive_ports(cls, v: int) -> int:
         """Validate that port numbers are positive."""
