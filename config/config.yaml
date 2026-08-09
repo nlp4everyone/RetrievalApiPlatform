@@ -20,3 +20,11 @@ embedding:
 ingestion:
   cpu_thread_pool_size: 4
   download_concurrency: 4
+
+retrieval:
+  # Candidates per hybrid branch = this * max_num_results. Higher widens the
+  # pool RRF fuses; 1 disables the cross-branch consensus hybrid exists for.
+  hybrid_prefetch_multiplier: 2
+  # RRF k. Empty = Qdrant default (60), request shape unchanged. Larger rewards
+  # docs found by both branches, smaller rewards one strong hit.
+  rrf_k:

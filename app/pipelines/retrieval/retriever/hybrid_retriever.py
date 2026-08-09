@@ -65,10 +65,18 @@ class HybridRetriever(BaseRetriever):
         return hits[0] if hits else []
 
     def span_attributes(self) -> dict[str, Any]:
-        return {
+        attributes: dict[str, Any] = {
             "vector_store.type": str(self._vector_store.provider),
             "collection_exists": self._collection_exists,
             # False here means the search silently ran dense-only, which is the
             # first thing to check when hybrid results look like dense ones
             "used_sparse": self._used_sparse,
         }
+        # Fusion settings, when the backend exposes them, so a ranking can be read
+        # against what produced it. The stage namespaces these under retrieval.hybrid.*
+        for span_key, store_attr in (("prefetch_multiplier", "hybrid_prefetch_multiplier"),
+                                     ("rrf_k", "rrf_k")):
+            value = getattr(self._vector_store, store_attr, None)
+            if value is not None:
+                attributes[span_key] = value
+        return attributes

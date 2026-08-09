@@ -12,4 +12,5 @@ from .api import *
 from .redis import *
 from .embedding import *
 from .ingestion import *
+from .retrieval import *
 from .settings import settings

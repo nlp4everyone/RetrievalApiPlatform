@@ -9,7 +9,7 @@ from qdrant_client import models
 # Embedding type
 from uuid import uuid4
 # Config
-from app.core.config import DENSE_MODEL_NAME, SPARSE_MODEL_NAME
+from app.core.config import DENSE_MODEL_NAME, HYBRID_PREFETCH_MULTIPLIER, RRF_K, SPARSE_MODEL_NAME
 # Contract
 from app.db.vector_store.base import BaseAsyncVectorStore, Embedding, SparseEmbedding
 from app.db.vector_store.types import RetrievedChunk, VectorStoreFilter
@@ -19,11 +19,6 @@ from app.schemas.vector_store.types import VectorStoreType
 from loggers import SystemLogger
 # Other component
 import asyncio
-
-# How many candidates each branch of a hybrid search fetches, as a multiple of
-# the requested limit. Fusion can only reorder the pool it is handed, so each
-# branch has to reach past its own top-k for the other's finds to compete.
-_HYBRID_PREFETCH_MULTIPLIER = 2
 
 
 class AsyncQdrantVectorStore(BaseAsyncVectorStore):
@@ -42,7 +37,9 @@ class AsyncQdrantVectorStore(BaseAsyncVectorStore):
                  shard_number: int = 2,
                  quantization_mode: Literal["binary", "scalar", "product", "none"] = "scalar",
                  default_segment_number: int = 4,
-                 on_disk: bool = True) -> None:
+                 on_disk: bool = True,
+                 hybrid_prefetch_multiplier: int = HYBRID_PREFETCH_MULTIPLIER,
+                 rrf_k: Optional[int] = RRF_K) -> None:
         """
         Initialize the AsyncQdrantVectorStore with the specified configuration.
 
@@ -54,6 +51,11 @@ class AsyncQdrantVectorStore(BaseAsyncVectorStore):
             quantization_mode: Type of vector quantization to apply. Options are 'binary', 'scalar', 'product', or 'none'.
             default_segment_number: Number of segments to use for indexing. Affects performance characteristics.
             on_disk: If True, stores vectors on disk instead of RAM. Better for large collections.
+            hybrid_prefetch_multiplier: Candidates each hybrid branch fetches, as a multiple of
+                the requested limit. Defaults to retrieval.hybrid_prefetch_multiplier in config.yaml;
+                pass it explicitly to sweep the value in an eval harness.
+            rrf_k: RRF k for hybrid fusion, from retrieval.rrf_k. None leaves Qdrant's own
+                default (60) and sends the same request shape as before k was tunable.
         """
         # Init client
         self._client = client
@@ -64,10 +66,22 @@ class AsyncQdrantVectorStore(BaseAsyncVectorStore):
         self._default_segment_number = default_segment_number
         self._on_disk = on_disk
         self._collection_name = collection_name
+        self._hybrid_prefetch_multiplier = hybrid_prefetch_multiplier
+        self._rrf_k = rrf_k
 
     @property
     def collection_name(self) -> str:
         return self._collection_name
+
+    @property
+    def hybrid_prefetch_multiplier(self) -> int:
+        """Prefetch depth per hybrid branch, so traces can record what produced a ranking."""
+        return self._hybrid_prefetch_multiplier
+
+    @property
+    def rrf_k(self) -> Optional[int]:
+        """RRF k in force, or None when Qdrant's default is left alone."""
+        return self._rrf_k
 
     # ------------------------------------------------------------------
     # COLLECTION LIFECYCLE
@@ -447,7 +461,7 @@ class AsyncQdrantVectorStore(BaseAsyncVectorStore):
         Issue one query - dense-only, or dense+sparse fused by Qdrant.
 
         The hybrid form asks each branch for more than `limit` candidates
-        (_HYBRID_PREFETCH_MULTIPLIER): fusion can only reorder what it is given,
+        (hybrid_prefetch_multiplier): fusion can only reorder what it is given,
         so a document ranked just outside the dense top-k but first on the
         sparse side has to be in the pool to be able to win.
 
@@ -475,7 +489,7 @@ class AsyncQdrantVectorStore(BaseAsyncVectorStore):
                                              with_payload = True,
                                              with_vectors = False)
 
-        prefetch_limit = limit * _HYBRID_PREFETCH_MULTIPLIER
+        prefetch_limit = limit * self._hybrid_prefetch_multiplier
         prefetch = [
             models.Prefetch(query = dense_vector,
                             using = DENSE_MODEL_NAME,
@@ -488,9 +502,14 @@ class AsyncQdrantVectorStore(BaseAsyncVectorStore):
                             limit = prefetch_limit,
                             filter = query_filter),
         ]
+        # Left at None the request is byte-identical to the one sent before k was
+        # tunable, so the default path cannot regress on an older server
+        fusion_query = (models.FusionQuery(fusion = models.Fusion.RRF) if self._rrf_k is None
+                        else models.RrfQuery(rrf = models.Rrf(k = self._rrf_k)))
+
         return self._client.query_points(collection_name = self._collection_name,
                                          prefetch = prefetch,
-                                         query = models.FusionQuery(fusion = models.Fusion.RRF),
+                                         query = fusion_query,
                                          limit = limit,
                                          query_filter = query_filter,
                                          with_payload = True,
