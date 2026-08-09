@@ -10,4 +10,4 @@ boto3==1.40.50
 minio==7.2.17
 
 # Vector Store
-qdrant-client==1.16.0
+qdrant-client==1.19.0

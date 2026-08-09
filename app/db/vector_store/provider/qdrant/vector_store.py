@@ -21,6 +21,30 @@ from loggers import SystemLogger
 import asyncio
 
 
+def _vector_name(model: str) -> str:
+    """
+    Fold a model id into a name Qdrant accepts for a vector field.
+
+    Qdrant rejects "/" and ":" in vector names - they separate segments in its
+    own storage paths - and every model id carries a "/" (Qwen/Qwen3-Embedding-0.6B).
+    The name is only a key inside the collection, so folding those two characters
+    to "_" keeps the field recognisable as the model it came from at no cost.
+
+    Args:
+        model: Model id from settings.
+
+    Returns:
+        str: The same name with the characters Qdrant forbids replaced.
+    """
+    return model.replace("/", "_").replace(":", "_")
+
+
+# Resolved once: these name the vector fields of every collection this store
+# creates, and a rename would strand the collections created before it.
+DENSE_VECTOR_NAME = _vector_name(DENSE_MODEL_NAME)
+SPARSE_VECTOR_NAME = _vector_name(SPARSE_MODEL_NAME)
+
+
 class AsyncQdrantVectorStore(BaseAsyncVectorStore):
     """
     An asynchronous vector store implementation using Qdrant for storing and querying document embeddings.
@@ -127,8 +151,8 @@ class AsyncQdrantVectorStore(BaseAsyncVectorStore):
         dense_vectors_config = self._get_dense_embedding_config(embedding_dimension = embedding_dim,
                                                                 distance = self._distance,
                                                                 on_disk = self._on_disk,
-                                                                model = DENSE_MODEL_NAME)
-        sparse_vectors_config = (self._get_sparse_embedding_config(model = SPARSE_MODEL_NAME,
+                                                                model = DENSE_VECTOR_NAME)
+        sparse_vectors_config = (self._get_sparse_embedding_config(model = SPARSE_VECTOR_NAME,
                                                                    on_disk = self._on_disk)
                                  if with_sparse else None)
         quantization_config = self._get_quantization_config(quantization_mode = self._quantization_mode,
@@ -169,14 +193,14 @@ class AsyncQdrantVectorStore(BaseAsyncVectorStore):
         without the field fails the whole batch, so writers check here first.
 
         Returns:
-            bool: True if the collection exists and holds the SPARSE_MODEL_NAME
+            bool: True if the collection exists and holds the SPARSE_VECTOR_NAME
                 sparse vector field.
         """
         if not await self.collection_exists():
             return False
         info = await self._client.get_collection(self._collection_name)
         sparse_vectors = info.config.params.sparse_vectors or {}
-        return SPARSE_MODEL_NAME in sparse_vectors
+        return SPARSE_VECTOR_NAME in sparse_vectors
 
     async def delete_collection(self) -> bool:
         """
@@ -395,10 +419,10 @@ class AsyncQdrantVectorStore(BaseAsyncVectorStore):
         Returns:
             dict: Named vectors ready for models.PointStruct.
         """
-        vector: dict[str, Any] = {DENSE_MODEL_NAME: dense}
+        vector: dict[str, Any] = {DENSE_VECTOR_NAME: dense}
         if sparse:
             # Qdrant wants two parallel arrays, not a mapping
-            vector[SPARSE_MODEL_NAME] = models.SparseVector(indices = list(sparse.keys()),
+            vector[SPARSE_VECTOR_NAME] = models.SparseVector(indices = list(sparse.keys()),
                                                             values = list(sparse.values()))
         return vector
 
@@ -482,7 +506,7 @@ class AsyncQdrantVectorStore(BaseAsyncVectorStore):
         if not sparse_vector:
             return self._client.query_points(collection_name = self._collection_name,
                                              query = dense_vector,
-                                             using = DENSE_MODEL_NAME,
+                                             using = DENSE_VECTOR_NAME,
                                              limit = limit,
                                              score_threshold = score_threshold,
                                              query_filter = query_filter,
@@ -492,13 +516,13 @@ class AsyncQdrantVectorStore(BaseAsyncVectorStore):
         prefetch_limit = limit * self._hybrid_prefetch_multiplier
         prefetch = [
             models.Prefetch(query = dense_vector,
-                            using = DENSE_MODEL_NAME,
+                            using = DENSE_VECTOR_NAME,
                             limit = prefetch_limit,
                             filter = query_filter,
                             score_threshold = score_threshold),
             models.Prefetch(query = models.SparseVector(indices = list(sparse_vector.keys()),
                                                         values = list(sparse_vector.values())),
-                            using = SPARSE_MODEL_NAME,
+                            using = SPARSE_VECTOR_NAME,
                             limit = prefetch_limit,
                             filter = query_filter),
         ]
