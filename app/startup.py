@@ -240,30 +240,37 @@ def init_minio() -> MinioService:
 
 async def init_vector_store() -> BaseVectorStoreConnection:
     """
-    Initialize the configured vector database connection.
+    Initialize every configured vector database connection.
 
-    Builds the connection for the provider selected via VECTOR_STORE_PROVIDER,
-    verifies connectivity, and registers it with VectorStoreFactory so call
-    sites can obtain per-collection stores without knowing the backend.
+    Connects each backend named by VECTOR_STORE_PROVIDERS, verifies it, and
+    registers it with VectorStoreFactory so call sites can obtain per-collection
+    stores without knowing the backend. Connecting more than one is what lets
+    stores on different engines be searched side by side: each record names the
+    backend holding it, while new stores go to VECTOR_STORE_PROVIDER.
+
+    An unreachable backend fails the boot rather than being skipped - a
+    half-connected service would answer some vector stores and 500 on the rest.
 
     Returns:
-        BaseVectorStoreConnection: Live vector store connection
+        BaseVectorStoreConnection: Connection for the default provider
 
     Raises:
-        Exception: If the vector database is not reachable
+        Exception: If any configured vector database is not reachable
     """
     global vector_store_connection
-    provider = VectorStoreFactory.default_provider()
-    # Init connection
-    vector_store_connection = VectorStoreFactory.connection_class(provider).from_settings()
-    try:
-        await vector_store_connection.check_connection()
-        SystemLogger.success(f"[STARTUP] Vector store connection established ({provider})")
-    except Exception as e:
-        SystemLogger.error(f"[STARTUP] Vector store connection failed ({provider}): {e!r}")
-        raise
-    # Make it reachable through the factory
-    VectorStoreFactory.register_connection(provider, vector_store_connection)
+    for provider in VectorStoreFactory.enabled_providers():
+        # Init connection
+        connection = VectorStoreFactory.connection_class(provider).from_settings()
+        try:
+            await connection.check_connection()
+            SystemLogger.success(f"[STARTUP] Vector store connection established ({provider})")
+        except Exception as e:
+            SystemLogger.error(f"[STARTUP] Vector store connection failed ({provider}): {e!r}")
+            raise
+        # Make it reachable through the factory
+        VectorStoreFactory.register_connection(provider, connection)
+
+    vector_store_connection = VectorStoreFactory.get_connection()
     return vector_store_connection
 
 def get_embed_model() -> EmbeddingService:
