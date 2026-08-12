@@ -11,3 +11,4 @@ minio==7.2.17
 
 # Vector Store
 qdrant-client==1.19.0
+pymilvus==3.0.1
