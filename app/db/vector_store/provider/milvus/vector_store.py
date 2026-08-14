@@ -81,7 +81,7 @@ class AsyncMilvusVectorStore(BaseAsyncVectorStore):
     def __init__(self,
                  collection_name: str,
                  client: AsyncMilvusClient,
-                 shard_number: int = 2,
+                 shard_number: int = 1,
                  consistency_level: str = "Strong",
                  hnsw_m: int = 16,
                  hnsw_ef_construction: int = 200,
@@ -91,7 +91,10 @@ class AsyncMilvusVectorStore(BaseAsyncVectorStore):
         Args:
             collection_name: Collection to operate on (the vector store id).
             client: Connected Milvus client supplied by MilvusConnection.
-            shard_number: Shards for a new collection, matching the Qdrant backend.
+            shard_number: DML channels a new collection writes through. Despite
+                the name this is not Qdrant's shard_number: it scales ingestion,
+                not search, which parallelises over segments. One is ample for a
+                collection written once, and costs one timetick to wait on.
             consistency_level: Milvus read guarantee. "Strong" so a search sees
                 what ingestion just wrote, which is what Qdrant does and what a
                 caller polling a vector store into "completed" then searching it
