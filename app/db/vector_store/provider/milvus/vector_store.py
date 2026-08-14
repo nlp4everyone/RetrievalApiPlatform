@@ -9,8 +9,10 @@ callers never see them:
 
 * Milvus only searches collections that are *loaded*, and a restarted server
   comes back with everything unloaded - so searches load-and-retry once.
-* Milvus collection and field names allow only letters, digits and underscores,
-  which neither a ``vs-<uuid>`` id nor a model id satisfies.
+* Milvus collection and field names allow only letters, digits and underscores.
+  Current ids (``vs_<uuid>``) already satisfy that, so the collection name is
+  the id verbatim; ids issued before that scheme (``vs-<uuid>``) are folded, and
+  no model id satisfies it at all.
 """
 import re
 from typing import Any, Callable, ClassVar, Coroutine, Dict, List, Optional, Sequence
@@ -39,7 +41,7 @@ SPARSE_VECTOR_NAME = "sparse_vector"
 # Milvus' own ceiling for a VARCHAR field, so a chunk is only ever rejected for
 # being longer than the engine can store at all
 _MAX_CONTENT_LENGTH = 65535
-# vs-<uuid4 hex> is 35 characters; 64 leaves room for a longer id scheme
+# vs_<uuid4 hex> is 35 characters; 64 leaves room for a longer id scheme
 _MAX_ID_LENGTH = 64
 
 # Anything Milvus does not accept in a collection name
@@ -58,10 +60,16 @@ def _collection_name(name: str) -> str:
     """
     Fold a vector store id into a name Milvus accepts for a collection.
 
-    Vector store ids look like ``vs-a1b2...``, and Milvus rejects the hyphen -
-    collection names may hold only letters, digits and underscores, and may not
-    start with a digit. Ids are unique in their hyphenated form and the mapping
-    only rewrites separators, so distinct ids stay distinct.
+    Milvus collection names may hold only letters, digits and underscores, and
+    may not start with a digit. Ids issued today (``vs_a1b2...``) already comply,
+    so this returns them unchanged; it stays because ids issued before that
+    scheme (``vs-a1b2...``) carry a hyphen Milvus rejects, and their collections
+    are still addressed by the folded name they were created under.
+
+    The fold is only injective over ids from ``generate_vectorstore_id``, whose
+    sole illegal character sits at a fixed position. It would collide on
+    free-form names (``vs-a`` and ``vs.a`` both give ``vs_a``), so hash the tail
+    instead if vector store ids ever become caller-supplied.
 
     Args:
         name: Logical collection name (the vector store id).
