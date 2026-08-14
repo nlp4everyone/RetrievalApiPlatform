@@ -79,22 +79,19 @@ class Settings(BaseSettings):
     MINIO_API_PORT: int = 9000
     MINIO_CONSOLE_PORT: int = 9001
 
-    # Backend new vector stores are created on: "qdrant" or "milvus".
+    # Backend new vector stores are created on: "qdrant" or "milvus". Every
+    # other backend whose connection settings are filled in is connected too,
+    # so stores already held there stay searchable.
     VECTOR_STORE_PROVIDER: str = "qdrant"
 
-    # Backends startup connects, comma-separated. Every vector store record
-    # names the backend that holds it, so connecting more than one lets stores
-    # on either engine be searched side by side. Empty means only the default
-    # above, which is always connected whether it is listed or not.
-    VECTOR_STORE_PROVIDERS: str = ""
-
-    # Only the connected backends' blocks are required - see validate_vector_store_credentials.
+    # A backend is connected when its block below is filled in; only the block
+    # of VECTOR_STORE_PROVIDER is required - see validate_vector_store_credentials.
     # Qdrant Config
-    QDRANT_URL: Optional[str] = Field(None, description="Qdrant server URL; required when qdrant is connected")
-    QDRANT_API_KEY: Optional[str] = Field(None, description="Qdrant API key; required when qdrant is connected")
+    QDRANT_URL: Optional[str] = Field(None, description="Qdrant server URL; fill in to connect qdrant")
+    QDRANT_API_KEY: Optional[str] = Field(None, description="Qdrant API key; fill in to connect qdrant")
 
     # Milvus Config
-    MILVUS_URI: Optional[str] = Field("http://localhost:19530", description="Milvus server URI; required when milvus is connected")
+    MILVUS_URI: Optional[str] = Field(None, description="Milvus server URI; fill in to connect milvus")
     MILVUS_TOKEN: Optional[str] = Field(None, description="Milvus auth token; leave empty on a server without authentication")
 
     # Langfuse Config (tracing, exported via OpenTelemetry OTLP)
@@ -195,18 +192,6 @@ class Settings(BaseSettings):
             raise ValueError(f'VECTOR_STORE_PROVIDER must be one of {sorted(allowed)}, got: {v}')
         return normalized
 
-    @field_validator('VECTOR_STORE_PROVIDERS')
-    @classmethod
-    def validate_vector_store_providers(cls, v: str) -> str:
-        """Validate every name in the connected-backends list."""
-        allowed = set(_VECTOR_STORE_REQUIRED_SETTINGS)
-        normalized = [name.strip().lower() for name in v.split(",") if name.strip()]
-        unknown = [name for name in normalized if name not in allowed]
-        if unknown:
-            raise ValueError(f'VECTOR_STORE_PROVIDERS may only contain {sorted(allowed)}, '
-                             f'got: {", ".join(unknown)}')
-        return ",".join(normalized)
-
     @field_validator('LOG_FORMAT')
     @classmethod
     def validate_log_format(cls, v: str) -> str:
@@ -221,32 +206,37 @@ class Settings(BaseSettings):
     def enabled_vector_store_providers(self) -> tuple[str, ...]:
         """Backends startup connects, default first.
 
-        VECTOR_STORE_PROVIDER is always in the list: it is where new stores are
+        A backend is connected when every setting it cannot connect without is
+        filled in - a separate list would only be a second place to forget.
+        VECTOR_STORE_PROVIDER is always included: it is where new stores are
         created, so it cannot be left disconnected.
 
         Returns:
             tuple[str, ...]: Provider names, without duplicates
         """
-        listed = [name for name in self.VECTOR_STORE_PROVIDERS.split(",") if name]
+        configured = (name for name, required in _VECTOR_STORE_REQUIRED_SETTINGS.items()
+                      if all((getattr(self, setting) or "").strip() for setting in required))
         return (self.VECTOR_STORE_PROVIDER,
-                *(name for name in dict.fromkeys(listed) if name != self.VECTOR_STORE_PROVIDER))
+                *(name for name in configured if name != self.VECTOR_STORE_PROVIDER))
 
     # Depends on another field, so it cannot be a field_validator. A Milvus
     # deployment must not have to invent Qdrant credentials, and vice versa.
     @model_validator(mode='after')
     def validate_vector_store_credentials(self) -> 'Settings':
-        """Require the connection settings of every connected vector store backend.
+        """Require the connection settings of the backend new stores are created on.
+
+        Every other backend is connected precisely when its settings are
+        present, so there is nothing left to require of it here.
 
         Raises:
-            ValueError: If a connected backend is missing a setting it cannot
+            ValueError: If VECTOR_STORE_PROVIDER is missing a setting it cannot
                 connect without
         """
-        for provider in self.enabled_vector_store_providers:
-            required = _VECTOR_STORE_REQUIRED_SETTINGS[provider]
-            missing = [name for name in required if not (getattr(self, name) or "").strip()]
-            if missing:
-                raise ValueError(f'Vector store provider "{provider}" requires '
-                                 f'{", ".join(missing)} to be set')
+        required = _VECTOR_STORE_REQUIRED_SETTINGS[self.VECTOR_STORE_PROVIDER]
+        missing = [name for name in required if not (getattr(self, name) or "").strip()]
+        if missing:
+            raise ValueError(f'Vector store provider "{self.VECTOR_STORE_PROVIDER}" requires '
+                             f'{", ".join(missing)} to be set')
         return self
 
 

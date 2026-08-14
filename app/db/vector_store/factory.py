@@ -12,7 +12,7 @@ from typing import NamedTuple, Optional, Type
 
 from app.db.vector_store.base import BaseAsyncVectorStore, BaseVectorStoreConnection
 from app.schemas.vector_store.types import VectorStoreType
-from app.core.config import VECTOR_STORE_PROVIDER, VECTOR_STORE_PROVIDERS
+from app.core.config import CONNECTED_VECTOR_STORE_PROVIDERS, VECTOR_STORE_PROVIDER
 
 
 class _Backend(NamedTuple):
@@ -70,9 +70,10 @@ class VectorStoreFactory:
         """Every provider startup should connect, default first.
 
         Returns:
-            tuple[VectorStoreType, ...]: Providers selected by VECTOR_STORE_PROVIDERS
+            tuple[VectorStoreType, ...]: The default provider, plus every other
+                one whose connection settings are filled in
         """
-        return tuple(VectorStoreType(provider) for provider in VECTOR_STORE_PROVIDERS)
+        return tuple(VectorStoreType(provider) for provider in CONNECTED_VECTOR_STORE_PROVIDERS)
 
     @classmethod
     def connection_class(cls, provider: VectorStoreType) -> Type[BaseVectorStoreConnection]:
@@ -120,8 +121,8 @@ class VectorStoreFactory:
         if connection is None:
             raise RuntimeError(
                 f"Vector store provider '{provider}' is not initialised. "
-                f"Add it to VECTOR_STORE_PROVIDERS so startup connects it, "
-                f"or the vector store was created with a provider this deployment no longer runs."
+                f"Fill in its connection settings so startup connects it, or the "
+                f"vector store was created with a provider this deployment no longer runs."
             )
         return connection
 

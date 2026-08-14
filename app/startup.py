@@ -242,31 +242,43 @@ async def init_vector_store() -> BaseVectorStoreConnection:
     """
     Initialize every configured vector database connection.
 
-    Connects each backend named by VECTOR_STORE_PROVIDERS, verifies it, and
-    registers it with VectorStoreFactory so call sites can obtain per-collection
-    stores without knowing the backend. Connecting more than one is what lets
-    stores on different engines be searched side by side: each record names the
-    backend holding it, while new stores go to VECTOR_STORE_PROVIDER.
+    Connects the default backend and every other one whose settings are filled
+    in, verifies each, and registers it with VectorStoreFactory so call sites
+    can obtain per-collection stores without knowing the backend. Connecting
+    more than one is what lets stores on different engines be searched side by
+    side: each record names the backend holding it, while new stores go to
+    VECTOR_STORE_PROVIDER.
 
-    An unreachable backend fails the boot rather than being skipped - a
-    half-connected service would answer some vector stores and 500 on the rest.
+    The default backend fails the boot when unreachable - new stores are created
+    on it, so a service that cannot reach it has nothing to offer. A secondary
+    one is skipped with a warning instead: it is connected because its settings
+    are present, and a leftover .env block is enough for that.
 
     Returns:
         BaseVectorStoreConnection: Connection for the default provider
 
     Raises:
-        Exception: If any configured vector database is not reachable
+        Exception: If the default vector database is not reachable
     """
     global vector_store_connection
+    default_provider = VectorStoreFactory.default_provider()
     for provider in VectorStoreFactory.enabled_providers():
-        # Init connection
-        connection = VectorStoreFactory.connection_class(provider).from_settings()
         try:
+            # Inside the try: this resolves the backend module, so a missing or
+            # broken SDK is caught here too, not only an unreachable server
+            connection = VectorStoreFactory.connection_class(provider).from_settings()
             await connection.check_connection()
             SystemLogger.success(f"[STARTUP] Vector store connection established ({provider})")
         except Exception as e:
-            SystemLogger.error(f"[STARTUP] Vector store connection failed ({provider}): {e!r}")
-            raise
+            if provider == default_provider:
+                SystemLogger.error(f"[STARTUP] Vector store connection failed ({provider}): {e!r}")
+                raise
+            # Refusing to boot over a backend nothing may be stored on would
+            # make a stale setting fatal; a store that does live there raises
+            # at query time instead (see VectorStoreFactory.get_connection).
+            SystemLogger.warning(f"[STARTUP] Vector store not connected ({provider}): {e!r} - "
+                                 f"vector stores held by it will fail at query time")
+            continue
         # Make it reachable through the factory
         VectorStoreFactory.register_connection(provider, connection)
 

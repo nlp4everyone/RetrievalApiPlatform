@@ -9,8 +9,9 @@ POSTGRES_PORT = settings.POSTGRES_PORT
 
 # Backend new vector stores are created on ("qdrant" or "milvus")
 VECTOR_STORE_PROVIDER = settings.VECTOR_STORE_PROVIDER
-# Backends startup connects, default first - see Settings.enabled_vector_store_providers
-VECTOR_STORE_PROVIDERS = settings.enabled_vector_store_providers
+# Backends startup connects, default first: the default plus every backend whose
+# settings are filled in. Derived, not an env var - see Settings.enabled_vector_store_providers
+CONNECTED_VECTOR_STORE_PROVIDERS = settings.enabled_vector_store_providers
 
 # Qdrant configuration
 QDRANT_URL = settings.QDRANT_URL
