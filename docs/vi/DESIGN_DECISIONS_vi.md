@@ -71,12 +71,12 @@ Parsing, chunking, embedding và vector database đều theo cùng một khuôn:
 - Đổi backend là sửa `.env`, không phải sửa code — hữu ích khi so sánh các chunker hoặc chuyển giữa embedding server tương thích OpenAI và TEI.
 - Phần còn lại của codebase chỉ nhìn thấy interface, nên việc đổi backend không thể rò rỉ lên trên. `app/db/vector_store/types.py` bị cấm tường minh việc import SDK nhà cung cấp chính vì lý do này.
 - Backend chưa cài không tốn gì: `VectorStoreFactory` định địa chỉ backend bằng đường dẫn module và import lúc dùng lần đầu, nên thiếu `pymilvus` chỉ thành vấn đề nếu Milvus thực sự được yêu cầu — và điều đó giữ đồ thị import không có chu trình.
-- Một backend mới có thể được nối dây đầy đủ (config, enum, factory, startup) và merge trước cả khi nó chạy được, đúng như placeholder Milvus hiện tại: bật nó sau này chỉ là điền thân hàm, không đổi gì phía trên `app.db`.
+- Một backend mới có thể được nối dây đầy đủ (config, enum, factory, startup) và merge trước cả khi nó chạy được, và backend Milvus đã về đích đúng theo cách đó: điền thân hàm mà không đổi gì phía trên `app.db`. Vì factory đánh khoá connection theo provider còn mỗi row vector store đều ghi provider của chính nó, có thể kết nối nhiều backend cùng lúc — việc chuyển đổi diễn ra từ từ chứ không phải cắt một nhát.
 
 **Nhược điểm**
 - Vấn đề mẫu số chung nhỏ nhất: interface chỉ phơi bày được những gì mọi backend đều làm được, nên tính năng riêng của backend (sparse vector của Qdrant, quantization rescore) cần hoặc mở rộng contract hoặc một lối thoát riêng.
 - Nhiều file hơn cho mỗi năng lực so với việc gọi thẳng, và thêm một lớp gián tiếp khi debug.
-- Một backend placeholder raise `NotImplementedError` thì tra được trong config nhưng không dùng được — cấu hình sai lộ ra dưới dạng lỗi runtime chứ không phải lỗi startup.
+- Config có thể để lại một tập backend được kết nối không phủ hết dữ liệu: credential kết nối được kiểm tra lúc startup, nhưng không có gì đối chiếu chúng với những provider mà các row đang tồn tại tham chiếu tới. Xoá credential của một backend vẫn còn giữ store thì sai sót đó chỉ lộ ra dưới dạng `RuntimeError` ở lần search đầu tiên vào một store như vậy, chứ không phải lúc boot.
 
 **Phương án đã cân nhắc**
 
@@ -107,20 +107,22 @@ Mọi embedding đều là một lời gọi HTTP tới model server mà repo n�
 | Thêm vLLM thành một service trong stack Compose này | Bắt buộc ai chạy API cũng phải có GPU, buộc việc restart model dính vào deploy ứng dụng, và làm mô hình phổ biến "một model server dùng chung, nhiều consumer" trở nên bất khả thi |
 | Nạp model embedding ngay trong tiến trình (`sentence-transformers`) | Đưa trọng số model và CUDA vào image worker, khiến profile bộ nhớ của worker phụ thuộc model thay vì phụ thuộc batch, và mỗi replica API phải trả giá cho một bản copy riêng |
 
-## Vì sao vector store không phụ thuộc provider (với Qdrant là implementation)
+## Vì sao vector store không phụ thuộc provider (Qdrant và Milvus)
 
-Mỗi vector store trong repo ứng với một collection riêng, truy cập qua `BaseAsyncVectorStore` chứ không phải qua client Qdrant. Provider được ghi **trên chính row của vector store**, không đọc từ config lúc truy vấn.
+Mỗi vector store trong repo ứng với một collection riêng, truy cập qua `BaseAsyncVectorStore` chứ không phải qua client Qdrant. Provider được ghi **trên chính row của vector store**, không đọc từ config lúc truy vấn — và vì mọi backend đã điền credential đều được kết nối, nhiều engine cùng được phục vụ trong một tiến trình.
 
 **Ưu điểm**
-- Collection cũ vẫn chạy sau khi `VECTOR_STORE_PROVIDER` đổi: `get_store()` nhận provider mà store đó được tạo cùng, nên đổi mặc định chỉ ảnh hưởng store mới.
+- Collection cũ vẫn chạy sau khi `VECTOR_STORE_PROVIDER` đổi: `get_store()` nhận provider mà store đó được tạo cùng, nên đổi mặc định chỉ ảnh hưởng store mới — miễn là credential của backend cũ vẫn còn đó, và đó chính là cách một cuộc chuyển đổi diễn ra từ từ thay vì cắt một nhát.
 - Filter được biểu diễn một lần dưới dạng cây trung lập (`FieldCondition` / `FilterGroup`) rồi dịch riêng cho từng backend, nên schema request tương thích OpenAI và ngôn ngữ truy vấn tách rời nhau.
 - `ensure_collection` được tách khỏi `insert_documents` một cách có chủ đích. Gộp việc tạo vào đường insert buộc mọi batch song song tranh nhau một check-then-act — đó chính là lý do code cũ phải chạy batch đầu tiên một mình. Tạo một lần từ đầu khiến mọi insert đều thuần, nên chúng chạy song song được.
 - Riêng với Qdrant: sparse vector nằm chung collection với dense, và nó trộn cả hai nhánh ngay phía server (`prefetch` + `FusionQuery(RRF)`), nên hybrid search chỉ tốn một round-trip và không phải trộn trong process; thêm nữa là cô lập tự nhiên theo collection đúng với mô hình dữ liệu, client async chính thức khớp với stack async hoàn toàn, cùng quantization và lưu trữ on-disk có sẵn.
+- Milvus đạt tới cùng contract đó bằng một con đường khác — `hybrid_search` với `RRFRanker`, một request mang mọi query vector thay vì kiểu fan-out song song của Qdrant — và đó chính là bằng chứng interface thật sự trung lập: triển khai nó không đổi bất cứ thứ gì phía trên `app.db`.
 
 **Nhược điểm**
-- Thêm một service phải chạy trong stack Docker Compose, bên cạnh Postgres/MinIO/Redis.
-- Lớp trừu tượng hiện chỉ được kiểm chứng bởi đúng một backend hoạt động, nên interface có thể chưa trung lập như kỳ vọng cho tới khi backend thứ hai thực sự được triển khai.
+- Lớp trừu tượng đã được kiểm chứng bởi hai backend, đủ để cái giá "mẫu số chung nhỏ nhất" lộ ra cụ thể: Qdrant đặt tên trường vector theo model id còn Milvus từ chối và dùng tên cố định, Milvus vẫn phải gấp tên collection `vs-…` cũ thành `vs_…` vì không cho phép dấu gạch ngang, và nó chỉ phục vụ collection đã load trong khi Qdrant không có trạng thái đó. Mỗi khác biệt đều được hấp thụ bên trong provider của nó, nên bề mặt vẫn sạch, đổi lại code provider không đối xứng nhau.
+- Mỗi backend được kết nối là thêm một dịch vụ ngoài phải chạy, giám sát và backup — và vì chúng nằm ngoài stack Compose, không gì trong `make up` báo cho bạn biết thiếu một cái cho tới khi bước probe lúc boot thất bại.
 - Đẩy fusion xuống backend đồng nghĩa seam `BaseFusion` không được dùng bởi chính trường hợp nó sinh ra để phục vụ; một backend không trộn được ở server sẽ phải mang chiến lược fusion trở lại vào process.
+- Ngữ nghĩa điểm số không đi qua lớp trừu tượng một cách nguyên vẹn: `score_threshold` là ngưỡng cosine trên Qdrant nhưng là `radius` trên Milvus, và với hybrid thì trên cả hai engine nó chỉ áp được cho nhánh dense. Contract thì giống nhau, con số phía sau thì không hẳn.
 
 **Phương án đã cân nhắc**
 
@@ -129,6 +131,7 @@ Mỗi vector store trong repo ứng với một collection riêng, truy cập qu
 | pgvector (extension của Postgres) | Không hỗ trợ BM25/sparse vector gốc; phải gắn thêm full-text search riêng, mất lợi thế "một collection cho cả dense lẫn sparse" |
 | Elasticsearch / OpenSearch | Mạnh về BM25/full-text nhưng tối ưu kém hơn Qdrant cho vector similarity search thuần, và vận hành nặng hơn cho một service chỉ cần vector store |
 | Gắn thẳng vào client Qdrant | Rẻ hơn ở hiện tại, nhưng lựa chọn backend sẽ rò rỉ vào service và pipeline, khiến việc migrate sau này thành viết lại chứ không phải thêm một provider |
+| Mỗi lúc chỉ một backend — đọc `VECTOR_STORE_PROVIDER` ngay lúc truy vấn | Biến việc đổi backend thành một nhát cắt: mọi store cũ trở nên không đọc được ngay khi biến đó đổi giá trị, nên đường migrate duy nhất là ingest lại toàn bộ trước khi chuyển. Ghi provider theo từng row và kết nối nhiều backend cùng lúc chỉ tốn một cột cùng một dict connection, đổi lại nhát cắt đó thành quá trình rút dần |
 
 ## Vì sao `SearchType` đặt tên cho toàn bộ hình dạng retrieval
 
@@ -201,13 +204,14 @@ Worker chạy hai `ThreadPoolExecutor` riêng — `IO_THREAD_POOL_SIZE=32` cho t
 
 ## Giới hạn đã biết
 
-- **Chỉ ingest một file.** Nhiều hơn một `file_id` bị từ chối với lỗi 400 ngay tại request, và `IngestionService` kiểm tra lại rồi đánh dấu store `failed` thay vì báo `completed` trên một store rỗng.
+- **Chỉ ingest một file.** Nhiều hơn một `file_id` bị từ chối với lỗi 400 ngay tại request, và `IngestionService` kiểm tra lại rồi đánh dấu store `failed` thay vì báo `completed` trên một store rỗng. Rào cản nằm ở schema chứ không ở lệnh kiểm tra: không có bảng `vector_store_files`, nên tiến độ của một store chỉ là một cột `status` — thứ không thể diễn tả "3 file xong, 1 file lỗi". Muốn ingest nhiều file thì phải mô hình hoá trạng thái theo từng file trước, đúng như sub-resource `vector_store.files` của chính OpenAI.
+- **`file_counts` là suy ra chứ không phải đếm.** `_calculate_file_counts` ánh xạ đúng một cột status của store thành `completed=1` / `failed=1`; không có giá trị nào khác là khả dĩ. Field này tồn tại vì tương thích OpenAI và là hệ quả trực tiếp của giới hạn phía trên.
+- **Chưa có bộ test tự động nào.** `pytest` và `pytest-asyncio` đã nằm trong nhóm dependency dev, nhưng không có thư mục `tests/` và không có lấy một file test — `examples/file_upload_example.py` chạy trên một stack đang sống là kiểm tra end-to-end duy nhất. Kiến trúc phân tầng vốn được dựng để dễ test (stage nhận một context thuần, `IngestionService` không import TaskIQ, provider nằm sau interface) nhưng chưa có gì khai thác điều đó.
 - **Nhánh dự phòng `"fuse"`.** Gửi tường minh `{"type": "auto"}` (thay vì bỏ trống `chunking_strategy`) sẽ rơi vào strategy `"fuse"` mà `IngestionService` bỏ qua — store báo `completed` trong khi chưa có gì được index. Bỏ trống field này thì đi đúng nhánh `"auto"`.
 - **`ranking_options` mới có tác dụng một phần.** `score_threshold` giờ đã đi tới backend (gắn vào nhánh dense — áp lên output RRF thì sẽ loại sạch mọi thứ), nhưng `ranker` và `rewrite_query` vẫn được nhận rồi bỏ qua, còn quantization rescore chưa được phơi bày trên contract của vector store. `filters` thì **đã** được áp dụng.
 - **Query dạng list bị cắt.** Nếu `query` là một list, chỉ phần tử đầu tiên được dùng.
 - **Auth single-tenant.** Một `FASTAPI_API_KEY` dùng chung, dù các row đã được scope theo `api_key` như thể đã multi-tenant.
 - **Object mồ côi.** Nếu insert Postgres thất bại sau khi upload MinIO thành công, object bị bỏ lại — chỉ được log, không có cơ chế dọn dẹp bù trừ.
-- **Hybrid retrieval phụ thuộc vào thời điểm store được ingest.** `resolve_search_type` chỉ trả `HYBRID` cho collection đã có sẵn sparse vector, mà Qdrant lại không thêm được field vector vào collection đang sống — nên bật `SPARSE_EMBEDDING_ENABLED` xong thì mọi store cũ vẫn dense-only cho tới khi ingest lại. Caller giờ có thể biết được điều đó bằng cách hỏi: `search_type: "hybrid"` trên một store như vậy sẽ trả 400 kèm lý do. Nhưng vẫn chưa có cách *đọc* trực tiếp chế độ của một store — `VectorStoreObject` không có field nào cho biết nó có sparse vector hay không, nên muốn biết thì phải thử search.
-- **Milvus là placeholder.** Đã nối dây qua config, `VectorStoreType`, `VectorStoreFactory` và startup, nhưng mọi method đều raise `NotImplementedError`.
+- **Hybrid retrieval phụ thuộc vào thời điểm store được ingest.** `resolve_search_type` chỉ trả `HYBRID` cho collection đã có sẵn sparse vector, mà không backend nào thêm được field vector vào collection đang sống — nên bật `SPARSE_EMBEDDING_ENABLED` xong thì mọi store cũ vẫn dense-only cho tới khi ingest lại. Caller giờ có thể biết được điều đó bằng cách hỏi: `search_type: "hybrid"` trên một store như vậy sẽ trả 400 kèm lý do. Nhưng vẫn chưa có cách *đọc* trực tiếp chế độ của một store — `VectorStoreObject` không có field nào cho biết nó có sparse vector hay không, nên muốn biết thì phải thử search.
 - **Upload và parsing chưa khớp allow-list.** `.csv`, `.json` và `.gif` vượt qua validation lúc upload nhưng không có provider parsing nào đăng ký. Ngược lại, `.md` và `.doc` parse được nhưng không nằm trong `ALLOWED_EXTENSIONS`, và `validate_file_type` chặn theo extension nên không có đường lách — hai định dạng đó luôn bị 415 ngay ở bước upload.
 - **Ghi một phần khi ingestion lỗi.** `EmbedAndIndexStage` upsert theo từng batch, nên một batch fail giữa đường vẫn để lại các batch trước trong collection dù store bị đánh dấu `failed`; không có cơ chế dọn dẹp.

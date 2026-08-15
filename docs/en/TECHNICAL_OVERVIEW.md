@@ -5,7 +5,7 @@ Production-oriented backend implementing OpenAI's **Files** and **Vector Stores*
 - FastAPI (`app/app.py`) as the API layer — `file_router` (`/v1/files`) and `vector_store_router` (`/v1/vector_stores`), with the whole HTTP boundary living in `app/api/`
 - PostgreSQL (`asyncpg`) for file/vector store metadata
 - MinIO as object storage for the raw bytes of uploaded files
-- A pluggable vector database behind `BaseAsyncVectorStore` — one collection per vector store. Qdrant is implemented; Milvus is wired but stubbed
+- A pluggable vector database behind `BaseAsyncVectorStore` — one collection per vector store. Qdrant and Milvus are both implemented, and both can be connected at once
 - Redis Streams + TaskIQ for asynchronous ingestion, running outside the request/response lifecycle
 - Two external parsing services: LlamaParse for `.pdf`, the Unstructured API for every other format — both return Markdown
 - An external dense embedding endpoint (OpenAI-compatible vLLM, or Text Embeddings Inference) for actual vector computation — [EmbeddingService](https://github.com/nlp4everyone/EmbeddingService) is the companion repo that serves it
@@ -66,7 +66,7 @@ MinioFileStore                ▼                          ▼
        ┌──────────────────────────────────┐          │
        │  TaskIQ Worker (own container)   │          ▼
        │  app.tasks.broker:broker         │   BaseAsyncVectorStore
-       │  app.tasks.ingestion_task        │   (Qdrant | Milvus*)
+       │  app.tasks.ingestion_task        │   (Qdrant | Milvus)
        └────────────────┬─────────────────┘
                         ▼
               IngestionService.ingest_vector_store_files()
@@ -88,7 +88,7 @@ MinioFileStore                ▼                          ▼
   Pipeline.run() opens one span per stage ──▶ Langfuse (OTel OTLP)
   trace_context travels with the task, so worker spans join the request's trace
 
-  * Milvus is registered end-to-end but every method raises NotImplementedError
+  * Each vector store row names its backend, so both engines can be served at once
 ```
 
 ## Overall request flow
@@ -133,7 +133,7 @@ Both pipelines are the same machinery (`app/pipelines/pipeline.py`) with differe
 | Assembled by | `build_ingestion_pipeline(...)` | `build_retrieval_pipeline(..., search_type)` |
 | Parent trace | `trace_context` carried through the task | the ambient request span |
 
-Adding a step is adding a `BaseStage` subclass and one line in the factory. Hybrid search was exactly that: a `HybridRetriever` plus a branch in `_build_plan()`, with the stages and the pipeline untouched — and no new fusion strategy, since Qdrant merges the dense and sparse branches by RRF inside the query itself.
+Adding a step is adding a `BaseStage` subclass and one line in the factory. Hybrid search was exactly that: a `HybridRetriever` plus a branch in `_build_plan()`, with the stages and the pipeline untouched — and no new fusion strategy, since both backends merge the dense and sparse branches by RRF inside the query itself (Qdrant's `FusionQuery(RRF)`, Milvus' `RRFRanker`).
 
 ---
 
@@ -154,7 +154,7 @@ Every route is prefixed with `/v1` and requires `Authorization: Bearer <FASTAPI_
 | `DELETE` | `/vector_stores/{vector_store_id}` | Delete a vector store |
 | `POST` | `/vector_stores/{vector_store_id}/search` | Search by `query`, `max_num_results`, `filters`, `search_type` (`auto`\|`dense`\|`hybrid`, non-OpenAI extension); of `ranking_options` only `score_threshold` is applied |
 
-Both routers speak the OpenAI object model (`FileObject`, `VectorStoreObject`, paginated `object="list"` responses), OpenAI's ID convention (`file-{8 hex}`, `vs-{32 hex}` — `app/utils/key_generator/key_generator.py`), and an OpenAI-style error envelope (`{message, type, params, code}`) on every `AppBaseException`.
+Both routers speak the OpenAI object model (`FileObject`, `VectorStoreObject`, paginated `object="list"` responses), OpenAI's ID convention (`file-{8 hex}`, `vs_{32 hex}` — `app/utils/key_generator/key_generator.py`), and an OpenAI-style error envelope (`{message, type, params, code}`) on every `AppBaseException`.
 
 Not yet implemented: multi-file ingestion for a single vector store, a vector-store-file sub-resource endpoint (attach/list/detach), parsers for `.csv`/`.json`/`.gif` (uploadable but unmapped), chunk-level ingestion progress/cancellation. See [README.md](README.md#to-do--roadmap).
 
@@ -221,7 +221,8 @@ app/
   utils/                  # config_loader, datetime_utils, io, key_generator, vector_store helpers
 config/config.yaml        # version-controlled tunables: embedding batch size/concurrency,
                           # bucket name, storage.io_thread_pool_size,
-                          # ingestion.cpu_thread_pool_size, ingestion.download_concurrency
+                          # ingestion.cpu_thread_pool_size, ingestion.download_concurrency,
+                          # retrieval.hybrid_prefetch_multiplier, retrieval.rrf_k
 docker/                   # Dockerfile + compose_db.yml / compose_web.yml / compose_tracking.yml
 examples/file_upload_example.py  # end-to-end demo using the openai SDK
 ```
@@ -236,9 +237,9 @@ Three compose files combined by the `Makefile`:
 - **`compose_tracking.yml`** — `minio` (9000 API / 9001 console) — object storage, despite the filename
 - **`compose_web.yml`** — `web` (uvicorn, 8005; depends on `postgres` healthy + `worker` started) and `worker` (TaskIQ; depends on `postgres`, `redis`, `minio` healthy)
 
-The **vector store is not in this stack**. Like the embedding server, it is an external service the app addresses by URL — `QDRANT_URL` + `QDRANT_API_KEY`, nothing else. It can run on this host, another host, or Qdrant Cloud; on the same host it is one `docker run` (see [Vector Store (Qdrant)](README.md#vector-store-qdrant)), sharing no network, volume or lifecycle with the app stack. `make up` and `make down` do not touch it, so a redeploy never drops the index.
+The **vector store is not in this stack**. Like the embedding server, it is an external service the app addresses by URL — `QDRANT_URL` + `QDRANT_API_KEY` for Qdrant, `MILVUS_URI` for Milvus, nothing else. It can run on this host, another host, or a managed cluster; on the same host it is one `docker run` (see [Vector Store (Qdrant)](README.md#vector-store-qdrant) / [Vector Store (Milvus)](README.md#vector-store-milvus)), sharing no network, volume or lifecycle with the app stack. `make up` and `make down` do not touch it, so a redeploy never drops the index.
 
-That is what makes the backend swappable in practice: replacing Qdrant with Milvus is a new external container plus `VECTOR_STORE_PROVIDER=milvus`, with no change to the app's Compose files.
+That is what makes the backend swappable in practice: replacing Qdrant with Milvus is a new external container plus `VECTOR_STORE_PROVIDER=milvus`, with no change to the app's Compose files. Leaving both backends' credentials filled in connects both, so the switch is incremental — new stores go to the new engine while existing ones keep answering from the old one.
 
 Because there is no `depends_on` reaching across, the vector store must already be up when `web`/`worker` boot — `init_vector_store()` connects during startup and fails the boot if it cannot, the same contract as the embedding server.
 

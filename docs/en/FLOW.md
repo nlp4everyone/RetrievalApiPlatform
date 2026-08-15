@@ -20,8 +20,13 @@ App Startup  (FastAPI "startup" event, app/app.py → app/startup.py)
         │                                  ↳ callers branch on is_sparse_embedding_enabled(); calling
         │                                    get_sparse_embed_model() while off raises RuntimeError
         ├── init_postgres() + wait_for_postgres()   create pool, retry 5x / 0.5s, then _create_table()
-        ├── init_vector_store()            connection for VECTOR_STORE_PROVIDER → check_connection()
-        │                                  → VectorStoreFactory.register_connection(provider, conn)
+        ├── init_vector_store()            one connection per backend whose credentials are filled
+        │                                  in → check_connection() → register_connection(provider, conn)
+        │                                  VECTOR_STORE_PROVIDER is always in that set, and it being
+        │                                  unreachable fails the BOOT — new stores are created on it,
+        │                                  so a process that cannot reach it has nothing to offer;
+        │                                  any OTHER backend is skipped with a WARNING instead, since
+        │                                  a leftover .env block is enough to have it connected at all
         ├── init_minio()                   MinioService, create UPLOADED_FILE_BUCKET if missing
         └── init_io_executor()             ThreadPoolExecutor(IO_THREAD_POOL_SIZE=32, prefix "io")
                                            the web process needs the I/O pool only — it uploads to
@@ -84,7 +89,7 @@ FastAPI HTTP Gateway
         ├── len(request.file_ids) > 1 ?  → UnsupportedMultipleFilesException (400)
         │       ⓘ single-file ingestion only, rejected upfront rather than letting the caller
         │         poll a store that would never finish
-        ├── generate_vectorstore_id()       → "vs-{32 hex}"
+        ├── generate_vectorstore_id()       → "vs_{32 hex}"
         ├── provider = VectorStoreFactory.default_provider()      ← from VECTOR_STORE_PROVIDER
         │
         ├── traced_span("POST /v1/vector_stores")   ROOT span of the ingestion trace
@@ -184,8 +189,12 @@ FastAPI HTTP Gateway
         │               │             ②ᵇ use_sparse = want_sparse and await supports_sparse()    │
         │               │                the COLLECTION is asked, not the config: an existing    │
         │               │                collection made before sparse was switched on has no    │
-        │               │                sparse field and Qdrant cannot add one, and upserting   │
-        │               │                a sparse vector it cannot hold fails every batch        │
+        │               │                sparse field and NEITHER backend can add one, and       │
+        │               │                upserting a sparse vector it cannot hold fails every    │
+        │               │                batch                                                   │
+        │               │                ⓘ ensure_collection returning False because another     │
+        │               │                  worker won the race is not an error on either         │
+        │               │                  backend — it re-checks existence and carries on       │
         │               │                → context.metrics["sparse_enabled"]                     │
         │               │             ③ chunks → batches of EMBEDDING_UPLOAD_BATCH_SIZE (16),    │
         │               │                asyncio.gather under Semaphore(BATCH_CONCURRENCY=4);    │
@@ -234,6 +243,13 @@ FastAPI HTTP Gateway
         │         rewrite_query are still accepted and ignored
         │
         ├── vector_store = VectorStoreFactory.get_store(collection_name=id, provider=provider)
+        │       the provider comes from the ROW, never from config: a store created on a backend
+        │       this deployment no longer connects raises RuntimeError naming the fix
+        │       ("fill in its connection settings") instead of querying the wrong engine
+        │       Milvus only: the physical collection is the id itself (vs_{hex} is already legal
+        │       there), except for legacy hyphenated ids which stay folded (vs-a1b2… → vs_a1b2…);
+        │       a search that finds it unloaded — as after a server restart — loads it and
+        │       retries ONCE rather than returning empty
         │
         ├── which search actually runs — resolved BEFORE the span opens, so the trace records
         │   what ran rather than what was asked for:
@@ -285,12 +301,16 @@ FastAPI HTTP Gateway
         │       │                    (store row can exist before ingestion created the         │
         │       │                     collection — empty result, not an error)                 │
         │       │                HybridRetriever: one retrieve() carrying both vectors;        │
-        │       │                    Qdrant prefetches each branch (limit×N, so a doc just     │
-        │       │                    outside the dense top-k can still win on rank) and        │
-        │       │                    merges them with FusionQuery(RRF) server-side → ONE list  │
-        │       │                    score_threshold rides on the DENSE prefetch only — it is  │
+        │       │                    each branch is prefetched limit×N deep, so a doc just     │
+        │       │                    outside the dense top-k can still win on rank, and the    │
+        │       │                    backend fuses server-side → ONE list                      │
+        │       │                        Qdrant: prefetch + FusionQuery(RRF), or RrfQuery(k)   │
+        │       │                                when retrieval.rrf_k is set                   │
+        │       │                        Milvus: hybrid_search(AnnSearchRequest×2, RRFRanker)  │
+        │       │                    score_threshold rides on the DENSE branch only — it is    │
         │       │                    a similarity score, and against RRF output (~1/(60+rank)) │
-        │       │                    it would drop everything                                  │
+        │       │                    it would drop everything (Milvus takes it as a `radius`   │
+        │       │                    search param rather than a score floor)                   │
         │       │                    no sparse vector on the query? → degrades to dense rather │
         │       │                    than failing; the span says retrieval.hybrid.used_sparse  │
         │       │                                            [ObservationType.RETRIEVER]       │

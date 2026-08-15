@@ -71,12 +71,12 @@ Parsing, chunking, embedding, and the vector database each follow the same shape
 - Swapping a backend is an `.env` change, not a code change — useful when comparing chunkers or moving between an OpenAI-compatible embedding server and TEI.
 - The rest of the codebase only ever sees the interface, so a backend swap can't leak upward. `app/db/vector_store/types.py` is explicitly forbidden from importing a vendor SDK for exactly this reason.
 - Backends that aren't installed cost nothing: `VectorStoreFactory` addresses backends by module path and imports them on first use, so a missing `pymilvus` only matters if Milvus is actually requested — and it keeps the import graph acyclic.
-- A new backend can be wired end-to-end (config, enum, factory, startup) and merged before it works, which is what the Milvus placeholder is: enabling it later is filling in method bodies, with no change above `app.db`.
+- A new backend can be wired end-to-end (config, enum, factory, startup) and merged before it works, which is how the Milvus backend landed: filling in method bodies changed nothing above `app.db`. Because the factory keys connections by provider and every vector store row names its own, more than one backend can be connected at once — a migration is incremental rather than a cutover.
 
 **Disadvantages**
 - The lowest-common-denominator problem: the interface can only expose what every backend can do, so backend-specific features (Qdrant's sparse vectors, quantization rescore) need either a widened contract or an escape hatch.
 - More files per capability than a direct call would need, and one more indirection when debugging.
-- A placeholder backend that raises `NotImplementedError` is discoverable in config but not usable — a misconfiguration surfaces as a runtime error rather than a startup one.
+- Config can leave a set of backends connected that does not cover the data: connection settings are checked at startup, but nothing cross-checks them against the providers existing rows reference. Remove the credentials of a backend that still holds stores and the mistake surfaces as a `RuntimeError` on the first search of one of them, not at boot.
 
 **Alternatives considered**
 
@@ -107,20 +107,22 @@ Every embedding is an HTTP call to a model server this repo does not run. `Embed
 | Add vLLM as a service in this Compose stack | Forces a GPU on anyone running the API, ties model restarts to application deploys, and makes the common "shared model server, several consumers" setup impossible |
 | Load the embedding model in-process (`sentence-transformers`) | Puts model weights and CUDA in the worker image, makes the worker's memory profile model-shaped rather than batch-shaped, and every API replica pays for its own copy |
 
-## Why the vector store is provider-agnostic (with Qdrant as the implementation)
+## Why the vector store is provider-agnostic (Qdrant and Milvus)
 
-Each vector store in the repo maps to its own collection, reached through `BaseAsyncVectorStore` rather than a Qdrant client. The provider is recorded **on the vector store row**, not read from config at query time.
+Each vector store in the repo maps to its own collection, reached through `BaseAsyncVectorStore` rather than a Qdrant client. The provider is recorded **on the vector store row**, not read from config at query time — and since every backend with credentials filled in is connected, more than one engine can be served in the same process.
 
 **Advantages**
-- Existing collections keep working after `VECTOR_STORE_PROVIDER` changes: `get_store()` is passed the provider the store was created with, so flipping the default only affects new stores.
+- Existing collections keep working after `VECTOR_STORE_PROVIDER` changes: `get_store()` is passed the provider the store was created with, so flipping the default only affects new stores — as long as the old backend's credentials stay in place, which is how a migration runs incrementally instead of as a cutover.
 - Filters are expressed once as a backend-neutral tree (`FieldCondition` / `FilterGroup`) and translated per backend, so the OpenAI-compatible request schema and the query language stay decoupled.
 - `ensure_collection` is deliberately separate from `insert_documents`. Folding creation into the insert path forces every concurrent batch to race on a check-then-act — which is why the previous code had to run its first batch alone. Creating once up front makes every insert a pure write, so they all run concurrently.
 - Qdrant specifically: sparse vectors live on the same collection as the dense ones and it fuses both branches server-side (`prefetch` + `FusionQuery(RRF)`), so hybrid search costs one round-trip and no in-process merge; plus natural per-collection isolation matching the data model, an official async client matching the fully async stack, and built-in quantization and on-disk storage.
+- Milvus reaches the same contract by a different route — `hybrid_search` with an `RRFRanker`, one request carrying every query vector rather than Qdrant's parallel fan-out — which is the evidence that the interface really is neutral: implementing it changed nothing above `app.db`.
 
 **Disadvantages**
-- Adds another service to run in the Docker Compose stack, on top of Postgres/MinIO/Redis.
-- The abstraction is currently validated by exactly one working backend, so the interface may not be as backend-neutral as intended until a second one is actually implemented.
+- The abstraction is validated by two backends, which is enough to expose the lowest-common-denominator cost concretely: Qdrant names vector fields after the model id while Milvus rejects that and uses fixed names, Milvus still folds the legacy `vs-…` collection names to `vs_…` because it allows no hyphens, and it serves only loaded collections while Qdrant has no such state. Each of those is absorbed inside its provider, so the surface stays clean at the price of provider code that is not symmetric.
+- Every connected backend is one more external service to run, monitor and back up — and since they are outside the Compose stack, nothing in `make up` will tell you one is missing until the boot probe fails.
 - Pushing fusion into the backend means the `BaseFusion` seam is unused by the one case it was written for; a backend that cannot fuse server-side would have to bring its own strategy back into the process.
+- Score semantics do not survive the abstraction intact: `score_threshold` is a cosine floor on Qdrant and a `radius` on Milvus, and on hybrid it can only be applied to the dense branch on either engine. The contract is the same, the numbers behind it are not exactly.
 
 **Alternatives considered**
 
@@ -129,6 +131,7 @@ Each vector store in the repo maps to its own collection, reached through `BaseA
 | pgvector (a Postgres extension) | No native BM25/sparse vector support; would need a separate full-text search bolted on, losing the "one collection for both dense and sparse" advantage |
 | Elasticsearch / OpenSearch | Strong at BM25/full-text but less optimized for pure vector similarity search than Qdrant, and heavier to operate for a service that only needs a vector store |
 | Committing to the Qdrant client directly | Cheaper today, but the backend choice would leak into services and pipelines, making a later migration a rewrite rather than a new provider |
+| One backend at a time — resolve `VECTOR_STORE_PROVIDER` at query time | Makes changing backend a cutover: every existing store becomes unreadable the moment the variable flips, so the only migration path is re-ingesting everything before the switch. Recording the provider per row and connecting several at once costs one column and a dict of connections, and turns that cutover into a gradual drain |
 
 ## Why `SearchType` names the whole retrieval shape
 
@@ -201,13 +204,14 @@ The worker runs two `ThreadPoolExecutor`s — `IO_THREAD_POOL_SIZE=32` for MinIO
 
 ## Known gaps
 
-- **Single-file ingestion.** More than one `file_id` is rejected with a 400 at request time, and `IngestionService` re-checks and marks the store `failed` rather than reporting `completed` on an empty store.
+- **Single-file ingestion.** More than one `file_id` is rejected with a 400 at request time, and `IngestionService` re-checks and marks the store `failed` rather than reporting `completed` on an empty store. The obstacle is the schema, not the check: there is no `vector_store_files` table, so a store's progress is one `status` column — which cannot express "3 files done, 1 failed". Multi-file means modelling per-file state first, the way OpenAI's own `vector_store.files` sub-resource does.
+- **`file_counts` is derived, not counted.** `_calculate_file_counts` maps the store's single status to `completed=1` / `failed=1`; no other value is reachable. The field is present for OpenAI compatibility and follows from the gap above.
+- **No automated test suite.** `pytest` and `pytest-asyncio` are declared in the dev dependency group, but there is no `tests/` directory and not a single test file — `examples/file_upload_example.py` against a running stack is the only end-to-end check. The layering is built for testability (stages take a plain context, `IngestionService` imports no TaskIQ, providers sit behind interfaces) but nothing exercises it.
 - **The `"fuse"` fallback.** Sending `{"type": "auto"}` explicitly (instead of omitting `chunking_strategy`) falls through to a `"fuse"` strategy that `IngestionService` skips — the store reports `completed` while nothing was indexed. Omitting the field takes the correct `"auto"` path.
 - **`ranking_options` is only partly applied.** `score_threshold` now reaches the backend (on the dense branch — applied to RRF output it would drop everything), but `ranker` and `rewrite_query` are still accepted and ignored, and quantization rescore is not surfaced on the vector store contract. `filters` **are** applied.
 - **List queries are truncated.** If `query` is a list, only the first element is used.
 - **Single-tenant auth.** One shared `FASTAPI_API_KEY`, even though rows are scoped by `api_key` as if for multi-tenancy.
 - **Orphaned objects.** If the Postgres insert fails after a successful MinIO upload, the object is left behind — logged, with no compensating cleanup.
-- **Hybrid retrieval depends on when a store was ingested.** `resolve_search_type` only returns `HYBRID` for collections that already carry sparse vectors, and Qdrant cannot add a vector field to a live collection — so enabling `SPARSE_EMBEDDING_ENABLED` leaves every existing store dense-only until it is re-ingested. A caller can now find this out by asking: `search_type: "hybrid"` on such a store returns a 400 naming the reason. There is still no way to *read* a store's mode — no field on `VectorStoreObject` says whether it holds sparse vectors, so discovering it means attempting a search.
-- **Milvus is a placeholder.** Wired through config, `VectorStoreType`, `VectorStoreFactory`, and startup, but every method raises `NotImplementedError`.
+- **Hybrid retrieval depends on when a store was ingested.** `resolve_search_type` only returns `HYBRID` for collections that already carry sparse vectors, and neither backend can add a vector field to a live collection — so enabling `SPARSE_EMBEDDING_ENABLED` leaves every existing store dense-only until it is re-ingested. A caller can now find this out by asking: `search_type: "hybrid"` on such a store returns a 400 naming the reason. There is still no way to *read* a store's mode — no field on `VectorStoreObject` says whether it holds sparse vectors, so discovering it means attempting a search.
 - **The two allow-lists disagree.** `.csv`, `.json`, and `.gif` pass upload validation but have no registered parsing provider. Conversely `.md` and `.doc` can be parsed but are not in `ALLOWED_EXTENSIONS`, and `validate_file_type` gates on extension with no escape hatch — those two always get a 415 at upload.
 - **Partial writes when ingestion fails.** `EmbedAndIndexStage` upserts batch by batch, so a batch failing midway leaves earlier batches in the collection even though the store is marked `failed`; there is no cleanup.

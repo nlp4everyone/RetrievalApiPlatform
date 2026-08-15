@@ -19,8 +19,13 @@ App Startup  (FastAPI "startup" event, app/app.py → app/startup.py)
         │                                  ↳ caller rẽ nhánh bằng is_sparse_embedding_enabled(); gọi
         │                                    get_sparse_embed_model() khi đang tắt sẽ raise RuntimeError
         ├── init_postgres() + wait_for_postgres()   tạo pool, thử lại 5 lần / 0.5s, rồi _create_table()
-        ├── init_vector_store()            connection cho VECTOR_STORE_PROVIDER → check_connection()
-        │                                  → VectorStoreFactory.register_connection(provider, conn)
+        ├── init_vector_store()            một connection cho mỗi backend đã điền credential →
+        │                                  check_connection() → register_connection(provider, conn)
+        │                                  VECTOR_STORE_PROVIDER luôn nằm trong tập đó, và nó không truy
+        │                                  cập được là BOOT FAIL — store mới được tạo trên nó, tiến trình
+        │                                  không với tới nó thì chẳng phục vụ được gì; backend CÒN LẠI chỉ
+        │                                  bị bỏ qua kèm WARNING, vì một khối .env còn sót cũng đủ khiến
+        │                                  nó được kết nối
         ├── init_minio()                   MinioService, tạo UPLOADED_FILE_BUCKET nếu chưa có
         └── init_io_executor()             ThreadPoolExecutor(IO_THREAD_POOL_SIZE=32, prefix "io")
                                            tiến trình web chỉ cần pool I/O — nó upload/delete trên MinIO
@@ -83,7 +88,7 @@ FastAPI HTTP Gateway
         ├── len(request.file_ids) > 1 ?  → UnsupportedMultipleFilesException (400)
         │       ⓘ chỉ hỗ trợ ingest một file, từ chối ngay thay vì để caller poll
         │         một store không bao giờ hoàn thành
-        ├── generate_vectorstore_id()       → "vs-{32 hex}"
+        ├── generate_vectorstore_id()       → "vs_{32 hex}"
         ├── provider = VectorStoreFactory.default_provider()      ← từ VECTOR_STORE_PROVIDER
         │
         ├── traced_span("POST /v1/vector_stores")   ROOT span của trace ingestion
@@ -179,8 +184,11 @@ FastAPI HTTP Gateway
         │               │                → context.metrics["collection_created"]                   │
         │               │             ②ᵇ use_sparse = want_sparse and await supports_sparse()      │
         │               │                HỎI COLLECTION chứ không tin config: collection tạo trước │
-        │               │                khi bật sparse thì không có field sparse, Qdrant không    │
-        │               │                thêm được, và upsert sparse vào đó sẽ fail cả batch       │
+        │               │                khi bật sparse thì không có field sparse, KHÔNG backend   │
+        │               │                nào thêm được, và upsert sparse vào đó sẽ fail cả batch   │
+        │               │                ⓘ ensure_collection trả False vì worker khác thắng cuộc   │
+        │               │                  đua không phải lỗi trên cả hai backend — nó kiểm tra    │
+        │               │                  lại sự tồn tại rồi đi tiếp                              │
         │               │                → context.metrics["sparse_enabled"]                       │
         │               │             ③ chunks → batch cỡ EMBEDDING_UPLOAD_BATCH_SIZE (16),        │
         │               │                asyncio.gather dưới Semaphore(BATCH_CONCURRENCY=4);       │
@@ -229,6 +237,12 @@ FastAPI HTTP Gateway
         │         rewrite_query vẫn được nhận rồi bỏ qua
         │
         ├── vector_store = VectorStoreFactory.get_store(collection_name=id, provider=provider)
+        │       provider lấy từ ROW chứ không bao giờ từ config: store tạo trên backend mà deployment
+        │       này không còn kết nối sẽ raise RuntimeError kèm cách sửa ("điền credential
+        │       kết nối của nó vào") thay vì đi query nhầm engine
+        │       Riêng Milvus: collection vật lý chính là id (vs_{hex} vốn đã hợp lệ ở đó), trừ id
+        │       gạch ngang cũ vẫn phải gấp (vs-a1b2… → vs_a1b2…); một search gặp collection chưa
+        │       load — như sau khi server khởi động lại — sẽ load rồi thử lại MỘT lần thay vì trả rỗng
         │
         ├── search nào thực sự chạy — phân giải TRƯỚC khi mở span, để trace ghi cái đã chạy
         │   chứ không phải cái được yêu cầu:
@@ -280,12 +294,16 @@ FastAPI HTTP Gateway
         │       │                    (row của store có thể tồn tại trước khi ingestion tạo        │
         │       │                     collection — kết quả rỗng, không phải lỗi)                  │
         │       │                HybridRetriever: một retrieve() mang cả hai vector;              │
-        │       │                    Qdrant prefetch từng nhánh (limit×N, để một document nằm     │
-        │       │                    ngay ngoài top-k dense vẫn còn cơ hội thắng theo rank) rồi   │
-        │       │                    trộn bằng FusionQuery(RRF) ngay ở server → MỘT danh sách     │
-        │       │                    score_threshold CHỈ gắn vào nhánh prefetch dense — nó là     │
-        │       │                    điểm similarity, đem so với output RRF (~1/(60+rank)) thì    │
-        │       │                    sẽ loại sạch mọi thứ                                         │
+        │       │                    mỗi nhánh được prefetch sâu limit×N, để một document         │
+        │       │                    nằm ngay ngoài top-k dense vẫn còn cơ hội thắng theo         │
+        │       │                    rank, rồi backend trộn ngay ở server → MỘT danh sách         │
+        │       │                        Qdrant: prefetch + FusionQuery(RRF), hoặc                │
+        │       │                                RrfQuery(k) khi đặt retrieval.rrf_k              │
+        │       │                        Milvus: hybrid_search(AnnSearchRequest×2, RRFRanker)     │
+        │       │                    score_threshold CHỈ gắn vào nhánh dense — nó là điểm         │
+        │       │                    similarity, đem so với output RRF (~1/(60+rank)) thì         │
+        │       │                    sẽ loại sạch mọi thứ (Milvus nhận nó dưới dạng tham          │
+        │       │                    số search `radius` chứ không phải ngưỡng điểm)               │
         │       │                    query không có sparse vector? → tự hạ xuống dense thay vì    │
         │       │                    fail; span ghi lại ở retrieval.hybrid.used_sparse            │
         │       │                                            [ObservationType.RETRIEVER]          │

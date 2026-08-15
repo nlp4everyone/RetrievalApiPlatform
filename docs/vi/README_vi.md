@@ -1,6 +1,6 @@
 # 🚀 RetrievalApiPlatform — Retrieval Engine cho hệ thống RAG
 
-Một **Retrieval Engine** tương thích OpenAI API dành cho các hệ thống Retrieval-Augmented Generation (RAG), xây dựng trên FastAPI. Dự án cung cấp các endpoint `Files` và `Vector Stores` tương thích đủ gần với OpenAI để có thể dùng thẳng SDK chính thức của OpenAI, phía sau là một vector database có thể thay thế (hiện tại là Qdrant), Postgres (metadata), MinIO (object storage), Redis + TaskIQ (ingestion nền), và Langfuse/OpenTelemetry (tracing).
+Một **Retrieval Engine** tương thích OpenAI API dành cho các hệ thống Retrieval-Augmented Generation (RAG), xây dựng trên FastAPI. Dự án cung cấp các endpoint `Files` và `Vector Stores` tương thích đủ gần với OpenAI để có thể dùng thẳng SDK chính thức của OpenAI, phía sau là một vector database có thể thay thế (Qdrant hoặc Milvus, hoặc cả hai cùng lúc), Postgres (metadata), MinIO (object storage), Redis + TaskIQ (ingestion nền), và Langfuse/OpenTelemetry (tracing).
 
 <br />
 
@@ -11,7 +11,7 @@ Một **Retrieval Engine** tương thích OpenAI API dành cho các hệ thống
 - **Ingestion streaming, bộ nhớ có trần** — bước cuối embed và upsert **từng batch một** trong cùng một semaphore, nên việc ghi bắt đầu từ batch đầu tiên và bộ nhớ đỉnh là `batch_size × concurrency` chứ không theo kích thước file. Worker tách pool thread I/O khỏi pool CPU và chặn trần số download song song
 - **Provider có thể thay thế ở mọi lớp** — parsing, chunking, embedding và vector database đều nằm sau một interface `base.py`, với thư mục `provider/` và một facade `from_settings()`, chọn bằng đúng một biến môi trường
 - **Ingestion bất đồng bộ** — upload file trả về ngay lập tức; pipeline chạy nền trên một TaskIQ worker (broker Redis Streams)
-- **Vector search không phụ thuộc backend** — dense similarity search qua `BaseAsyncVectorStore`; Qdrant đã triển khai, Milvus đã được nối dây đầy đủ nhưng còn là placeholder. Metadata filter được biểu diễn dưới dạng cây trung lập rồi dịch riêng cho từng backend
+- **Vector search không phụ thuộc backend** — dense và hybrid search qua `BaseAsyncVectorStore`; cả Qdrant lẫn Milvus đều đã triển khai và có thể kết nối cùng lúc, vì mỗi vector store đều nhớ engine nào đang giữ nó. Metadata filter được biểu diễn dưới dạng cây trung lập rồi dịch riêng cho từng backend
 - **Tracing bám theo luồng xử lý** — chính `Pipeline` (không phải từng stage) mở span, nên hình dạng trace trên Langfuse luôn đúng khi stage thay đổi. W3C trace context được truyền sang worker, nên các observation của ingestion nằm trong đúng trace của HTTP request đã tạo ra nó
 
 <br />
@@ -38,7 +38,7 @@ git clone -b retrieval/naive-rag https://github.com/nlp4everyone/RetrievalApiPla
 cd RetrievalApiPlatform
 ```
 
-**1. Khởi động Qdrant trước.** Nó là service bên ngoài, không nằm trong `make up`, và nếu chưa có nó thì ứng dụng không có gì để kết nối tới — xem [Vector Store (Qdrant)](#vector-store-qdrant) để biết chi tiết:
+**1. Khởi động vector store trước.** Nó là service bên ngoài, không nằm trong `make up`, và nếu chưa có nó thì ứng dụng không có gì để kết nối tới. Qdrant là mặc định — xem [Vector Store (Qdrant)](#vector-store-qdrant), hoặc [Vector Store (Milvus)](#vector-store-milvus) cho backend còn lại:
 
 ```bash
 docker run -d --name qdrant_db --restart always \
@@ -111,7 +111,74 @@ Lưu ý:
 - **`QDRANT_API_KEY` phải giống hệt nhau ở cả hai phía.** Giá trị phía ứng dụng được kiểm tra lúc startup, nên lệch key sẽ fail ngay lúc boot chứ không phải tới lần search đầu tiên
 - **Publish port 6333 là bind lên mọi interface.** API key là thứ duy nhất chắn phía trước — hãy firewall port đó, hoặc bind vào địa chỉ nội bộ (`-p 10.0.0.5:6333:6333`), trước khi chạy ở môi trường công khai
 - **Nâng cấp** là `docker rm -f qdrant_db` rồi chạy lại đúng lệnh `docker run` với tag mới hơn; named volume mang dữ liệu đi theo
-- **Đổi sang Milvus** nghĩa là chạy Milvus thay cho cái này và đặt `VECTOR_STORE_PROVIDER=milvus` trong `.env` của ứng dụng — các file Compose của ứng dụng không đổi
+- **Đổi sang Milvus** nghĩa là chạy Milvus thay cho cái này và đặt `VECTOR_STORE_PROVIDER=milvus` trong `.env` của ứng dụng — các file Compose của ứng dụng không đổi. Cũng có thể chạy song song cả hai; xem [Vector Store (Milvus)](#vector-store-milvus)
+
+<br />
+
+## Vector Store (Milvus)
+
+Milvus là backend thứ hai đã triển khai, cũng nằm ngoài y hệt: `make up` và `make down` không bao giờ đụng tới nó, redeploy ứng dụng không làm mất index, và ứng dụng chỉ biết nó qua `MILVUS_URI` (thêm `MILVUS_TOKEN` khi bật xác thực). Chạy trên chính máy này, trên máy khác, hoặc dùng Zilliz Cloud.
+
+Khác với Qdrant, nó không gói gọn trong một container tự đủ — Milvus cần etcd cho metadata và một object store cho segment. Chế độ standalone chạy cả hai *bên trong* một container duy nhất (etcd nhúng, đĩa local), và script chính thức tự sinh các file cấu hình cần cho việc đó, nên vẫn chỉ là một lệnh:
+
+```bash
+curl -sfL https://raw.githubusercontent.com/milvus-io/milvus/master/scripts/standalone_embed.sh -o standalone_embed.sh
+bash standalone_embed.sh start
+```
+
+Kết quả là một container `milvus-standalone`:
+
+| Nó dựng lên cái gì | Vì sao |
+|---|---|
+| Port `19530` | gRPC API — chính là port trong `MILVUS_URI` |
+| Port `9091` | Health và metrics; `/healthz` nằm ở đây, không phải ở 19530 |
+| Port `2379` | etcd nhúng — chỉ cần khi bạn muốn xem thẳng metadata |
+| `./volumes/milvus` | Collection, dữ liệu etcd và segment — toàn bộ database nằm trong thư mục này, nên backup nguyên cụm |
+| `./user.yaml` | Cấu hình ghi đè, sinh cạnh script, gồm cả việc có bật xác thực hay không |
+
+Vận hành:
+
+```bash
+curl -s http://localhost:9091/healthz     # → OK
+docker logs -f milvus-standalone
+bash standalone_embed.sh stop             # dừng, vẫn giữ ./volumes/milvus
+bash standalone_embed.sh start            # chạy lại trên đúng dữ liệu cũ
+bash standalone_embed.sh upgrade          # image mới hơn, dữ liệu giữ nguyên
+bash standalone_embed.sh delete           # xoá container VÀ cả ./volumes/milvus
+```
+
+Sau đó trỏ `.env` của ứng dụng sang nó:
+
+| Milvus chạy ở đâu | `MILVUS_URI` trong `.env` của ứng dụng |
+|---|---|
+| Cùng host, app chạy trong Compose | `http://172.17.0.1:19530` (gateway bridge của Docker) |
+| Máy khác | `http://<host>:19530` |
+| Zilliz Cloud | URI của cluster, kèm `MILVUS_TOKEN` |
+
+### Chạy song song cả hai
+
+`VECTOR_STORE_PROVIDER` quyết định vector store **mới** được tạo ở đâu. Startup kết nối những backend nào thì không phải một setting riêng: điền credential của backend nào là kết nối backend đó. Vì mỗi row vector store đều ghi lại backend đang giữ nó, điền cả hai nghĩa là store trên engine nào cũng search được từ cùng một process:
+
+```bash
+VECTOR_STORE_PROVIDER=qdrant           # store mới rơi vào đây
+QDRANT_URL=http://172.17.0.1:6333      # đã điền -> được kết nối
+QDRANT_API_KEY=change-me
+MILVUS_URI=http://172.17.0.1:19530     # đã điền -> cũng được kết nối và search được
+```
+
+Đó chính là thứ khiến việc chuyển đổi diễn ra từ từ thay vì cắt một nhát: đổi `VECTOR_STORE_PROVIDER` sang `milvus` thì store mới đi vào Milvus trong khi mọi store Qdrant cũ vẫn trả lời bình thường. Comment credential của một backend lại khi không còn gì trỏ vào nó nữa.
+
+`VECTOR_STORE_PROVIDER` bắt buộc phải kết nối được, nếu không boot sẽ fail — store mới được tạo trên nó. Backend còn lại nếu không kết nối được thì chỉ bị bỏ qua kèm cảnh báo, nên một khối credential còn sót không gây chết service; store nằm ở backend chưa kết nối sẽ báo `RuntimeError` nêu đích danh backend đó lúc query.
+
+Lưu ý:
+
+- **Milvus `2.4`+** để có `hybrid_search` với `RRFRanker`; đã kiểm chứng trên `3.0` với bản `pymilvus` đang pin
+- **Script không đặt restart policy**, khác với container Qdrant ở trên — Milvus sẽ không tự sống lại sau khi reboot máy cho tới khi bạn chạy `docker update --restart always milvus-standalone`
+- **Xác thực mặc định tắt**, nên `MILVUS_TOKEN` để trống được. Muốn bật thì sửa `user.yaml` (`common.security.authorizationEnabled: true`), restart, rồi đặt `MILVUS_TOKEN=<user>:<password>` — cặp root mặc định là `root:Milvus`. Publish port 19530 khi xác thực đang tắt nghĩa là ai chạm được tới port đó cũng đọc hoặc xoá được mọi collection, nên hãy firewall hoặc bind vào địa chỉ nội bộ
+- **Mọi backend trong danh sách phải kết nối được lúc startup**, nếu không thì boot fail — một service kết nối nửa vời sẽ trả lời được store này và 500 với store kia
+- **Tên collection chính là id.** Milvus chỉ chấp nhận chữ, số và gạch dưới, nên id vector store dùng luôn gạch dưới: `vs_a1b2…` vừa là id vừa là tên collection, trên cả Qdrant lẫn Milvus, nên cùng một store hiện giống hệt nhau trong Attu và trong dashboard của Qdrant. Store tạo trước quy ước này mang gạch ngang (`vs-a1b2…`) và vẫn được gấp thành `vs_a1b2…`, chỉ trên Milvus
+- **Collection được load khi cần.** Milvus chỉ phục vụ collection đã load, và server khởi động lại thì mọi collection đều chưa load, nên search gặp trường hợp đó sẽ tự load rồi thử lại một lần
+- **Đọc ở mức `Strong`**, khớp với read-your-writes của Qdrant: store vừa `completed` là search được ngay. Muốn đổi độ tươi lấy độ trễ thì sửa trong `AsyncMilvusVectorStore.__init__`
 
 <br />
 
@@ -178,7 +245,7 @@ Upload trả về ngay lập tức; ingestion (download → parse → chunk → 
 | Thành phần | Triển khai | Chọn bằng |
 |---|---|---|
 | API layer | FastAPI | — |
-| Vector database | Qdrant (Milvus còn là stub) | `VECTOR_STORE_PROVIDER` |
+| Vector database | Qdrant và Milvus, kết nối được cùng lúc | `VECTOR_STORE_PROVIDER` (+ credential của từng backend) |
 | Metadata store | PostgreSQL (`asyncpg`) | — |
 | Object storage | MinIO (lưu byte của file đã upload) | — |
 | Task queue | Redis Streams + TaskIQ | — |
@@ -204,10 +271,12 @@ Upload trả về ngay lập tức; ingestion (download → parse → chunk → 
 
 Xem chi tiết tại [Design Decisions](DESIGN_DECISIONS_vi.md).
 
-- Vector store chỉ ingest được đúng **một file**; nhiều hơn một `file_id` giờ bị từ chối ngay tại thời điểm request với lỗi 400, thay vì bị âm thầm bỏ qua
+- Vector store chỉ ingest được đúng **một file**; nhiều hơn một `file_id` giờ bị từ chối ngay tại thời điểm request với lỗi 400, thay vì bị âm thầm bỏ qua. Không có bảng `vector_store_files`, nên tiến độ của một store chỉ là một cột `status` — muốn ingest nhiều file thì phải mô hình hoá trạng thái theo từng file trước, chứ không chỉ nới lỏng một lệnh kiểm tra
+- `file_counts` được suy ra từ đúng cột status đó (`completed=1` hoặc `failed=1`), không bao giờ đếm theo từng file
+- Chưa có bộ test tự động: `pytest`/`pytest-asyncio` đã nằm trong nhóm dev nhưng không có thư mục `tests/`
 - Trong `ranking_options` của `POST /v1/vector_stores/{id}/search`, mới chỉ `score_threshold` được áp dụng; `ranker` và `rewrite_query` vẫn được nhận rồi bỏ qua (`filters` **đã** được áp dụng)
-- Hybrid search (dense + sparse) chỉ chạy khi có đủ cả hai nửa: `SPARSE_EMBEDDING_ENABLED` **và** collection đã ingest kèm sparse vector. Store tạo trước khi bật sparse vẫn dense-only — Qdrant không thêm được field vector vào collection đang sống, nên muốn hybrid thì phải ingest lại. `search_type: "auto"` (mặc định) tự phân giải theo từng store; còn đòi `"hybrid"` trên store không đáp ứng được thì nhận lỗi 400 chứ không âm thầm rơi về dense
-- Milvus đã được nối dây qua config, `VectorStoreType` và `VectorStoreFactory`, nhưng mọi method đều raise `NotImplementedError`
+- Hybrid search (dense + sparse) chỉ chạy khi có đủ cả hai nửa: `SPARSE_EMBEDDING_ENABLED` **và** collection đã ingest kèm sparse vector. Store tạo trước khi bật sparse vẫn dense-only — không backend nào thêm được field vector vào collection đang sống, nên muốn hybrid thì phải ingest lại. `search_type: "auto"` (mặc định) tự phân giải theo từng store; còn đòi `"hybrid"` trên store không đáp ứng được thì nhận lỗi 400 chứ không âm thầm rơi về dense
+- Weighted RRF về nguyên tắc chỉ Qdrant có, nhưng chưa backend nào dùng — cả hai đều fuse bằng RRF thường, chỉ chỉnh được qua `retrieval.rrf_k`
 - Auth dùng chung một `FASTAPI_API_KEY` duy nhất — chưa phải multi-tenant theo từng người dùng, dù các row đã được scope theo `api_key`
 - Chưa có endpoint sub-resource "vector store files" kiểu OpenAI (attach/list/detach một file trên vector store đã tồn tại)
 - `.csv`, `.json` và `.gif` vượt qua validation lúc upload nhưng chưa có provider parsing nào đăng ký; ngược lại `.md` và `.doc` parse được nhưng không nằm trong allow-list lúc upload nên luôn bị 415
@@ -228,10 +297,12 @@ Xem chi tiết tại [Design Decisions](DESIGN_DECISIONS_vi.md).
 - [x] Parsing qua Unstructured API cho `.txt`/`.md`/`.docx`/`.doc`/ảnh (thay decoder in-process; mọi định dạng giờ đều ra Markdown)
 - [x] Ingestion streaming: gộp embed + index thành một stage, bộ nhớ đỉnh không phụ thuộc kích thước file
 - [x] Tách pool thread I/O và CPU, chặn trần download đồng thời trong worker
+- [ ] Bảng `vector_store_files` cho trạng thái theo từng file (điều kiện tiên quyết của cả hai mục dưới)
 - [ ] Ingest nhiều file cho một vector store
 - [x] Hybrid search (sparse vector BGE-M3, trộn với dense bằng RRF của Qdrant)
 - [x] `search_type` theo từng request (`auto`/`dense`/`hybrid`), chỉ định hybrid trên store không đáp ứng được thì bị từ chối bằng 400
 - [ ] Áp dụng nốt phần còn lại của `ranking_options` trong search (`score_threshold` xong; `ranker`, `rewrite_query` vẫn bị bỏ qua)
-- [ ] Triển khai backend Milvus
+- [x] Triển khai backend Milvus, kết nối song song được với Qdrant
 - [ ] Endpoint sub-resource cho vector store file (attach/list/detach)
 - [ ] Đồng bộ hai allow-list: parser cho `.csv`/`.json`/`.gif` (hoặc gỡ chúng khỏi upload), và thêm `.md`/`.doc` vào `ALLOWED_EXTENSIONS`
+- [ ] Test tự động (`pytest` đã là dependency dev; chưa có gì dùng tới)

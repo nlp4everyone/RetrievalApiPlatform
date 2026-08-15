@@ -1,3 +1,4 @@
+
 # Configuration Reference
 
 Config is loaded from two sources, merged per-domain in `app/core/config/`:
@@ -7,11 +8,11 @@ Config is loaded from two sources, merged per-domain in `app/core/config/`:
 
 Required settings (no default — startup fails fast if missing/empty): `SERVING_API_KEY`, `FASTAPI_API_KEY`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `POSTGRES_HOST`, `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD`, `MINIO_ENDPOINT_URL`, `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_BASE_URL`.
 
-Conditionally required by `validate_vector_store_credentials` — only for the selected `VECTOR_STORE_PROVIDER`: `QDRANT_URL` + `QDRANT_API_KEY` for `qdrant`, `MILVUS_URI` for `milvus`.
+Conditionally required by `validate_vector_store_credentials` — the settings of `VECTOR_STORE_PROVIDER` only: `QDRANT_URL` + `QDRANT_API_KEY` for `qdrant`, `MILVUS_URI` for `milvus`. Filling in the *other* backend's settings is optional, and is what connects it.
 
 ## Provider selection
 
-Four variables pick which backend serves each swappable capability. Each is validated by a `field_validator` in `settings.py`, so an unknown value fails at **startup**, not at first use.
+Five variables pick which backend serves each swappable capability. Each is validated by a `field_validator` in `settings.py`, so an unknown value fails at **startup**, not at first use.
 
 | Variable | Default | Accepted values | Picks |
 |---|---|---|---|
@@ -19,7 +20,9 @@ Four variables pick which backend serves each swappable capability. Each is vali
 | `SPARSE_EMBEDDING_PROVIDER` | `vllm` | `vllm` | `VLLMSparseEmbeddingProvider` (token ids from vLLM's `/tokenize`, token weights from `/pooling`, on a BGE-M3 style model). Only built when `SPARSE_EMBEDDING_ENABLED` is true |
 | `CHUNKING_PROVIDER` | `chonkie` | `chonkie`, `langchain` | `ChonkieProvider` or `LangchainProvider` (`langchain_text_splitters`) |
 | `PDF_PARSER_PROVIDER` | `llamaparse` | `llamaparse` | PDF backend. Every other format (`.txt`, `.md`, `.docx`, `.doc`, images) always goes through the Unstructured API, so only PDF has a backend worth choosing |
-| `VECTOR_STORE_PROVIDER` | `qdrant` | `qdrant`, `milvus` | Backend **new** vector stores are created on. Startup connects only this one, so switching strands collections on the previous backend — their row still names the old provider and `get_connection` raises `RuntimeError` instead of querying the wrong backend. Milvus is wired but every method raises `NotImplementedError` |
+| `VECTOR_STORE_PROVIDER` | `qdrant` | `qdrant`, `milvus` | Backend **new** vector stores are created on. Existing stores are unaffected — each row names the backend holding it |
+
+Which backends startup *connects* is not configured separately: a backend is connected when the settings it cannot connect without are filled in (`QDRANT_URL` + `QDRANT_API_KEY`, or `MILVUS_URI`), so both engines can serve at once and there is no second list to forget. `VECTOR_STORE_PROVIDER` is always connected — new stores are created on it, so it cannot be left out, and it fails the boot when unreachable. A backend connected only because its settings are present is skipped with a warning instead, since a leftover `.env` block is enough to trigger it; a store held by a backend that is not connected raises `RuntimeError` at query time rather than hitting the wrong engine.
 
 ## Environment variables (`.env`)
 
@@ -52,11 +55,11 @@ Four variables pick which backend serves each swappable capability. Each is vali
 | `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` / `POSTGRES_HOST` | — (required) | Postgres connection |
 | `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` | — (required) | MinIO credentials |
 | `MINIO_ENDPOINT_URL` | — (required) | MinIO endpoint, e.g. `http://minio:9000` |
-| `VECTOR_STORE_PROVIDER` | `qdrant` | Vector database backend — see [Provider selection](#provider-selection) |
-| `QDRANT_URL` | — (required when `VECTOR_STORE_PROVIDER=qdrant`) | Qdrant endpoint of an external service, e.g. `http://172.17.0.1:6333` (Docker bridge gateway) when it runs on the same host, or the cluster URL for Qdrant Cloud. Run one with [Vector Store (Qdrant)](en/README.md#vector-store-qdrant) — `v1.17`+ (weighted RRF), `v1.19` matched to the pinned client |
-| `QDRANT_API_KEY` | — (required when `VECTOR_STORE_PROVIDER=qdrant`) | Qdrant API key |
-| `MILVUS_URI` | `http://localhost:19530` (required non-empty when `VECTOR_STORE_PROVIDER=milvus`) | Milvus endpoint; unused until the Milvus backend is implemented |
-| `MILVUS_TOKEN` | — | Milvus auth token; unused until the Milvus backend is implemented |
+| `VECTOR_STORE_PROVIDER` | `qdrant` | Backend new vector stores are created on — see [Provider selection](#provider-selection) |
+| `QDRANT_URL` | — (fill in to connect `qdrant`; required when it is `VECTOR_STORE_PROVIDER`) | Qdrant endpoint of an external service, e.g. `http://172.17.0.1:6333` (Docker bridge gateway) when it runs on the same host, or the cluster URL for Qdrant Cloud. Run one with [Vector Store (Qdrant)](en/README.md#vector-store-qdrant) — `v1.17`+ (weighted RRF), `v1.19` matched to the pinned client |
+| `QDRANT_API_KEY` | — (fill in to connect `qdrant`; required when it is `VECTOR_STORE_PROVIDER`) | Qdrant API key |
+| `MILVUS_URI` | — (fill in to connect `milvus`; required when it is `VECTOR_STORE_PROVIDER`) | Milvus endpoint of an external service, e.g. `http://172.17.0.1:19530` (Docker bridge gateway) when it runs on the same host, or the cluster URI for Zilliz Cloud. Milvus `2.4`+ (`hybrid_search` with `RRFRanker`); verified against `3.0` with the pinned `pymilvus` |
+| `MILVUS_TOKEN` | — | Milvus auth token; leave empty on a server without authentication |
 | `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | — (required) | Langfuse OTLP Basic-Auth credentials |
 | `LANGFUSE_BASE_URL` | — (required) | Self-hosted (or cloud) Langfuse base URL; traces post to `{this}/api/public/otel/v1/traces` |
 | `API_VERSION` | `v1` | Router path prefix; must start with `v` |
@@ -92,7 +95,7 @@ None of the embedding settings above start a model server — they only say wher
 | `ingestion.cpu_thread_pool_size` | 4 | Threads for CPU-bound chunking; sized to cores rather than to the I/O pool, since oversubscribing CPU work only adds context switching |
 | `ingestion.download_concurrency` | 4 | Max files a worker process downloads from MinIO at once, so a burst of ingestion jobs can't exhaust the I/O pool |
 | `retrieval.hybrid_prefetch_multiplier` | 2 | Candidates each hybrid branch fetches = this × `max_num_results`. RRF can only reorder the pool it is handed, so a document ranked just outside both top-k lists needs the extra depth to compete; `1` effectively disables the cross-branch consensus hybrid exists for. Must be an integer ≥ 1 — anything else raises at import. Recorded per search as the `retrieval.hybrid.prefetch_multiplier` span attribute |
-| `retrieval.rrf_k` | empty | RRF `k`. Larger rewards documents found by *both* branches, smaller rewards one strong single-branch hit. Empty leaves Qdrant's default (60) and sends `FusionQuery(fusion=RRF)` — the exact request used before this was tunable; a value switches to `RrfQuery(rrf=Rrf(k=…))`, so only an opted-in deployment meets the newer request shape. Must be an integer ≥ 1 or empty. Recorded as `retrieval.hybrid.rrf_k`, absent when left empty. Tune it **after** `hybrid_prefetch_multiplier` — both control how much cross-branch agreement is worth, from different angles |
+| `retrieval.rrf_k` | empty | RRF `k`. Larger rewards documents found by *both* branches, smaller rewards one strong single-branch hit. Empty leaves the backend's default (60 on both). On Qdrant that sends `FusionQuery(fusion=RRF)` — the exact request used before this was tunable; a value switches to `RrfQuery(rrf=Rrf(k=…))`, so only an opted-in deployment meets the newer request shape. Milvus always takes it as `RRFRanker(k=…)`. Must be an integer ≥ 1 or empty. Recorded as `retrieval.hybrid.rrf_k`, absent when left empty. Tune it **after** `hybrid_prefetch_multiplier` — both control how much cross-branch agreement is worth, from different angles |
 
 Override the YAML file location via the `SETTINGS_YAML` mechanism in `YamlConfigLoader`, or edit `config/config.yaml` directly (it's mounted/copied into the image and version-controlled).
 
@@ -103,14 +106,33 @@ Defined in `app/core/config/storage.py`, used by `app/api/dependencies.py`:
 - `ALLOWED_MIME_TYPES` / `ALLOWED_EXTENSIONS`: `.pdf`, `.docx`, `.txt`, `.csv`, `.json`, `.jpg`/`.jpeg`, `.png`, `.gif` — upload-time acceptance list. It does not match the parsing registry in either direction: `.csv`, `.json`, and `.gif` upload fine but have no parsing provider, while `.md` and `.doc` are parseable but rejected at upload with a 415 (see `ParsingService` in [Detailed Components](en/DETAILED_COMPONENTS.md)).
 - `MIME_TYPE_MAPPING`: cross-checked against the declared extension to reject MIME/extension mismatches with a 415.
 
+### Collection shape (constructor defaults, per backend)
+
+How a collection is built is decided by `AsyncQdrantVectorStore.__init__` / `AsyncMilvusVectorStore.__init__`, not by `.env` or `config.yaml`. Only `hybrid_prefetch_multiplier` and `rrf_k` are wired to config; everything below changes by editing the default or passing it at construction, and only affects collections created **after** the change:
+
+| Setting | Qdrant | Milvus |
+|---|---|---|
+| Dense metric | `Distance.COSINE` | `COSINE` |
+| Sparse metric | dot product over `{token_id: weight}` | `IP` |
+| Shards | `shard_number=2` | `shard_number=1` — same name, different knob: a Milvus shard is a DML write channel, so it scales ingestion while search parallelises over segments. Extra channels would only add a timetick for `"Strong"` reads to wait on |
+| Dense index | HNSW, `default_segment_number=4`, `indexing_threshold=0` during bulk load then raised to `20000` | HNSW, `hnsw_m=16`, `hnsw_ef_construction=200` |
+| Sparse index | sparse vector config, no quantization (there is nothing to compress in a term-weight map, and BGE-M3 weights are already learned) | `SPARSE_INVERTED_INDEX` |
+| Quantization | `quantization_mode="scalar"` (`binary`/`product`/`none` also accepted) | not applicable |
+| Storage | `on_disk=True` | server-side default |
+| Read consistency | read-your-writes by default | `consistency_level="Strong"` — relax to `"Bounded"` to trade freshness for latency |
+| Field limits | payload, no fixed cap | id ≤ 64 chars, `page_content` ≤ 65535 chars — a longer chunk is rejected at insert |
+| Vector field names | model id folded through `_vector_name()` (`Qwen/Qwen3-Embedding-0.6B` → `Qwen_Qwen3-Embedding-0.6B`) | fixed `dense_vector` / `sparse_vector` |
+
+Renaming the Qdrant vector-name mapping strands every collection created before the change, since `using=` would no longer match a field that exists.
+
 ## Where each setting is consumed
 
 | Setting group | Read by |
 |---|---|
-| Provider switches | `EmbeddingService.from_settings()`, `ChunkingService.from_settings()`, `ParsingService.from_settings()`, `VectorStoreFactory.default_provider()` |
+| Provider switches | `EmbeddingService.from_settings()`, `ChunkingService.from_settings()`, `ParsingService.from_settings()`, `VectorStoreFactory.default_provider()` (new stores) / `VectorStoreFactory.enabled_providers()` (what `init_vector_store()` connects) |
 | Postgres / MinIO / vector store credentials | `app/startup.py` `init_*` functions, shared by the web app and the TaskIQ worker |
 | `REDIS_URL` | `app/tasks/broker.py` — both the broker and the result backend |
 | `EMBEDDING_UPLOAD_BATCH_SIZE` / `EMBEDDING_BATCH_CONCURRENCY` | `build_ingestion_pipeline()` → `EmbedAndIndexStage` |
 | `IO_THREAD_POOL_SIZE` / `CPU_THREAD_POOL_SIZE` / `DOWNLOAD_CONCURRENCY` | `init_io_executor()` / `init_cpu_executor()` / `init_download_semaphore()` in `app/startup.py`; read back by `MinioFileStore`, the chunking providers, and `DownloadStage` |
-| `HYBRID_PREFETCH_MULTIPLIER` / `RRF_K` | `AsyncQdrantVectorStore.__init__` defaults — overridable per instance, e.g. to sweep values in an eval harness without touching the API |
+| `HYBRID_PREFETCH_MULTIPLIER` / `RRF_K` | `AsyncQdrantVectorStore.__init__` and `AsyncMilvusVectorStore.__init__` defaults — overridable per instance, e.g. to sweep values in an eval harness without touching the API |
 | Langfuse credentials | `init_tracing()`, called independently by the web app and the worker |

@@ -1,6 +1,6 @@
 # 🚀 RetrievalApiPlatform — Retrieval Engine for RAG Systems
 
-An OpenAI-API-compatible **Retrieval Engine** for Retrieval-Augmented Generation (RAG) systems, built with FastAPI. It exposes `Files` and `Vector Stores` endpoints that are drop-in compatible with the official OpenAI SDKs, backed by a pluggable vector database (Qdrant today), Postgres (metadata), MinIO (object storage), Redis + TaskIQ (background ingestion), and Langfuse/OpenTelemetry (tracing).
+An OpenAI-API-compatible **Retrieval Engine** for Retrieval-Augmented Generation (RAG) systems, built with FastAPI. It exposes `Files` and `Vector Stores` endpoints that are drop-in compatible with the official OpenAI SDKs, backed by a pluggable vector database (Qdrant or Milvus, or both at once), Postgres (metadata), MinIO (object storage), Redis + TaskIQ (background ingestion), and Langfuse/OpenTelemetry (tracing).
 
 <br />
 
@@ -11,7 +11,7 @@ An OpenAI-API-compatible **Retrieval Engine** for Retrieval-Augmented Generation
 - **Streaming ingestion with bounded memory** — the last step embeds and upserts **one batch at a time** under a single semaphore, so writes start with the first batch and peak memory is `batch_size × concurrency` rather than file-sized. The worker keeps its I/O thread pool separate from its CPU pool and caps concurrent downloads
 - **Swappable providers everywhere** — parsing, chunking, embedding, and the vector database each sit behind a `base.py` interface with a `provider/` directory and a `from_settings()` facade, selected by one environment variable
 - **Async ingestion** — file upload returns immediately; the pipeline runs out-of-band on a TaskIQ worker (Redis Streams broker)
-- **Provider-agnostic vector search** — dense similarity search through `BaseAsyncVectorStore`; Qdrant is implemented, Milvus is wired end-to-end as a placeholder. Metadata filters are expressed in a backend-neutral tree and translated per backend
+- **Provider-agnostic vector search** — dense and hybrid search through `BaseAsyncVectorStore`; Qdrant and Milvus are both implemented and can be connected at the same time, since every vector store remembers which engine holds it. Metadata filters are expressed in a backend-neutral tree and translated per backend
 - **Tracing that follows the work** — the pipeline (not each stage) opens the spans, so the Langfuse trace shape stays correct as stages change. W3C trace context is propagated into the worker, so ingestion observations land inside the HTTP request's trace
 
 <br />
@@ -38,7 +38,7 @@ git clone -b retrieval/naive-rag https://github.com/nlp4everyone/RetrievalApiPla
 cd RetrievalApiPlatform
 ```
 
-**1. Start Qdrant first.** It is an external service, not part of `make up`, and the app has nothing to connect to without it — see [Vector Store (Qdrant)](#vector-store-qdrant) for the details:
+**1. Start the vector store first.** It is an external service, not part of `make up`, and the app has nothing to connect to without it. Qdrant is the default — see [Vector Store (Qdrant)](#vector-store-qdrant), or [Vector Store (Milvus)](#vector-store-milvus) for the other backend:
 
 ```bash
 docker run -d --name qdrant_db --restart always \
@@ -111,7 +111,74 @@ Notes:
 - **`QDRANT_API_KEY` must be identical on both sides.** The app's value is checked at startup, so a mismatch fails the boot rather than the first search
 - **Publishing 6333 binds all interfaces.** The API key is the only thing in front of it — firewall the port, or bind to a private address (`-p 10.0.0.5:6333:6333`), before running this anywhere public
 - **Upgrading** is `docker rm -f qdrant_db` then the same `docker run` with a newer tag; the named volume carries the data across
-- **Swapping to Milvus** means running that instead and setting `VECTOR_STORE_PROVIDER=milvus` in the app's `.env` — the app's Compose files do not change
+- **Swapping to Milvus** means running that instead and setting `VECTOR_STORE_PROVIDER=milvus` in the app's `.env` — the app's Compose files do not change. Both can also run side by side; see [Vector Store (Milvus)](#vector-store-milvus)
+
+<br />
+
+## Vector Store (Milvus)
+
+Milvus is the second implemented backend, external in exactly the same way: `make up` and `make down` never touch it, a redeploy never drops the index, and the app knows it through `MILVUS_URI` (plus `MILVUS_TOKEN` when auth is on). Run it on this host, on another host, or use Zilliz Cloud.
+
+Unlike Qdrant it is not one self-contained container — Milvus needs etcd for metadata and an object store for segments. Standalone mode runs both *inside* the single container (embedded etcd, local disk), and the official script writes the config files that requires, so it stays one command:
+
+```bash
+curl -sfL https://raw.githubusercontent.com/milvus-io/milvus/master/scripts/standalone_embed.sh -o standalone_embed.sh
+bash standalone_embed.sh start
+```
+
+That leaves one `milvus-standalone` container:
+
+| What it sets up | Why |
+|---|---|
+| Port `19530` | gRPC API — the port in `MILVUS_URI` |
+| Port `9091` | Health and metrics; `/healthz` lives here, not on 19530 |
+| Port `2379` | Embedded etcd — only needed if you inspect metadata directly |
+| `./volumes/milvus` | Collections, etcd data and segments — the whole database is this directory, so back it up as one |
+| `./user.yaml` | Config overrides written next to the script, including whether authentication is on |
+
+Managing it:
+
+```bash
+curl -s http://localhost:9091/healthz     # → OK
+docker logs -f milvus-standalone
+bash standalone_embed.sh stop             # stop, keeping ./volumes/milvus
+bash standalone_embed.sh start            # back up on the same data
+bash standalone_embed.sh upgrade          # newer image, same data
+bash standalone_embed.sh delete           # removes the container AND ./volumes/milvus
+```
+
+Then point the app's `.env` at it:
+
+| Where Milvus runs | `MILVUS_URI` in the app's `.env` |
+|---|---|
+| Same host, app in Compose | `http://172.17.0.1:19530` (Docker bridge gateway) |
+| Another host | `http://<host>:19530` |
+| Zilliz Cloud | the cluster URI, with `MILVUS_TOKEN` set |
+
+### Running both at once
+
+`VECTOR_STORE_PROVIDER` decides where **new** vector stores are created. Which backends startup connects is not a separate setting: filling in a backend's credentials is what connects it. Because every vector store row records the backend holding it, having both filled in means stores on either engine stay searchable from one process:
+
+```bash
+VECTOR_STORE_PROVIDER=qdrant           # new stores land here
+QDRANT_URL=http://172.17.0.1:6333      # filled in -> connected
+QDRANT_API_KEY=change-me
+MILVUS_URI=http://172.17.0.1:19530     # filled in -> connected too, and searchable
+```
+
+That is what makes a migration incremental rather than a cutover: flip `VECTOR_STORE_PROVIDER` to `milvus` and new stores go to Milvus while every existing Qdrant store keeps answering. Comment a backend's credentials out once nothing points at it any more.
+
+`VECTOR_STORE_PROVIDER` must be reachable or the boot fails — new stores are created on it. The other backend is skipped with a warning if it cannot be reached, so a leftover credential block is not fatal; a store held by a backend that is not connected fails at query time with a `RuntimeError` naming it.
+
+Notes:
+
+- **Milvus `2.4`+** for `hybrid_search` with `RRFRanker`; verified against `3.0` with the pinned `pymilvus`
+- **The script sets no restart policy**, unlike the Qdrant container above — Milvus will not come back after a host reboot until you run `docker update --restart always milvus-standalone`
+- **Authentication is off by default**, which is why `MILVUS_TOKEN` can be left empty. Turn it on in `user.yaml` (`common.security.authorizationEnabled: true`), restart, and set `MILVUS_TOKEN=<user>:<password>` — the stock root credential is `root:Milvus`. Publishing 19530 with auth off means anyone reaching the port can read or drop every collection, so firewall it or bind it to a private address
+- **Every listed backend must be reachable at startup** or the boot fails — a half-connected service would answer some vector stores and 500 on the rest
+- **Collection names are the id verbatim.** Milvus allows only letters, digits and underscores, which is why vector store ids use one: `vs_a1b2…` is both the id and the collection name, on Qdrant and on Milvus alike, so a store reads the same in Attu as in Qdrant's dashboard. Stores created before this scheme carry a hyphen (`vs-a1b2…`) and are still folded to `vs_a1b2…` on Milvus only
+- **Collections are loaded on demand.** Milvus serves only loaded collections and a restarted server comes back with everything unloaded, so a search that hits that loads the collection and retries once
+- **Reads are `Strong` consistency**, matching Qdrant's read-your-writes: a store polled to `completed` is searchable immediately. Relax it in `AsyncMilvusVectorStore.__init__` to trade freshness for latency
 
 <br />
 
@@ -178,7 +245,7 @@ The upload returns immediately; ingestion (download → parse → chunk → embe
 | Concern | Implementation | Selected by |
 |---|---|---|
 | API layer | FastAPI | — |
-| Vector database | Qdrant (Milvus stubbed) | `VECTOR_STORE_PROVIDER` |
+| Vector database | Qdrant and Milvus, connectable together | `VECTOR_STORE_PROVIDER` (+ each backend's credentials) |
 | Metadata store | PostgreSQL (`asyncpg`) | — |
 | Object storage | MinIO (uploaded file bytes) | — |
 | Task queue | Redis Streams + TaskIQ | — |
@@ -204,10 +271,12 @@ The upload returns immediately; ingestion (download → parse → chunk → embe
 
 See [Design Decisions](DESIGN_DECISIONS.md) for detail.
 
-- Vector stores ingest **exactly one file**; more than one `file_id` is now rejected at request time with a 400 rather than silently skipped
+- Vector stores ingest **exactly one file**; more than one `file_id` is now rejected at request time with a 400 rather than silently skipped. There is no `vector_store_files` table, so a store's progress is a single `status` column — multi-file needs per-file state modelled first, not just a relaxed check
+- `file_counts` is derived from that single status (`completed=1` or `failed=1`), never counted per file
+- No automated test suite: `pytest`/`pytest-asyncio` are in the dev group, but there is no `tests/` directory
 - Of `ranking_options` on `POST /v1/vector_stores/{id}/search`, only `score_threshold` is applied; `ranker` and `rewrite_query` are accepted and ignored (`filters` **are** applied)
-- Hybrid (dense + sparse) search runs only where both halves exist: `SPARSE_EMBEDDING_ENABLED` **and** a collection ingested with sparse vectors. Stores created before sparse was switched on stay dense-only — Qdrant cannot add a vector field to a live collection, so they need re-ingesting to go hybrid. `search_type: "auto"` (the default) resolves this per store; asking for `"hybrid"` on a store that cannot answer it is a 400 rather than a silent fallback
-- Milvus is wired through config, `VectorStoreType`, and `VectorStoreFactory`, but every method raises `NotImplementedError`
+- Hybrid (dense + sparse) search runs only where both halves exist: `SPARSE_EMBEDDING_ENABLED` **and** a collection ingested with sparse vectors. Stores created before sparse was switched on stay dense-only — neither backend can add a vector field to a live collection, so they need re-ingesting to go hybrid. `search_type: "auto"` (the default) resolves this per store; asking for `"hybrid"` on a store that cannot answer it is a 400 rather than a silent fallback
+- Weighted RRF is Qdrant-only in principle, but neither backend uses it yet — both fuse with plain RRF, tuned only by `retrieval.rrf_k`
 - Auth is a single shared `FASTAPI_API_KEY` — not per-user multi-tenancy, even though rows are scoped by `api_key`
 - No OpenAI "vector store files" sub-resource endpoints (attach/list/detach a file on an existing vector store)
 - `.csv`, `.json`, and `.gif` pass upload validation but have no registered parsing provider; conversely `.md` and `.doc` can be parsed but are not upload-accepted, so they always get a 415
@@ -228,10 +297,12 @@ See [Design Decisions](DESIGN_DECISIONS.md) for detail.
 - [x] Unstructured API parsing for `.txt`/`.md`/`.docx`/`.doc`/images (replaces the in-process decoder; every format now yields Markdown)
 - [x] Streaming ingestion: embed and index merged into one stage, peak memory independent of file size
 - [x] Split I/O and CPU thread pools, cap concurrent downloads in the worker
+- [ ] `vector_store_files` table for per-file state (the prerequisite for both items below)
 - [ ] Multi-file ingest per vector store
 - [x] Hybrid search (BGE-M3 sparse vectors, fused with dense by Qdrant RRF)
 - [x] Per-request `search_type` (`auto`/`dense`/`hybrid`), with pinned hybrid refused as a 400 on stores that cannot answer it
 - [ ] Apply the rest of `ranking_options` in search (`score_threshold` done; `ranker`, `rewrite_query` still ignored)
-- [ ] Milvus backend implementation
+- [x] Milvus backend implementation, connectable alongside Qdrant
 - [ ] Vector store file sub-resource endpoints (attach/list/detach)
 - [ ] Reconcile the two allow-lists: parsers for `.csv`/`.json`/`.gif` (or drop them from upload), and add `.md`/`.doc` to `ALLOWED_EXTENSIONS`
+- [ ] Automated tests (`pytest` is already a dev dependency; nothing uses it yet)

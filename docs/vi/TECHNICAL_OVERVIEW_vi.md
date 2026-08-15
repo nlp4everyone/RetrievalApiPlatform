@@ -5,7 +5,7 @@ Backend hướng production, hiện thực mô hình tài nguyên **Files** và 
 - FastAPI (`app/app.py`) làm API layer — `file_router` (`/v1/files`) và `vector_store_router` (`/v1/vector_stores`), với toàn bộ ranh giới HTTP nằm trong `app/api/`
 - PostgreSQL (`asyncpg`) cho metadata của file/vector store
 - MinIO làm object storage lưu byte gốc của file đã upload
-- Một vector database có thể thay thế, nằm sau `BaseAsyncVectorStore` — mỗi vector store là một collection. Qdrant đã triển khai; Milvus đã nối dây nhưng còn là stub
+- Một vector database có thể thay thế, nằm sau `BaseAsyncVectorStore` — mỗi vector store là một collection. Cả Qdrant lẫn Milvus đều đã triển khai, và có thể kết nối cùng lúc
 - Redis Streams + TaskIQ cho ingestion bất đồng bộ, chạy ngoài vòng đời request/response
 - Hai service parsing bên ngoài: LlamaParse cho `.pdf`, Unstructured API cho mọi định dạng còn lại — cả hai đều trả Markdown
 - Một endpoint dense embedding bên ngoài (vLLM tương thích OpenAI, hoặc Text Embeddings Inference) để tính vector — [EmbeddingService](https://github.com/nlp4everyone/EmbeddingService) là repo đồng hành đảm nhiệm phần này
@@ -66,7 +66,7 @@ MinioFileStore                ▼                          ▼
        ┌──────────────────────────────────┐          │
        │  TaskIQ Worker (container riêng) │          ▼
        │  app.tasks.broker:broker         │   BaseAsyncVectorStore
-       │  app.tasks.ingestion_task        │   (Qdrant | Milvus*)
+       │  app.tasks.ingestion_task        │   (Qdrant | Milvus)
        └────────────────┬─────────────────┘
                         ▼
               IngestionService.ingest_vector_store_files()
@@ -88,7 +88,7 @@ MinioFileStore                ▼                          ▼
   Pipeline.run() mở một span cho mỗi stage ──▶ Langfuse (OTel OTLP)
   trace_context đi kèm task, nên span của worker nhập vào trace của request
 
-  * Milvus đã đăng ký đầy đủ nhưng mọi method đều raise NotImplementedError
+  * Mỗi row vector store đều ghi backend của nó, nên phục vụ được cả hai engine cùng lúc
 ```
 
 ## Luồng xử lý tổng thể
@@ -133,7 +133,7 @@ Cả hai pipeline dùng chung một bộ máy (`app/pipelines/pipeline.py`), ch�
 | Dựng bởi | `build_ingestion_pipeline(...)` | `build_retrieval_pipeline(..., search_type)` |
 | Trace cha | `trace_context` đi kèm task | span của request hiện tại |
 
-Thêm một bước là thêm một subclass `BaseStage` và một dòng trong factory. Hybrid search đúng y như vậy: một `HybridRetriever` cộng một nhánh trong `_build_plan()`, stage và pipeline giữ nguyên — và không cần chiến lược fusion mới, vì Qdrant trộn nhánh dense với sparse bằng RRF ngay trong chính câu truy vấn.
+Thêm một bước là thêm một subclass `BaseStage` và một dòng trong factory. Hybrid search đúng y như vậy: một `HybridRetriever` cộng một nhánh trong `_build_plan()`, stage và pipeline giữ nguyên — và không cần chiến lược fusion mới, vì cả hai backend đều trộn nhánh dense với sparse bằng RRF ngay trong chính câu truy vấn (`FusionQuery(RRF)` của Qdrant, `RRFRanker` của Milvus).
 
 ---
 
@@ -154,7 +154,7 @@ Mọi route đều có prefix `/v1` và yêu cầu `Authorization: Bearer <FASTA
 | `DELETE` | `/vector_stores/{vector_store_id}` | Xoá vector store |
 | `POST` | `/vector_stores/{vector_store_id}/search` | Search theo `query`, `max_num_results`, `filters`, `search_type` (`auto`\|`dense`\|`hybrid`, phần mở rộng ngoài OpenAI); trong `ranking_options` mới chỉ `score_threshold` được áp dụng |
 
-Cả hai router đều dùng object model của OpenAI (`FileObject`, `VectorStoreObject`, response phân trang `object="list"`), quy ước ID của OpenAI (`file-{8 hex}`, `vs-{32 hex}` — `app/utils/key_generator/key_generator.py`), và error envelope kiểu OpenAI (`{message, type, params, code}`) cho mọi `AppBaseException`.
+Cả hai router đều dùng object model của OpenAI (`FileObject`, `VectorStoreObject`, response phân trang `object="list"`), quy ước ID của OpenAI (`file-{8 hex}`, `vs_{32 hex}` — `app/utils/key_generator/key_generator.py`), và error envelope kiểu OpenAI (`{message, type, params, code}`) cho mọi `AppBaseException`.
 
 Chưa triển khai: ingestion nhiều file cho một vector store, endpoint sub-resource vector-store-file (attach/list/detach), parser cho `.csv`/`.json`/`.gif` (upload được nhưng không có provider), tiến độ/huỷ ingestion ở mức chunk. Xem [README_vi.md](README_vi.md#to-do--roadmap).
 
@@ -221,7 +221,8 @@ app/
   utils/                  # config_loader, datetime_utils, io, key_generator, helper vector_store
 config/config.yaml        # tunable được version control: batch size/concurrency embedding,
                           # tên bucket, storage.io_thread_pool_size,
-                          # ingestion.cpu_thread_pool_size, ingestion.download_concurrency
+                          # ingestion.cpu_thread_pool_size, ingestion.download_concurrency,
+                          # retrieval.hybrid_prefetch_multiplier, retrieval.rrf_k
 docker/                   # Dockerfile + compose_db.yml / compose_web.yml / compose_tracking.yml
 examples/file_upload_example.py  # demo end-to-end dùng SDK openai
 ```
@@ -236,9 +237,9 @@ Ba file compose được `Makefile` gộp lại:
 - **`compose_tracking.yml`** — `minio` (9000 API / 9001 console) — object storage, dù tên file gợi ý khác
 - **`compose_web.yml`** — `web` (uvicorn, 8005; phụ thuộc `postgres` khoẻ mạnh + `worker` đã khởi động) và `worker` (TaskIQ; phụ thuộc `postgres`, `redis`, `minio` khoẻ mạnh)
 
-**Vector store không nằm trong stack này.** Giống embedding server, nó là service bên ngoài mà ứng dụng chỉ biết qua URL — `QDRANT_URL` + `QDRANT_API_KEY`, không gì khác. Nó có thể chạy trên cùng host, host khác, hoặc Qdrant Cloud; trên cùng host thì chỉ là một lệnh `docker run` (xem [Vector Store (Qdrant)](README_vi.md#vector-store-qdrant)), không chia sẻ network, volume hay vòng đời nào với stack ứng dụng. `make up` và `make down` không đụng tới nó, nên redeploy không bao giờ làm mất index.
+**Vector store không nằm trong stack này.** Giống embedding server, nó là service bên ngoài mà ứng dụng chỉ biết qua URL — `QDRANT_URL` + `QDRANT_API_KEY` với Qdrant, `MILVUS_URI` với Milvus, không gì khác. Nó có thể chạy trên cùng host, host khác, hoặc một cluster managed; trên cùng host thì chỉ là một lệnh `docker run` (xem [Vector Store (Qdrant)](README_vi.md#vector-store-qdrant) / [Vector Store (Milvus)](README_vi.md#vector-store-milvus)), không chia sẻ network, volume hay vòng đời nào với stack ứng dụng. `make up` và `make down` không đụng tới nó, nên redeploy không bao giờ làm mất index.
 
-Đó chính là thứ khiến việc thay backend khả thi trên thực tế: đổi Qdrant sang Milvus là dựng một container bên ngoài mới cộng với `VECTOR_STORE_PROVIDER=milvus`, không phải sửa file Compose nào của ứng dụng.
+Đó chính là thứ khiến việc thay backend khả thi trên thực tế: đổi Qdrant sang Milvus là dựng một container bên ngoài mới cộng với `VECTOR_STORE_PROVIDER=milvus`, không phải sửa file Compose nào của ứng dụng. Để nguyên credential của cả hai backend thì cả hai cùng được kết nối, nên việc chuyển đổi diễn ra từ từ — store mới đi vào engine mới trong khi store cũ vẫn trả lời từ engine cũ.
 
 Vì không có `depends_on` vươn qua được, vector store phải sẵn sàng trước khi `web`/`worker` boot — `init_vector_store()` kết nối trong lúc startup và fail nếu không tới được, đúng cùng một giao kèo như embedding server.
 
