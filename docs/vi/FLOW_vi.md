@@ -101,13 +101,9 @@ FastAPI HTTP Gateway
         │       │                                  vector_store_type=provider, ...)
         │       │
         │       ├── Phân giải chunking_strategy + chunk_size/chunk_overlap:
-        │       │       request.chunking_strategy is None                     → "auto"   (800 / 400)
-        │       │       request.chunking_strategy.type == "static"             → "static" (từ request.static)
-        │       │       request.chunking_strategy.type == "auto" (gửi tường minh) → rơi vào else → "fuse" (800 / 400)
-        │       │           ⚠ "fuse" không thuộc ("auto","static"), nên IngestionService BỎ QUA pipeline —
-        │       │             store vẫn bị đánh dấu "completed" dù chưa có gì được index.
-        │       │             Chỉ xảy ra khi client gửi tường minh {"type": "auto"}
-        │       │             thay vì bỏ trống chunking_strategy.
+        │       │       request.chunking_strategy.type == "static"  → "static" (từ request.static)
+        │       │       mọi trường hợp còn lại — bỏ trống field, hoặc gửi tường minh {"type": "auto"}
+        │       │                                                   → "auto" (800 / 400)
         │       │
         │       └── traced_span("enqueue_ingestion")
         │               ingest_vector_store_files.kiq(vectorstore_id, api_key, file_ids,
@@ -127,18 +123,21 @@ FastAPI HTTP Gateway
         ▼
     IngestionService.ingest_vector_store_files(...)
         │
+        ├──▶ Bước 0: chunking_strategy thuộc ("auto","static") ?
+        │       KHÔNG → log lỗi → _mark_failed(status=FAILED) → raise ValueError
+        │               (bên gửi và worker đã lệch nhau; fail còn hơn im lặng bỏ qua)
+        │
         ├──▶ Bước 1: PostgresFileStore.check_existing_files(file_ids) → existing_file_ids
-        │       rỗng?  → usage_bytes giữ nguyên 0, bỏ qua Bước 2-3, nhảy tới Bước 4 (status=COMPLETED)
-        │       không → get_total_bytes(file_ids) → usage_bytes
-        │               get_metadata_for_files(existing_file_ids) → files_metadata
+        │       có file_ids nhưng không tồn tại file nào? → log lỗi → _mark_failed → raise ValueError
+        │       không có file_ids nào → usage_bytes giữ nguyên 0, bỏ qua Bước 2-3, nhảy tới Bước 4
+        │                               (store tạo ra mà không kèm file thì rỗng là đúng)
+        │       còn lại → get_total_bytes(existing_file_ids) → usage_bytes
+        │                get_metadata_for_files(existing_file_ids) → files_metadata
         │
         ├──▶ Bước 2: len(files_metadata) == 1 ?   ← lớp phòng thủ thứ hai sau lần kiểm tra ở tầng API
-        │       KHÔNG (0 hoặc >1) → log lỗi → _mark_failed(status=FAILED) → raise ValueError
-        │                           (cố ý KHÔNG báo "completed" trên một store rỗng)
+        │       KHÔNG (>1) → log lỗi → _mark_failed(status=FAILED) → raise ValueError
         │
-        ├──▶ Bước 3: chunking_strategy thuộc ("auto","static") ?
-        │       KHÔNG → bỏ qua toàn bộ pipeline (xem ⚠ "fuse" ở trên)
-        │       CÓ    → _ingest_single_file(...)
+        ├──▶ Bước 3: _ingest_single_file(...) → num_inserted
         │               vector_store = VectorStoreFactory.get_store(collection_name=vectorstore_id,
         │                                                           provider=vector_store_type)
         │               pipeline = build_ingestion_pipeline(minio_client, vector_store, embed_fn=get_dense_embedding,
@@ -213,7 +212,12 @@ FastAPI HTTP Gateway
         │               stage nào raise? → các stage còn lại không chạy → span ghi lại lỗi
         │                                → IngestionService bắt → _mark_failed(status=FAILED) → raise lại
         │
+        │               num_inserted == 0? → file không cho ra chunk nào, collection rỗng
+        │                                  → _mark_failed(status=FAILED) → raise ValueError
+        │
         └──▶ Bước 4: PostgresVectorStore.update(status=COMPLETED, usage_bytes, last_active_at=now())
+                     ← chỉ tới được đây khi collection thật sự search được, hoặc khi store
+                       được tạo ra mà không kèm file_ids nào
 
 ③ POST /v1/vector_stores/{id}/search   {query, max_num_results, filters, ranking_options, search_type}
         ▼

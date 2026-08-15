@@ -223,20 +223,17 @@ class VectorStoreService:
                         vector_store_type=provider
                     )
 
-                # Determine chunking strategy parameters
-                # Default to auto chunking if no strategy specified
-                if request.chunking_strategy is None:
-                    chunking_strategy = "auto"
-                    chunk_size = 800
-                    chunk_overlap = 400
-                # Use static chunking parameters if specified
-                elif request.chunking_strategy.type == "static":
+                # Determine chunking strategy parameters. Only static carries its
+                # own sizing; every other case - the field omitted, or an explicit
+                # {"type": "auto"} - is auto with the documented defaults. Kept as
+                # one condition so the two auto spellings cannot drift apart.
+                if (request.chunking_strategy is not None
+                        and request.chunking_strategy.type == "static"):
                     chunking_strategy = "static"
                     chunk_size = request.chunking_strategy.static.max_chunk_size_tokens
                     chunk_overlap = request.chunking_strategy.static.chunk_overlap_tokens
-                # Use fuse chunking as fallback
                 else:
-                    chunking_strategy = "fuse"
+                    chunking_strategy = "auto"
                     chunk_size = 800
                     chunk_overlap = 400
 
