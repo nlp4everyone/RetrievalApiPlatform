@@ -1,5 +1,5 @@
 # FastAPI dependencies
-from fastapi import UploadFile, Form, APIRouter, Depends, File
+from fastapi import UploadFile, Form, APIRouter, Depends
 # Typing
 from typing import Optional
 # Schema

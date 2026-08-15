@@ -296,7 +296,7 @@ class PostgresVectorStore:
         """
         # Execute deletion with connection from pool
         async with pool.acquire() as conn:
-            result = await conn.execute(query, vector_store_id, api_key)
+            await conn.execute(query, vector_store_id, api_key)
 
     @staticmethod
     async def list_vector_stores(pool: asyncpg.Pool,

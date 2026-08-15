@@ -42,18 +42,6 @@ class ParsingService:
         # the same factory reuse a single provider instance
         self._instances: dict[ProviderFactory, BaseParsingProvider] = {}
 
-    def supports(self, file_extension: str) -> bool:
-        """
-        Whether any provider handles this file extension.
-
-        Args:
-            file_extension (str): Extension including the dot, e.g. ".pdf"
-
-        Returns:
-            bool: True if the format can be parsed
-        """
-        return file_extension.lower() in self._factories
-
     @property
     def supported_extensions(self) -> list[str]:
         """

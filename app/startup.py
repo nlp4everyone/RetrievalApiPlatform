@@ -11,10 +11,8 @@ from app.db.vector_store import BaseVectorStoreConnection, VectorStoreFactory
 from asyncpg import PostgresError
 # Config
 from app.core.config import *
-# Tracing
-from app.core.tracing import init_tracing
 # Other component
-import requests, time, asyncio, asyncpg
+import asyncio, asyncpg
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Optional
 # Logger
@@ -260,7 +258,6 @@ async def init_vector_store() -> BaseVectorStoreConnection:
     Raises:
         Exception: If the default vector database is not reachable
     """
-    global vector_store_connection
     default_provider = VectorStoreFactory.default_provider()
     for provider in VectorStoreFactory.enabled_providers():
         try:
@@ -282,20 +279,7 @@ async def init_vector_store() -> BaseVectorStoreConnection:
         # Make it reachable through the factory
         VectorStoreFactory.register_connection(provider, connection)
 
-    vector_store_connection = VectorStoreFactory.get_connection()
-    return vector_store_connection
-
-def get_embed_model() -> EmbeddingService:
-    """
-    Get the global embedding service instance.
-
-    Returns:
-        EmbeddingService: The initialized embedding service
-
-    Raises:
-        AttributeError: If embedding service has not been initialized
-    """
-    return embed_model
+    return VectorStoreFactory.get_connection()
 
 def get_postgres_pool() -> asyncpg.Pool:
     """
@@ -421,18 +405,6 @@ def get_download_semaphore() -> asyncio.Semaphore:
     """
     return download_semaphore
 
-
-def get_vector_store_connection() -> BaseVectorStoreConnection:
-    """
-    Get the global vector store connection instance.
-
-    Returns:
-        BaseVectorStoreConnection: The initialized vector store connection
-
-    Raises:
-        NameError: If the vector store connection has not been initialized
-    """
-    return vector_store_connection
 
 async def wait_for_postgres(pool: asyncpg.Pool,
                             retries: int = 5,

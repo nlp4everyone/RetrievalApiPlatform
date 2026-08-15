@@ -1,6 +1,6 @@
 from pydantic import Field
 from typing import Generic, List, Optional, TypeVar
-from .common import BaseModel, SortOrder
+from .common import BaseModel
 
 T = TypeVar('T')
 

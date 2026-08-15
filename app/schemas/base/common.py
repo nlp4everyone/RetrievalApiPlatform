@@ -1,9 +1,6 @@
 from pydantic import BaseModel as PydanticBaseModel
-from typing import Optional, TypeVar
-from enum import Enum
-from typing import Literal
+from typing import Literal, Optional
 
-T = TypeVar('T')
 
 class BaseModel(PydanticBaseModel):
     """Base model with common configuration for all schemas"""
@@ -25,7 +22,3 @@ class DeletedResponse(BaseResponse):
     deleted: bool = True
 
 FilePurposes = Literal["assistants","batch","fine-tune","vision","user_data","evals"]
-
-class SortOrder(str, Enum):
-    ASC = "asc"
-    DESC = "desc"

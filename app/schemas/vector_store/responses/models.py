@@ -2,7 +2,6 @@
 from typing import Dict, Literal, Optional, List
 from pydantic import Field, BaseModel, constr
 # Dependencies
-from ..types import VectorStoreType
 from .base import VectorStoreFileCounts, VectorStoreExpiresAfter
 
 

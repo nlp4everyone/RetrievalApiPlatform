@@ -73,39 +73,7 @@ class YamlConfigLoader:
             Dictionary containing the section configuration
         """
         return self.get(section, {})
-    
-    def reload(self) -> None:
-        """Reload the configuration file."""
-        self._load_config()
-    
-    def get_all(self) -> Dict[str, Any]:
-        """
-        Get the entire configuration dictionary.
-        
-        Returns:
-            Complete configuration dictionary
-        """
-        return self._config.copy() if self._config is not None else {}
-    
-    def exists(self, key: str) -> bool:
-        """
-        Check if a configuration key exists.
-        
-        Args:
-            key: Configuration key (supports dot notation for nested keys)
-            
-        Returns:
-            True if key exists, False otherwise
-        """
-        return self.get(key) is not None
-    
-    def __getitem__(self, key: str) -> Any:
-        """Allow dictionary-style access."""
-        return self.get(key)
-    
-    def __contains__(self, key: str) -> bool:
-        """Allow 'in' operator usage."""
-        return self.exists(key)
+
 
 # Global instance for easy access
 _yaml_loader = YamlConfigLoader()
@@ -114,8 +82,3 @@ _yaml_loader = YamlConfigLoader()
 def get_yaml_config() -> YamlConfigLoader:
     """Get the global YAML config loader instance."""
     return _yaml_loader
-
-
-def reload_yaml_config() -> None:
-    """Reload the global YAML configuration."""
-    _yaml_loader.reload()
