@@ -8,19 +8,16 @@ from app.schemas.vector_store.types import VectorStoreType
 # Config
 from app.core.config import QDRANT_API_KEY, QDRANT_URL
 
-
 class QdrantConnection(BaseVectorStoreConnection):
     """Long-lived Qdrant connection, created once at application startup."""
 
     provider: ClassVar[VectorStoreType] = VectorStoreType.QDRANT
 
-    def __init__(
-        self,
-        url: str = "http://localhost:6333",
-        api_key: Optional[str] = None,
-        timeout: float = 10.0,
-        **kwargs: Any,
-    ) -> None:
+    def __init__(self,
+                 url: str = "http://localhost:6333",
+                 api_key: Optional[str] = None,
+                 timeout: float = 10,
+                 **kwargs: Any) -> None:
         # Config
         self.__url = url
         self.__api_key = api_key
@@ -29,6 +26,7 @@ class QdrantConnection(BaseVectorStoreConnection):
         # Create client
         self._client = AsyncQdrantClient(url=self.__url,
                                          api_key=self.__api_key,
+                                         timeout=self.__timeout,
                                          **kwargs)
 
     @classmethod

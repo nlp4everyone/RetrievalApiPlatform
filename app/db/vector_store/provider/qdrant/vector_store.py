@@ -97,16 +97,6 @@ class AsyncQdrantVectorStore(BaseAsyncVectorStore):
     def collection_name(self) -> str:
         return self._collection_name
 
-    @property
-    def hybrid_prefetch_multiplier(self) -> int:
-        """Prefetch depth per hybrid branch, so traces can record what produced a ranking."""
-        return self._hybrid_prefetch_multiplier
-
-    @property
-    def rrf_k(self) -> Optional[int]:
-        """RRF k in force, or None when Qdrant's default is left alone."""
-        return self._rrf_k
-
     # ------------------------------------------------------------------
     # COLLECTION LIFECYCLE
     # ------------------------------------------------------------------
@@ -312,17 +302,30 @@ class AsyncQdrantVectorStore(BaseAsyncVectorStore):
 
     @staticmethod
     def _get_quantization_config(quantization_mode: Literal['binary', 'scalar', 'product', 'none'] = "scalar",
-                                 always_ram: bool = True) -> Union[models.ScalarQuantization, models.BinaryQuantization, models.ProductQuantization]:
+                                 always_ram: bool = True) -> Optional[Union[models.ScalarQuantization,
+                                                                            models.BinaryQuantization,
+                                                                            models.ProductQuantization]]:
         """
-        Get quantization config with mode
-        :param quantization_mode: Include scalar, binary and product.
-        :param always_ram: Indicated that quantized vectors is persisted on RAM.
-        :return:
+        Build the quantization config for a new collection.
+
+        Args:
+            quantization_mode: One of "scalar", "binary", "product", or "none"
+                to store vectors unquantized.
+            always_ram: Keep quantized vectors in RAM.
+
+        Returns:
+            The matching quantization config, or None for "none" - which Qdrant
+            reads as "do not quantize".
+
+        Raises:
+            ValueError: If the mode is not one of the four accepted values.
         """
-        # Define quantization mode if enable
+        if quantization_mode == "none":
+            return None
+
         if quantization_mode == "scalar":
             # Scalar mode, currently Qdrant only support INT8
-            quantization_config = models.ScalarQuantization(
+            return models.ScalarQuantization(
                 scalar=models.ScalarQuantizationConfig(
                     type=models.ScalarType.INT8,
                     quantile=0.99,
@@ -330,22 +333,23 @@ class AsyncQdrantVectorStore(BaseAsyncVectorStore):
                     always_ram=always_ram
                 )
             )
-        elif quantization_mode == "binary":
-            # Binary mode
-            quantization_config = models.BinaryQuantization(
+
+        if quantization_mode == "binary":
+            return models.BinaryQuantization(
                 binary=models.BinaryQuantizationConfig(
                     always_ram=always_ram,
                 ),
             )
-        else:
-            # Product quantization mode
-            quantization_config = models.ProductQuantization(
+
+        if quantization_mode == "product":
+            return models.ProductQuantization(
                 product=models.ProductQuantizationConfig(
                     compression=models.CompressionRatio.X16,  # Default X16
                     always_ram=always_ram,
                 ),
             )
-        return quantization_config
+
+        raise ValueError(f"Unsupported quantization_mode: {quantization_mode!r}")
 
     # ------------------------------------------------------------------
     # WRITE
