@@ -1,11 +1,11 @@
 from .settings import settings
 
-# Postgres configuration
+# Postgres configuration. POSTGRES_PORT is not re-exported: app.startup connects
+# on the container's own 5432, while .env's value is the host port compose maps.
 POSTGRES_USER = settings.POSTGRES_USER
 POSTGRES_PASSWORD = settings.POSTGRES_PASSWORD
 POSTGRES_DB = settings.POSTGRES_DB
 POSTGRES_HOST = settings.POSTGRES_HOST
-POSTGRES_PORT = settings.POSTGRES_PORT
 
 # Backend new vector stores are created on ("qdrant" or "milvus")
 VECTOR_STORE_PROVIDER = settings.VECTOR_STORE_PROVIDER

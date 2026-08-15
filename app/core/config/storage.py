@@ -5,12 +5,11 @@ from app.utils.config_loader import get_yaml_config
 yaml_config = get_yaml_config()
 storage_config = yaml_config.get_section("storage")
 
-# Minio configuration
+# Minio configuration. MINIO_API_PORT / MINIO_CONSOLE_PORT are not re-exported:
+# only docker-compose consumes them, straight from .env.
 MINIO_ROOT_USER = settings.MINIO_ROOT_USER
 MINIO_ROOT_PASSWORD = settings.MINIO_ROOT_PASSWORD
 MINIO_ENDPOINT_URL = settings.MINIO_ENDPOINT_URL
-MINIO_API_PORT = settings.MINIO_API_PORT
-MINIO_CONSOLE_PORT = settings.MINIO_CONSOLE_PORT
 
 # Uploaded File config
 UPLOADED_FILE_BUCKET = storage_config.get("uploaded_file_bucket")
@@ -20,8 +19,7 @@ MAX_FILE_SIZE = storage_config.get("max_file_size")
 # from CPU-bound work (chunking) so a slow download can't starve it
 IO_THREAD_POOL_SIZE = storage_config.get("io_thread_pool_size", 32)
 
-# API Versioning - load from YAML with ENV override
-api_config = yaml_config.get_section("api")
+# API Versioning
 API_VERSION = settings.API_VERSION
 
 # Allowed MIME types for file upload

@@ -17,7 +17,6 @@ from .exceptions.handlers import common_exception_handler
 from .api.middleware import RequestIDMiddleware
 # Config
 from .core.config.storage import API_VERSION
-from .core.config import settings
 # Tracing
 from .core.tracing import init_tracing
 # Components
@@ -99,17 +98,10 @@ async def health() -> dict[str, str]:
 @app.on_event("startup")
 async def startup_event() -> None:
     SystemLogger.info("[APP] Starting application warm up...")
-    
-    # Validate configuration at startup
-    try:
-        SystemLogger.info("[APP] Validating configuration...")
-        # Settings validation happens automatically on import
-        # This ensures all required environment variables are present
-        SystemLogger.success("[APP] ✅ Configuration validated")
-    except Exception as e:
-        SystemLogger.error(f"[APP] ❌ Configuration validation failed: {e}")
-        raise
-    
+
+    # Settings are validated on import of app.core.config, so reaching this
+    # point already means every required environment variable is present.
+
     # Start
     start = time.perf_counter()
 

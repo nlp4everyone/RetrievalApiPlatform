@@ -23,8 +23,8 @@ class Settings(BaseSettings):
     
     # API Config
     API_VERSION: str = "v1"
+    # Read by docker-compose (uvicorn --workers), not by application code
     NUM_WORKERS: int = 1
-    SERVING_API_KEY: str = Field(..., description="Serving API key for authentication")
     FASTAPI_API_KEY: str = Field(..., description="FastAPI API key for authentication")
 
     # Logging Config
@@ -32,7 +32,6 @@ class Settings(BaseSettings):
     LOG_FORMAT: str = Field("auto", description="Log output format: 'auto' (detect TTY), 'console' (colorized text), or 'json' (structured)")
     
     # External API Keys
-    UNDATASIO_API_KEY: Optional[str] = Field(None, description="Undatasio API key")
     LLAMAPARSE_API_KEY: Optional[str] = Field(None, description="LlamaParse API key")
     UNSTRUCTURED_API_KEY: Optional[str] = Field(None, description="Unstructured API key")
     UNSTRUCTURED_API_URL: str = "https://api.unstructuredapp.io/general/v0/general"
@@ -123,7 +122,7 @@ class Settings(BaseSettings):
         return v
 
     # QDRANT_API_KEY is absent on purpose: required only when Qdrant is selected.
-    @field_validator('SERVING_API_KEY', 'FASTAPI_API_KEY', 'POSTGRES_PASSWORD',
+    @field_validator('FASTAPI_API_KEY', 'POSTGRES_PASSWORD',
                     'MINIO_ROOT_PASSWORD', 'LANGFUSE_SECRET_KEY')
     @classmethod
     def validate_required_secrets(cls, v: str) -> str:
