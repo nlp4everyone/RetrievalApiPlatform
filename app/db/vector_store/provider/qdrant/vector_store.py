@@ -97,6 +97,16 @@ class AsyncQdrantVectorStore(BaseAsyncVectorStore):
     def collection_name(self) -> str:
         return self._collection_name
 
+    @property
+    def hybrid_prefetch_multiplier(self) -> int:
+        """Prefetch depth per hybrid branch, so traces can record what produced a ranking."""
+        return self._hybrid_prefetch_multiplier
+
+    @property
+    def rrf_k(self) -> Optional[int]:
+        """RRF k in force, or None when Qdrant's default is left alone."""
+        return self._rrf_k
+
     # ------------------------------------------------------------------
     # COLLECTION LIFECYCLE
     # ------------------------------------------------------------------
