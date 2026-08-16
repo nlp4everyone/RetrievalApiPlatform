@@ -1,5 +1,5 @@
 # Typing
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 # Exception
 from app.exceptions.vector_store import VectorStoreNotFoundException
 # Other component
@@ -299,6 +299,33 @@ class PostgresVectorStore:
             await conn.execute(query, vector_store_id, api_key)
 
     @staticmethod
+    async def _fetch_cursor_row(pool: asyncpg.Pool,
+                                api_key: str,
+                                cursor_id: str) -> asyncpg.Record:
+        """
+        Read the sort key of the row a pagination cursor points at.
+
+        Args:
+            pool: PostgreSQL connection pool
+            api_key: API key the cursor has to belong to
+            cursor_id: Vector store id supplied as 'after' or 'before'
+
+        Returns:
+            asyncpg.Record: The cursor row's created_at and id
+
+        Raises:
+            ValueError: If no vector store with that id exists for this api_key
+        """
+        query = "SELECT created_at, id FROM vector_stores WHERE id = $1 AND api_key = $2"
+
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(query, cursor_id, api_key)
+
+        if row is None:
+            raise ValueError(f"Cursor vector store id '{cursor_id}' not found")
+        return row
+
+    @staticmethod
     async def list_vector_stores(pool: asyncpg.Pool,
                                  api_key: str,
                                  limit: int = 20,
@@ -324,35 +351,50 @@ class PostgresVectorStore:
             - 'object': Always 'list'
             - 'data': List of vector store records
             - 'first_id': ID of first record in results
-            - 'last_id': ID of last record in results  
+            - 'last_id': ID of last record in results
             - 'has_more': Boolean indicating if more results available
-            
+
         Raises:
-            ValueError: If order parameter is not 'asc' or 'desc'
+            ValueError: If order parameter is not 'asc' or 'desc', or if a
+                cursor id does not belong to an existing vector store
             asyncpg.PostgresError: If database operation fails
+
+        Note:
+            A cursor is compared on the columns the rows are ordered by, not on
+            the id itself: an id is a random uuid, so `id > cursor` would select
+            an arbitrary half of the table regardless of where the cursor sits
+            in the listing. id is kept as the tie-breaker because created_at is
+            not unique. Same scheme as PostgresFileStore.list_files.
         """
         # Validate sort order parameter
         if order not in ("asc", "desc"):
             raise ValueError("order must be 'asc' or 'desc'")
 
         # Build base query with API key filter
-        query = """
-            SELECT * FROM vector_stores
-            WHERE api_key = $1
-        """
-        params = [api_key]
-        
-        # Add cursor-based pagination filters
-        if after:
-            query += f" AND id > ${len(params) + 1}"
-            params.append(after)
-        if before:
-            query += f" AND id < ${len(params) + 1}"
-            params.append(before)
-        
+        conditions = ["api_key = $1"]
+        params: List[Any] = [api_key]
+
+        # Add cursor-based pagination filters. "after" means further along the
+        # requested order - older for desc, newer for asc - and "before" is its
+        # mirror, so both comparisons flip with the sort direction
+        for cursor_id, comparison in ((after, "<" if order == "desc" else ">"),
+                                      (before, ">" if order == "desc" else "<")):
+            if not cursor_id:
+                continue
+            cursor_row = await PostgresVectorStore._fetch_cursor_row(pool = pool,
+                                                                     api_key = api_key,
+                                                                     cursor_id = cursor_id)
+            conditions.append(f"(created_at, id) {comparison} "
+                              f"(${len(params) + 1}::timestamptz, ${len(params) + 2}::text)")
+            params.extend([cursor_row["created_at"], cursor_row["id"]])
+
         # Add sorting and limit
-        query += f" ORDER BY created_at {order.upper()}"
-        query += f" LIMIT ${len(params) + 1}"
+        query = f"""
+            SELECT * FROM vector_stores
+            WHERE {" AND ".join(conditions)}
+            ORDER BY created_at {order.upper()}, id {order.upper()}
+            LIMIT ${len(params) + 1}
+        """
         params.append(limit)
 
         # Execute query with connection from pool

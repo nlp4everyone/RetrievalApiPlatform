@@ -310,9 +310,10 @@ class VectorStoreService:
             
         Raises:
             PostgresConnectionException: If database connection fails
+            HTTPException: 400 if a cursor id does not resolve to a vector store
         """
         postgres_pool = get_postgres_pool()
-        
+
         try:
             # List vector stores from database
             result = await PostgresVectorStore.list_vector_stores(
@@ -345,6 +346,13 @@ class VectorStoreService:
             raise PostgresConnectionException()
         except AppBaseException:
             raise
+        except ValueError as e:
+            # An unknown after/before cursor is the caller's mistake, not a server fault
+            SystemLogger.warning(f"Rejected vector store listing: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(e)
+            )
         except Exception as e:
             SystemLogger.error(f"Error listing vector stores: {e}", exc_info=True)
             raise HTTPException(
