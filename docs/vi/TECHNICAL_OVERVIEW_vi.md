@@ -185,7 +185,7 @@ Chưa triển khai: ingestion nhiều file cho một vector store, endpoint sub-
 
 ```
 app/
-  app.py                  # FastAPI app: middleware, router, exception handler, startup event
+  app.py                  # FastAPI app: middleware, router, exception handler, lifespan
   startup.py              # service locator init_*/get_*, dùng chung cho web và worker
                           # (kể cả pool I/O, pool CPU và semaphore download)
   api/                    # mọi thứ tồn tại chỉ vì app được phục vụ qua HTTP

@@ -38,7 +38,7 @@ Mọi endpoint đều yêu cầu `Depends(verify_api_key)`.
 
 `RequestIDMiddleware` là middleware ASGI thuần (không phải `BaseHTTPMiddleware` — loại đó sẽ reset contextvar trước khi access logger của uvicorn kịp chạy). Nó tái sử dụng header `X-Request-Id` do client gửi nếu có, nếu không thì sinh `req_{uuid4().hex}`, bind vào `request_id_ctx` (một `contextvars.ContextVar` trong `app/core/request_context.py`) trong suốt vòng đời request, và echo lại trên response. Chính ID đó được truyền vào `ingest_vector_store_files.kiq(...)` và bind lại bên trong worker task, nên một request ID xuyên suốt cả log HTTP lẫn job ingestion bất đồng bộ mà request đó kích hoạt.
 
-`app/app.py` còn định nghĩa `GET /health` (loại khỏi OpenAPI schema), đăng ký `RequestIDMiddleware`, handler `AppBaseException` toàn cục, và một startup event khởi tạo theo thứ tự tracing → embed model → Postgres (pool + `wait_for_postgres` + tạo bảng) → vector store → MinIO → pool I/O. Ngoài ra `app.py` còn gắn hai log filter cho `uvicorn.access`: `HealthCheckLogFilter` (im lặng với `/health` khi 2xx) và `QuietAccessLogFilter` (im lặng với list/retrieve/modify khi 2xx — những route đó đã được service layer log; create/delete/search vẫn luôn hiện, và mọi lỗi non-2xx đều hiện).
+`app/app.py` còn định nghĩa `GET /health` (loại khỏi OpenAPI schema), đăng ký `RequestIDMiddleware`, handler `AppBaseException` toàn cục, và một `lifespan` khởi tạo theo thứ tự tracing → embed model → Postgres (pool + `wait_for_postgres` + tạo bảng) → vector store → MinIO → pool I/O, rồi giải phóng pool I/O, các connection vector store và pool Postgres ở phần dưới `yield` — cùng một hàm, nên một client mở ở trên không thể bị quên ở dưới. Ngoài ra `app.py` còn gắn hai log filter cho `uvicorn.access`: `HealthCheckLogFilter` (im lặng với `/health` khi 2xx) và `QuietAccessLogFilter` (im lặng với list/retrieve/modify khi 2xx — những route đó đã được service layer log; create/delete/search vẫn luôn hiện, và mọi lỗi non-2xx đều hiện).
 
 ## Service layer (`app/services/`)
 
@@ -59,11 +59,15 @@ Các static method `create`, `list`, `get`, `modify`, `delete`, `search`.
 
 Business logic của task nền, cố ý không import TaskIQ để có thể gọi và test mà không cần broker đang chạy. `ingest_vector_store_files(...)`:
 
-1. `PostgresFileStore.check_existing_files` — nếu không file nào còn tồn tại, nhảy thẳng tới bước đánh dấu store `completed` với `usage_bytes=0`
-2. Lấy `get_total_bytes` + `get_metadata_for_files`
-3. Chốt chặn: đúng một file, nếu không thì log, `_mark_failed`, và raise — lớp phòng thủ thứ hai sau lần từ chối ở tầng API, để một store rỗng không bao giờ bị báo `completed`
-4. `_ingest_single_file` dựng pipeline qua `build_ingestion_pipeline(...)` và chạy nó trên một `IngestionContext`, truyền `trace_context` làm parent carrier
-5. Đánh dấu `completed` kèm `usage_bytes`; mọi lỗi đều đánh dấu `failed` rồi raise lại
+1. Chốt chặn: `chunking_strategy` phải thuộc `("auto", "static")`, nếu không thì log, `_mark_failed`, và raise — một giá trị lạ nghĩa là `VectorStoreService.create` và worker đã lệch nhau, và fail còn hơn im lặng bỏ qua phần ingest
+2. `PostgresFileStore.check_existing_files` — có yêu cầu `file_ids` nhưng không id nào tồn tại? log, `_mark_failed`, và raise. Chỉ store tạo ra **không kèm** `file_ids` nào mới nhảy thẳng tới `completed` với `usage_bytes=0`
+3. Lấy `get_total_bytes` + `get_metadata_for_files`, cả hai đều dựa trên `existing_file_ids` để một id đã biến mất không được tính vào bên nào
+4. Chốt chặn: đúng một file, nếu không thì log, `_mark_failed`, và raise — lớp phòng thủ thứ hai sau lần từ chối ở tầng API. Con số `0` vẫn tới được nhánh này: `get_metadata_for_files` loại bỏ row có `metadata` là `NULL`, nên một file tồn tại mà không có metadata sẽ rơi vào đây
+5. `_ingest_single_file` dựng pipeline qua `build_ingestion_pipeline(...)` và chạy nó trên một `IngestionContext`, truyền `trace_context` làm parent carrier, rồi trả về `context.num_inserted`
+6. Chốt chặn: `num_inserted > 0`, nếu không thì log, `_mark_failed`, và raise — pipeline vẫn chạy tới hết trên một file không rút được chữ nào, và một collection rỗng thì không đáng gọi là `completed`
+7. Đánh dấu `completed` kèm `usage_bytes`; mọi lỗi đều đánh dấu `failed` rồi raise lại
+
+Mọi chốt chặn trên tồn tại vì một lý do: `completed` là tín hiệu báo với client rằng collection đã search được, nên mỗi đường dẫn để lại collection rỗng đều phải fail thay vì đi tiếp.
 
 ## Pipeline layer (`app/pipelines/`)
 
@@ -144,7 +148,7 @@ Cả hai provider embedding đều chỉ là HTTP client — không model nào �
 
 Lưu ý điểm lệch giữa hai allow-list: `ALLOWED_EXTENSIONS` lúc upload cho phép `.csv`, `.json` và `.gif` — ba định dạng đó **upload được** dưới dạng File nhưng không có provider parsing nào đăng ký, nên ingestion sẽ raise `ValueError`. Ngược lại, `.md` và `.doc` **parse được** nhưng không nằm trong `ALLOWED_EXTENSIONS`, và `validate_file_type` chặn theo extension (không có ngoại lệ), nên chúng luôn bị 415 ngay ở bước upload.
 
-`ChunkingService` phơi bày `strategy_name` và `async split_text(text)`. Provider Chonkie hỗ trợ `character | sentence | recursive | token` (mặc định `recursive`, `chunk_size=800`, `chunk_overlap=400`). Ở tầng API, `VectorStoreCreateRequest.chunking_strategy` chỉ cho chọn `"auto"` hoặc `"static"`, nên các strategy chi tiết hơn không tiếp cận được qua API công khai.
+`ChunkingService` phơi bày `strategy_name` và `async split_text(text)`. Provider Chonkie hỗ trợ `character | sentence | recursive | token` (mặc định `recursive`, `chunk_size=800`, `chunk_overlap=400`). Ở tầng API, `VectorStoreCreateRequest.chunking_strategy` chỉ cho chọn `"auto"` hoặc `"static"`, nên các strategy chi tiết hơn không tiếp cận được qua API công khai — và chính strategy nội bộ cũng vậy, không có đường nào đổi được giá trị mặc định trong `ChonkieChunkingConfig`. Từ giá trị mặc định đó kéo theo hai hệ quả mà caller không nhìn thấy: `_create_chunker` chỉ truyền `chunk_overlap` cho chunker token và sentence, nên ở nhánh `recursive` thì `chunk_overlap_tokens` của request bị **bỏ hoàn toàn**; và `tokenizer="character"` nghĩa là `max_chunk_size_tokens` được đếm theo ký tự chứ không phải token (xem [Quyết định thiết kế](DESIGN_DECISIONS_vi.md#giới-hạn-đã-biết)).
 
 Cả hai chunking provider đều `run_in_executor(get_cpu_executor(), ...)`: splitting là CPU-bound và nếu chạy thẳng trên event loop sẽ làm đứng mọi task khác trong cùng tiến trình. Pool CPU (`CPU_THREAD_POOL_SIZE`, mặc định 4) được cố ý tách khỏi pool I/O (`IO_THREAD_POOL_SIZE`, mặc định 32) — oversubscribe công việc CPU-bound chỉ thêm context switch chứ không tăng thông lượng, còn dùng chung pool thì một lượt transfer MinIO chậm có thể làm chunking phải xếp hàng, và ngược lại.
 
@@ -235,7 +239,7 @@ Ba resource điều tiết concurrency cũng nằm ở đây: `init_io_executor`
 
 ## Background worker (`app/tasks/`)
 
-`broker.py` chỉ nắm vòng đời của broker: `RedisStreamBroker` + `RedisAsyncResultBackend` trên `REDIS_URL`, với các hook `WORKER_STARTUP`/`WORKER_SHUTDOWN` chạy `_initialize_services()` đúng một lần (chốt bằng cờ `_initialized`), rồi đóng pool Postgres cùng `VectorStoreFactory.close_all()` khi thoát. `_initialize_services()` phản chiếu startup event của `app.app` nhưng thêm ba thứ tiến trình web không cần — `init_cpu_executor()`, `init_download_semaphore()` và `init_parsing_service()` — vì worker là nơi chạy toàn bộ ingestion pipeline. Việc tách task sang module riêng là thứ cho phép `app.tasks.broker:broker` làm entrypoint deploy mà không phải import cả ingestion pipeline chỉ để khởi động tiến trình.
+`broker.py` chỉ nắm vòng đời của broker: `RedisStreamBroker` + `RedisAsyncResultBackend` trên `REDIS_URL`, với các hook `WORKER_STARTUP`/`WORKER_SHUTDOWN` chạy `_initialize_services()` đúng một lần (chốt bằng cờ `_initialized`), rồi đóng pool Postgres cùng `VectorStoreFactory.close_all()` khi thoát. `_initialize_services()` phản chiếu nửa khởi động trong lifespan của `app.app` nhưng thêm ba thứ tiến trình web không cần — `init_cpu_executor()`, `init_download_semaphore()` và `init_parsing_service()` — vì worker là nơi chạy toàn bộ ingestion pipeline. Việc tách task sang module riêng là thứ cho phép `app.tasks.broker:broker` làm entrypoint deploy mà không phải import cả ingestion pipeline chỉ để khởi động tiến trình.
 
 `ingestion_task.py` chứa task duy nhất, `ingest_vector_store_files(vectorstore_id, api_key, file_ids, chunking_strategy, chunk_size, chunk_overlap, request_id, trace_context, vector_store_type)`. Nó chỉ điều phối: bind `request_id_ctx`, uỷ quyền cho `IngestionService`, log rồi raise lại để TaskIQ thấy được lỗi, cuối cùng reset contextvar.
 

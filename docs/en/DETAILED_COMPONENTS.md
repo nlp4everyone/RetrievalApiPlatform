@@ -38,7 +38,7 @@ All endpoints require `Depends(verify_api_key)`.
 
 `RequestIDMiddleware` is a raw ASGI middleware (not `BaseHTTPMiddleware` — that would reset the contextvar before uvicorn's access logger fires). It reuses a client-supplied `X-Request-Id` header if present, else generates `req_{uuid4().hex}`, binds it to `request_id_ctx` (a `contextvars.ContextVar` in `app/core/request_context.py`) for the request's duration, and echoes it back on the response. The same ID is passed into `ingest_vector_store_files.kiq(...)` and re-bound inside the worker task, so a single request ID threads through HTTP logs and the async ingestion job that request triggered.
 
-`app/app.py` also defines `GET /health` (excluded from OpenAPI schema), registers `RequestIDMiddleware`, the global `AppBaseException` handler, and a startup event that brings up tracing → embed model → Postgres (pool + `wait_for_postgres` + table creation) → vector store → MinIO → I/O pool, in that order. It also installs two `uvicorn.access` log filters: `HealthCheckLogFilter` (silences 2xx `/health` probes) and `QuietAccessLogFilter` (silences 2xx list/retrieve/modify calls, which the service layer already logs; create/delete/search stay visible, and every non-2xx line still shows up).
+`app/app.py` also defines `GET /health` (excluded from OpenAPI schema), registers `RequestIDMiddleware`, the global `AppBaseException` handler, and a `lifespan` that brings up tracing → embed model → Postgres (pool + `wait_for_postgres` + table creation) → vector store → MinIO → I/O pool, in that order, then releases the I/O pool, the vector store connections and the Postgres pool below its `yield` — one function, so a client opened above it cannot be forgotten below. It also installs two `uvicorn.access` log filters: `HealthCheckLogFilter` (silences 2xx `/health` probes) and `QuietAccessLogFilter` (silences 2xx list/retrieve/modify calls, which the service layer already logs; create/delete/search stay visible, and every non-2xx line still shows up).
 
 ## Service layer (`app/services/`)
 
@@ -59,11 +59,15 @@ Static methods `create`, `list`, `get`, `modify`, `delete`, `search`.
 
 The background task's business logic, deliberately free of any TaskIQ import so it can be called and tested without a running broker. `ingest_vector_store_files(...)`:
 
-1. `PostgresFileStore.check_existing_files` — if none of the referenced files still exist, skip straight to marking the store `completed` with `usage_bytes=0`
-2. Fetch `get_total_bytes` + `get_metadata_for_files`
-3. Guard: exactly one file, else log, `_mark_failed`, and raise — a second line of defense behind the API-level rejection, so an empty store is never reported `completed`
-4. `_ingest_single_file` builds the pipeline via `build_ingestion_pipeline(...)` and runs it against an `IngestionContext`, passing `trace_context` as the parent carrier
-5. Mark `completed` with `usage_bytes`; any failure marks `failed` and re-raises
+1. Guard: `chunking_strategy` is one of `("auto", "static")`, else log, `_mark_failed`, and raise — an unrecognised value means `VectorStoreService.create` and this worker have drifted apart, and failing beats silently skipping the ingest
+2. `PostgresFileStore.check_existing_files` — `file_ids` were requested but none of them exist? log, `_mark_failed`, and raise. Only a store created with **no** `file_ids` at all skips ahead to `completed` with `usage_bytes=0`
+3. Fetch `get_total_bytes` + `get_metadata_for_files`, both keyed on `existing_file_ids` so a vanished id counts toward neither
+4. Guard: exactly one file, else log, `_mark_failed`, and raise — a second line of defense behind the API-level rejection. `0` is still reachable here: `get_metadata_for_files` drops rows whose `metadata` is `NULL`, so a file that exists without metadata lands in this branch
+5. `_ingest_single_file` builds the pipeline via `build_ingestion_pipeline(...)` and runs it against an `IngestionContext`, passing `trace_context` as the parent carrier, and returns `context.num_inserted`
+6. Guard: `num_inserted > 0`, else log, `_mark_failed`, and raise — the pipeline runs to the end on a file it can extract no text from, and an empty collection is not something to call `completed`
+7. Mark `completed` with `usage_bytes`; any failure marks `failed` and re-raises
+
+Every gate above exists for one reason: `completed` is the client's signal that the collection is searchable, so each path that would leave it empty fails instead.
 
 ## Pipeline layer (`app/pipelines/`)
 
@@ -144,7 +148,7 @@ Both embedding providers are HTTP clients — no model is loaded in this process
 
 Note the mismatch between the two allow-lists: upload-time `ALLOWED_EXTENSIONS` permits `.csv`, `.json`, and `.gif` — those can be **uploaded** as Files but have no registered parsing provider, so ingestion raises `ValueError`. Conversely `.md` and `.doc` **can be parsed** but are not in `ALLOWED_EXTENSIONS`, and `validate_file_type` gates on extension with no escape hatch, so they are always rejected with a 415 at upload.
 
-`ChunkingService` exposes `strategy_name` and `async split_text(text)`. The Chonkie provider supports `character | sentence | recursive | token` (default `recursive`, `chunk_size=800`, `chunk_overlap=400`). At the API level, `VectorStoreCreateRequest.chunking_strategy` only exposes `"auto"` or `"static"`, so the finer strategies aren't reachable through the public API.
+`ChunkingService` exposes `strategy_name` and `async split_text(text)`. The Chonkie provider supports `character | sentence | recursive | token` (default `recursive`, `chunk_size=800`, `chunk_overlap=400`). At the API level, `VectorStoreCreateRequest.chunking_strategy` only exposes `"auto"` or `"static"`, so the finer strategies aren't reachable through the public API — and neither is the internal strategy itself, which nothing outside `ChonkieChunkingConfig`'s default can change. Two consequences follow from that default, both invisible to the caller: `_create_chunker` passes `chunk_overlap` to the token and sentence chunkers only, so on `recursive` the request's `chunk_overlap_tokens` is **dropped**; and `tokenizer="character"` means `max_chunk_size_tokens` is counted in characters, not tokens (see [Design Decisions](DESIGN_DECISIONS.md#known-gaps)).
 
 Both chunking providers `run_in_executor(get_cpu_executor(), ...)`: splitting is CPU-bound and would otherwise stall the event loop for every other task in the process. The CPU pool (`CPU_THREAD_POOL_SIZE`, default 4) is deliberately separate from the I/O pool (`IO_THREAD_POOL_SIZE`, default 32) — oversubscribing CPU-bound work only adds context switching, not throughput, while sharing one pool lets a slow MinIO transfer make chunking queue behind it, and vice versa.
 
@@ -233,7 +237,7 @@ Used identically — but independently instantiated — by both `app/app.py` (we
 
 ## Background worker (`app/tasks/`)
 
-`broker.py` owns only the broker lifecycle: `RedisStreamBroker` + `RedisAsyncResultBackend` over `REDIS_URL`, with `WORKER_STARTUP`/`WORKER_SHUTDOWN` hooks that run `_initialize_services()` once (guarded by the `_initialized` flag) and close the Postgres pool plus `VectorStoreFactory.close_all()` on the way out. `_initialize_services()` mirrors `app.app`'s startup event but adds three things the web process does not need — `init_cpu_executor()`, `init_download_semaphore()`, and `init_parsing_service()` — because the worker is where the whole ingestion pipeline runs. Keeping the task in a separate module is what lets `app.tasks.broker:broker` be the deploy entrypoint without importing the ingestion pipeline just to start the process.
+`broker.py` owns only the broker lifecycle: `RedisStreamBroker` + `RedisAsyncResultBackend` over `REDIS_URL`, with `WORKER_STARTUP`/`WORKER_SHUTDOWN` hooks that run `_initialize_services()` once (guarded by the `_initialized` flag) and close the Postgres pool plus `VectorStoreFactory.close_all()` on the way out. `_initialize_services()` mirrors the startup half of `app.app`'s lifespan but adds three things the web process does not need — `init_cpu_executor()`, `init_download_semaphore()`, and `init_parsing_service()` — because the worker is where the whole ingestion pipeline runs. Keeping the task in a separate module is what lets `app.tasks.broker:broker` be the deploy entrypoint without importing the ingestion pipeline just to start the process.
 
 `ingestion_task.py` holds the one task, `ingest_vector_store_files(vectorstore_id, api_key, file_ids, chunking_strategy, chunk_size, chunk_overlap, request_id, trace_context, vector_store_type)`. It is orchestration only: bind `request_id_ctx`, delegate to `IngestionService`, log and re-raise so TaskIQ sees the failure, reset the contextvar.
 

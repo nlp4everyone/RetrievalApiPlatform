@@ -6,7 +6,7 @@
 ## Component diagram
 
 ```text
-App Startup  (FastAPI "startup" event, app/app.py → app/startup.py)
+App Startup  (FastAPI lifespan, above the yield in app/app.py → app/startup.py)
         ├── init_tracing()                OpenTelemetry TracerProvider → export OTLP to Langfuse
         ├── init_embed_model()             EmbeddingService.from_settings() → check_connection()
         │                                  ↳ check_connection() embeds a throwaway string and CACHES
@@ -102,13 +102,8 @@ FastAPI HTTP Gateway
         │       │                                  vector_store_type=provider, ...)
         │       │
         │       ├── Resolve chunking_strategy + chunk_size/chunk_overlap:
-        │       │       request.chunking_strategy is None                     → "auto"   (800 / 400)
-        │       │       request.chunking_strategy.type == "static"             → "static" (from request.static)
-        │       │       request.chunking_strategy.type == "auto" (sent explicitly) → falls into else → "fuse" (800 / 400)
-        │       │           ⚠ "fuse" is not in ("auto","static"), so IngestionService SKIPS the pipeline —
-        │       │             the store is still marked "completed" while nothing was ever indexed.
-        │       │             Only happens when the client explicitly sends {"type": "auto"}
-        │       │             instead of omitting chunking_strategy.
+        │       │       request.chunking_strategy.type == "static"  → "static" (from request.static)
+        │       │       anything else — field omitted, or an explicit {"type": "auto"} → "auto" (800 / 400)
         │       │
         │       └── traced_span("enqueue_ingestion")
         │               ingest_vector_store_files.kiq(vectorstore_id, api_key, file_ids,
@@ -128,18 +123,23 @@ FastAPI HTTP Gateway
         ▼
     IngestionService.ingest_vector_store_files(...)
         │
+        ├──▶ Step 0: chunking_strategy in ("auto","static") ?
+        │       NO  → log error → _mark_failed(status=FAILED) → raise ValueError
+        │              (producer and worker have drifted apart; failing beats silently no-oping)
+        │
         ├──▶ Step 1: PostgresFileStore.check_existing_files(file_ids) → existing_file_ids
-        │       empty?  → usage_bytes stays 0, skip Steps 2-3, jump to Step 4 (status=COMPLETED)
-        │       else → get_total_bytes(file_ids) → usage_bytes
+        │       file_ids given but none exist? → log error → _mark_failed → raise ValueError
+        │       no file_ids at all → usage_bytes stays 0, skip Steps 2-3, jump to Step 4
+        │                            (a store created without files is legitimately empty)
+        │       else → get_total_bytes(existing_file_ids) → usage_bytes
         │              get_metadata_for_files(existing_file_ids) → files_metadata
         │
         ├──▶ Step 2: len(files_metadata) == 1 ?   ← second line of defense behind the API-level check
         │       NO (0 or >1) → log error → _mark_failed(status=FAILED) → raise ValueError
-        │                      (deliberately NOT reported as "completed" on an empty store)
+        │              0 survives Step 1: get_metadata_for_files drops rows whose metadata
+        │              is NULL, so a file that exists without metadata lands here
         │
-        ├──▶ Step 3: chunking_strategy in ("auto","static") ?
-        │       NO  → pipeline skipped entirely (see ⚠ "fuse" above)
-        │       YES → _ingest_single_file(...)
+        ├──▶ Step 3: _ingest_single_file(...) → num_inserted
         │               vector_store = VectorStoreFactory.get_store(collection_name=vectorstore_id,
         │                                                           provider=vector_store_type)
         │               pipeline = build_ingestion_pipeline(minio_client, vector_store, embed_fn=get_dense_embedding,
@@ -219,7 +219,12 @@ FastAPI HTTP Gateway
         │               any stage raises? → remaining stages do not run → the span records the error
         │                                 → IngestionService catches → _mark_failed(status=FAILED) → re-raise
         │
+        │               num_inserted == 0? → the file yielded no chunks, so the collection is empty
+        │                                  → _mark_failed(status=FAILED) → raise ValueError
+        │
         └──▶ Step 4: PostgresVectorStore.update(status=COMPLETED, usage_bytes, last_active_at=now())
+                     ← reached only when the collection is actually searchable, or when the
+                       store was created with no file_ids at all
 
 ③ POST /v1/vector_stores/{id}/search   {query, max_num_results, filters, ranking_options, search_type}
         ▼
@@ -327,6 +332,15 @@ FastAPI HTTP Gateway
         │              here — the threshold above and the RRF ranking both used the full score
         │
         └── return VectorStoreSearchResponse(search_query, data, has_more = len(data) >= max_num_results)
+
+App Shutdown  (FastAPI lifespan, below the yield in app/app.py)
+        ├── get_io_executor().shutdown(cancel_futures=True)   drop the I/O threads first, so nothing
+        │                                        new reaches MinIO or the clients closed below
+        ├── VectorStoreFactory.close_all()       closes every registered vector store connection
+        └── get_postgres_client().close()        closes the asyncpg pool
+                                                 the TracerProvider is deliberately left alone: it
+                                                 registers its own atexit flush, and shutting it down
+                                                 here would cut these shutdown logs short
 
 Worker Shutdown  (TaskIQ WORKER_SHUTDOWN, app/tasks/broker.py)
         ├── get_postgres_client().close()        closes the asyncpg pool — only if _initialized

@@ -185,7 +185,7 @@ Not yet implemented: multi-file ingestion for a single vector store, a vector-st
 
 ```
 app/
-  app.py                  # FastAPI app: middleware, routers, exception handler, startup event
+  app.py                  # FastAPI app: middleware, routers, exception handler, lifespan
   startup.py              # init_*/get_* service locator, shared by web and worker
                           # (including the I/O pool, CPU pool, and download semaphore)
   api/                    # everything that exists only because this is served over HTTP
