@@ -6,7 +6,11 @@ from .startup import (init_embed_model,
                       init_vector_store,
                       init_minio,
                       init_io_executor,
+                      get_io_executor,
+                      get_postgres_client,
                       wait_for_postgres)
+# Vector store connections opened at startup, closed on the way out
+from .db.vector_store import VectorStoreFactory
 # Router
 from .api.router import (file_router,
                         vector_store_router)
@@ -21,6 +25,8 @@ from .core.config.storage import API_VERSION
 from .core.tracing import init_tracing
 # Components
 import time, logging, re
+from contextlib import asynccontextmanager
+from typing import AsyncIterator
 # Logger
 from loggers import SystemLogger
 
@@ -69,34 +75,16 @@ tags_metadata = [
         "description": "Provides a secure way to create, manage, and retrieve vector store",
     },
 ]
-# Initialize FastAPI application with OpenAPI tags
-app = FastAPI(openapi_tags = tags_metadata)
 
-# Tag every request with a correlation ID (X-Request-Id), echoed back to the
-# client and bound to all logs emitted while handling that request
-app.add_middleware(RequestIDMiddleware)
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """
+    Bring every service this process needs up, then tear it back down.
 
-# Register API Routes
-# Add file router for file upload and management operations
-app.include_router(file_router,
-                   prefix = f"/{API_VERSION}",
-                   tags = [tags_metadata[0].get("name")])
-# Add vector store router for vector database operations
-app.include_router(vector_store_router,
-                   prefix = f"/{API_VERSION}",
-                   tags = [tags_metadata[1].get("name")])
-
-# Register global exception handler for custom exceptions
-app.add_exception_handler(AppBaseException, common_exception_handler)
-
-@app.get("/health", include_in_schema=False)
-async def health() -> dict[str, str]:
-    return {"status": "ok"}
-
-# Application Startup Event
-# Initializes all required services and dependencies
-@app.on_event("startup")
-async def startup_event() -> None:
+    Startup and shutdown live in one function so a connection opened above the
+    yield cannot be forgotten below it - the worker already closes the same two
+    clients in broker.py's WORKER_SHUTDOWN handler.
+    """
     SystemLogger.info("[APP] Starting application warm up...")
 
     # Settings are validated on import of app.core.config, so reaching this
@@ -135,3 +123,42 @@ async def startup_event() -> None:
     SystemLogger.info("[APP] ✅ I/O thread pool ready")
     # Logging
     SystemLogger.success(f"[APP] Service started in {round(time.perf_counter() - start,1)}s")
+
+    yield
+
+    # Shutdown: release what the block above acquired, in reverse order. The
+    # tracer provider is not touched - its own atexit handler flushes the
+    # pending spans, and doing it here would cut the shutdown logs short
+    SystemLogger.info("[APP] Shutting down...")
+    # Drop the I/O threads first so nothing new reaches MinIO or the clients below
+    get_io_executor().shutdown(wait = False, cancel_futures = True)
+    await VectorStoreFactory.close_all()
+    await get_postgres_client().close()
+    SystemLogger.success("[APP] Shutdown complete")
+
+
+# Initialize FastAPI application with OpenAPI tags
+app = FastAPI(openapi_tags = tags_metadata,
+              lifespan = lifespan)
+
+# Tag every request with a correlation ID (X-Request-Id), echoed back to the
+# client and bound to all logs emitted while handling that request
+app.add_middleware(RequestIDMiddleware)
+
+# Register API Routes
+# Add file router for file upload and management operations
+app.include_router(file_router,
+                   prefix = f"/{API_VERSION}",
+                   tags = [tags_metadata[0].get("name")])
+# Add vector store router for vector database operations
+app.include_router(vector_store_router,
+                   prefix = f"/{API_VERSION}",
+                   tags = [tags_metadata[1].get("name")])
+
+# Register global exception handler for custom exceptions
+app.add_exception_handler(AppBaseException, common_exception_handler)
+
+@app.get("/health", include_in_schema=False)
+async def health() -> dict[str, str]:
+    return {"status": "ok"}
+
