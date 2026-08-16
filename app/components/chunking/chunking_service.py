@@ -61,10 +61,10 @@ class ChunkingService:
         """
         Build the ChunkingService for the provider selected via CHUNKING_PROVIDER.
 
-        The vector store's chunking_strategy ("auto", "static", "fuse") only
-        carries sizing intent, so every value currently resolves to the
-        provider's default splitter with the requested size and overlap. New
-        splitters - MarkdownHeader, Slumber, Unstructured - plug in here.
+        The vector store's chunking_strategy ("auto", "static") only carries
+        sizing intent, so every value currently resolves to the provider's
+        default splitter with the requested size and overlap. New splitters -
+        MarkdownHeader, Slumber, Unstructured - plug in here.
 
         Args:
             chunking_strategy (str): Strategy recorded on the vector store

@@ -21,6 +21,11 @@ from app.startup import (get_dense_embedding,
                          is_sparse_embedding_enabled)
 from loggers import SystemLogger
 
+# The strategy names VectorStoreService.create can put on the queue. Both resolve
+# to the same splitter today and differ only in sizing, but an unrecognised value
+# means producer and worker have drifted apart, so the run fails instead of no-oping.
+_SUPPORTED_CHUNKING_STRATEGIES = frozenset({"auto", "static"})
+
 
 class IngestionService:
     """Orchestrates ingesting the file(s) behind one vector store."""
@@ -53,22 +58,42 @@ class IngestionService:
                 FAILED before the exception is re-raised
 
         Note:
+            COMPLETED means the collection is searchable, so every path that
+            leaves it empty - an unknown chunking strategy, files that do not
+            exist, a file that yields no chunks - fails instead. The one
+            legitimately empty store is the one created with no file_ids at all.
+
             Currently supports single file processing. VectorStoreService.create
             already rejects more than one file_id at request time; the check
-            here is a second line of defense against reporting COMPLETED on
-            an empty store.
+            here is a second line of defense.
         """
         SystemLogger.info(f"[WORKER] Start processing vector store {vectorstore_id} (files: {file_ids})")
         postgres_pool = get_postgres_pool()
         usage_bytes = 0
 
+        # An unknown strategy used to fall through the ingest branch untouched and
+        # still report COMPLETED, so reject it here rather than skipping the work
+        if chunking_strategy not in _SUPPORTED_CHUNKING_STRATEGIES:
+            SystemLogger.error(f"[WORKER] Vector store {vectorstore_id} was queued with unsupported "
+                               f"chunking strategy {chunking_strategy!r}")
+            await IngestionService._mark_failed(vectorstore_id, api_key, usage_bytes)
+            raise ValueError(f"Unsupported chunking strategy: {chunking_strategy!r}")
+
         # Step 1: Verify which requested files actually exist
         existing_file_ids = await PostgresFileStore.check_existing_files(pool = postgres_pool,
                                                                          file_ids = file_ids)
 
+        # A store created without files is legitimately empty; one whose files
+        # cannot be found is not, and reporting COMPLETED there hides the failure
+        if file_ids and not existing_file_ids:
+            SystemLogger.error(f"[WORKER] None of the files requested for vector store "
+                               f"{vectorstore_id} exist: {file_ids}")
+            await IngestionService._mark_failed(vectorstore_id, api_key, usage_bytes)
+            raise ValueError(f"No such file(s) for ingestion: {file_ids}")
+
         if existing_file_ids:
             usage_bytes = await PostgresFileStore.get_total_bytes(pool = postgres_pool,
-                                                                  file_ids = file_ids)
+                                                                  file_ids = existing_file_ids)
             files_metadata = await PostgresFileStore.get_metadata_for_files(pool = postgres_pool,
                                                                             file_ids = existing_file_ids)
 
@@ -81,21 +106,28 @@ class IngestionService:
                 await IngestionService._mark_failed(vectorstore_id, api_key, usage_bytes)
                 raise ValueError(f"Unsupported number of files for ingestion: {len(files_metadata)}")
 
-            if chunking_strategy in ["auto", "static"]:
-                try:
-                    await IngestionService._ingest_single_file(vectorstore_id = vectorstore_id,
-                                                               api_key = api_key,
-                                                               file_id = file_ids[0],
-                                                               file_metadata = files_metadata[0],
-                                                               chunking_strategy = chunking_strategy,
-                                                               chunk_size = chunk_size,
-                                                               chunk_overlap = chunk_overlap,
-                                                               vector_store_type = vector_store_type,
-                                                               trace_context = trace_context)
-                except Exception as ingestion_error:
-                    SystemLogger.error(f"[WORKER] Ingestion failed for vector store {vectorstore_id}: {ingestion_error}")
-                    await IngestionService._mark_failed(vectorstore_id, api_key, usage_bytes)
-                    raise
+            try:
+                num_inserted = await IngestionService._ingest_single_file(vectorstore_id = vectorstore_id,
+                                                                          api_key = api_key,
+                                                                          file_id = existing_file_ids[0],
+                                                                          file_metadata = files_metadata[0],
+                                                                          chunking_strategy = chunking_strategy,
+                                                                          chunk_size = chunk_size,
+                                                                          chunk_overlap = chunk_overlap,
+                                                                          vector_store_type = vector_store_type,
+                                                                          trace_context = trace_context)
+            except Exception as ingestion_error:
+                SystemLogger.error(f"[WORKER] Ingestion failed for vector store {vectorstore_id}: {ingestion_error}")
+                await IngestionService._mark_failed(vectorstore_id, api_key, usage_bytes)
+                raise
+
+            # The pipeline runs to the end on a file it cannot get any text out of,
+            # which leaves the collection empty - not something to call COMPLETED
+            if num_inserted == 0:
+                SystemLogger.error(f"[WORKER] Ingestion produced no documents for vector store "
+                                   f"{vectorstore_id}; nothing was written to the collection")
+                await IngestionService._mark_failed(vectorstore_id, api_key, usage_bytes)
+                raise ValueError(f"Ingestion produced no documents for vector store {vectorstore_id}")
 
         # Step 3: Mark vector store as completed
         await PostgresVectorStore.update(pool = postgres_pool,
