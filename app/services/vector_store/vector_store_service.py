@@ -479,21 +479,15 @@ class VectorStoreService:
         """
         # Validate vector store id
         validate_vector_store_prefix(vector_store_id)
-        
+
         postgres_pool = get_postgres_pool()
 
-        # Read the record (raises if missing) - its vector_store_type tells us
-        # which backend actually holds the collection, which may differ from the
-        # currently configured provider
-        record = await PostgresVectorStore.get_by_id(
-            pool=postgres_pool,
-            vector_store_id=vector_store_id,
-            api_key=api_key
-        )
-
         try:
-            # Delete vector store metadata from PostgreSQL database
-            await PostgresVectorStore.delete(
+            # Delete vector store metadata from PostgreSQL database. The
+            # returned record's vector_store_type tells us which backend
+            # actually holds the collection, which may differ from the
+            # currently configured provider
+            record = await PostgresVectorStore.delete(
                 pool=postgres_pool,
                 vector_store_id=vector_store_id,
                 api_key=api_key

@@ -28,34 +28,6 @@ class PostgresVectorStore:
         return record
 
     @staticmethod
-    async def _check_vector_store_existence(pool: asyncpg.Pool,
-                                            vector_store_id: str,
-                                            api_key: str) -> None:
-        """
-        Private helper method to verify vector store exists.
-        
-        Args:
-            pool: PostgreSQL connection pool
-            vector_store_id: Unique identifier of the vector store
-            api_key: API key for authentication
-            
-        Raises:
-            VectorStoreNotFoundException: If vector store doesn't exist
-        """
-        # Define SQL query to check existence
-        query = """
-        SELECT * FROM vector_stores
-        WHERE id = $1 AND api_key = $2
-        """
-
-        # Execute query with connection from pool
-        async with pool.acquire() as conn:
-            row = await conn.fetchrow(query, vector_store_id, api_key)
-
-        # Raise exception if vector store not found
-        if not row: raise VectorStoreNotFoundException(vector_store_id)
-
-    @staticmethod
     async def create(pool: asyncpg.Pool,
                      *,
                      id: str,
@@ -268,35 +240,39 @@ class PostgresVectorStore:
     @staticmethod
     async def delete(pool: asyncpg.Pool,
                      vector_store_id: str,
-                     api_key: str) -> None:
+                     api_key: str) -> Dict[str, Any]:
         """
         Delete a vector store from the database.
-        
-        This method first checks if the vector store exists before attempting deletion
-        to provide consistent error handling with other methods.
-        
+
+        Existence check and deletion are one statement (DELETE ... RETURNING),
+        not a separate SELECT followed by a DELETE - that would leave a window
+        where a concurrent delete of the same row could slip between the two,
+        making the check meaningless and silently deleting zero rows.
+
         Args:
             pool: PostgreSQL connection pool
             vector_store_id: Unique identifier of the vector store to delete
             api_key: API key for authentication
-            
+
+        Returns:
+            Dict containing the deleted vector store record
+
         Raises:
             VectorStoreNotFoundException: If vector store doesn't exist
             asyncpg.PostgresError: If database operation fails
         """
-        # Check if vector store exists first for consistent error handling
-        await PostgresVectorStore._check_vector_store_existence(pool=pool,
-                                                                vector_store_id=vector_store_id,
-                                                                api_key=api_key)
-        
-        # Build DELETE query for specific vector store
         query = """
             DELETE FROM vector_stores
             WHERE id = $1 AND api_key = $2
+            RETURNING *
         """
-        # Execute deletion with connection from pool
         async with pool.acquire() as conn:
-            await conn.execute(query, vector_store_id, api_key)
+            row = await conn.fetchrow(query, vector_store_id, api_key)
+
+        if not row:
+            raise VectorStoreNotFoundException(vector_store_id)
+
+        return dict(row)
 
     @staticmethod
     async def _fetch_cursor_row(pool: asyncpg.Pool,
