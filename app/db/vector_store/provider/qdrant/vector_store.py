@@ -183,7 +183,7 @@ class AsyncQdrantVectorStore(BaseAsyncVectorStore):
                                              optimizer_config = models.OptimizersConfigDiff(indexing_threshold = 20000))
         return True
 
-    async def supports_sparse(self) -> bool:
+    async def supports_sparse(self, collection_exists: Optional[bool] = None) -> bool:
         """
         Whether this collection was created with a sparse vector field.
 
@@ -192,11 +192,17 @@ class AsyncQdrantVectorStore(BaseAsyncVectorStore):
         a vector field afterwards. Upserting a sparse vector into a collection
         without the field fails the whole batch, so writers check here first.
 
+        Args:
+            collection_exists: Pass an already-known collection_exists() result
+                to skip repeating that call. None (the default) makes it here.
+
         Returns:
             bool: True if the collection exists and holds the SPARSE_VECTOR_NAME
                 sparse vector field.
         """
-        if not await self.collection_exists():
+        if collection_exists is None:
+            collection_exists = await self.collection_exists()
+        if not collection_exists:
             return False
         info = await self._client.get_collection(self._collection_name)
         sparse_vectors = info.config.params.sparse_vectors or {}

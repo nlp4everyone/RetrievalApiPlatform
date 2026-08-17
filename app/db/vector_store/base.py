@@ -103,12 +103,18 @@ class BaseAsyncVectorStore(ABC):
         """
 
     @abstractmethod
-    async def supports_sparse(self) -> bool:
+    async def supports_sparse(self, collection_exists: Optional[bool] = None) -> bool:
         """Whether this collection can store sparse vectors.
 
         A collection created before sparse embedding was switched on has no
         sparse field, and writing one into it fails. Callers therefore ask the
         live collection rather than assuming their own config applies to it.
+
+        Args:
+            collection_exists: Pass the result of an already-made
+                collection_exists() call to skip repeating it - the search path
+                already knows this by the time it asks about sparse support.
+                None (the default) makes this call collection_exists() itself.
 
         Returns:
             bool: True if the collection exists and holds a sparse vector field

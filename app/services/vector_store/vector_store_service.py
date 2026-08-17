@@ -588,16 +588,25 @@ class VectorStoreService:
         if search_type is None:
             search_type = search_request.requested_search_type
 
+        # Checked once up front only when the branches below actually need it
+        # (resolving the type, or validating a pinned hybrid), and threaded
+        # through to both so the retriever built below never repeats it - a
+        # pinned dense search skips this and lets the retriever check fresh,
+        # same as before.
+        collection_exists: Optional[bool] = None
+        if search_type is None or search_type == SearchType.HYBRID:
+            collection_exists = await vector_store.collection_exists()
+
         # Resolved before the span opens so the trace records the search that
         # actually ran, not the one that was requested
         if search_type is None:
-            search_type = await resolve_search_type(vector_store)
+            search_type = await resolve_search_type(vector_store, collection_exists=collection_exists)
         elif search_type == SearchType.HYBRID:
             # Pinned hybrid is checked rather than attempted: without this the
             # request dies as a ValueError out of build_retrieval_pipeline, or
             # as a backend error on a collection with no sparse field - both
             # surface as a 500 for what is a bad request
-            reason = await hybrid_unavailable_reason(vector_store)
+            reason = await hybrid_unavailable_reason(vector_store, collection_exists=collection_exists)
             if reason is not None:
                 raise UnsupportedSearchTypeException(search_type=str(search_type),
                                                      reason=reason)
@@ -623,7 +632,8 @@ class VectorStoreService:
                                                     embed_fn=get_dense_embedding,
                                                     search_type=search_type,
                                                     sparse_embed_fn=(get_sparse_embedding
-                                                                     if is_sparse_embedding_enabled() else None))
+                                                                     if is_sparse_embedding_enabled() else None),
+                                                    collection_exists=collection_exists)
 
                 context = RetrievalContext(vector_store_id=vector_store_id,
                                            api_key=api_key,

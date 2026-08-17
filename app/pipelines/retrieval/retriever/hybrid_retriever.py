@@ -1,5 +1,5 @@
 """Hybrid retrieval: dense and sparse consulted together, fused by the backend."""
-from typing import Any, ClassVar, List
+from typing import Any, ClassVar, List, Optional
 
 from app.db.vector_store import BaseAsyncVectorStore
 from app.db.vector_store.types import RetrievedChunk
@@ -22,12 +22,18 @@ class HybridRetriever(BaseRetriever):
 
     name: ClassVar[str] = "hybrid"
 
-    def __init__(self, vector_store: BaseAsyncVectorStore) -> None:
+    def __init__(self,
+                vector_store: BaseAsyncVectorStore,
+                known_collection_exists: Optional[bool] = None) -> None:
         """
         Args:
             vector_store: Store bound to the collection being searched
+            known_collection_exists: Pass an already-known collection_exists()
+                result (e.g. from resolving the search type) to skip repeating
+                that round-trip here. None (the default) checks it fresh.
         """
         self._vector_store = vector_store
+        self._known_collection_exists = known_collection_exists
         self._collection_exists: bool = False
         self._used_sparse: bool = False
 
@@ -51,7 +57,9 @@ class HybridRetriever(BaseRetriever):
         if query.dense_vector is None:
             raise ValueError("HybridRetriever requires a dense query vector")
 
-        self._collection_exists = await self._vector_store.collection_exists()
+        self._collection_exists = (self._known_collection_exists
+                                   if self._known_collection_exists is not None
+                                   else await self._vector_store.collection_exists())
         if not self._collection_exists:
             return []
 

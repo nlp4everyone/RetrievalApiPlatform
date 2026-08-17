@@ -213,7 +213,7 @@ class AsyncMilvusVectorStore(BaseAsyncVectorStore):
 
         return True
 
-    async def supports_sparse(self) -> bool:
+    async def supports_sparse(self, collection_exists: Optional[bool] = None) -> bool:
         """
         Whether this collection was created with a sparse vector field.
 
@@ -221,10 +221,16 @@ class AsyncMilvusVectorStore(BaseAsyncVectorStore):
         can be switched on long after a store was created, and Milvus keeps the
         schema the collection was created with.
 
+        Args:
+            collection_exists: Pass an already-known collection_exists() result
+                to skip repeating that call. None (the default) makes it here.
+
         Returns:
             bool: True if the collection exists and holds a sparse vector field.
         """
-        if not await self.collection_exists():
+        if collection_exists is None:
+            collection_exists = await self.collection_exists()
+        if not collection_exists:
             return False
         description = await self._client.describe_collection(self._physical_name)
         return any(field.get("name") == SPARSE_VECTOR_NAME
