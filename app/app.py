@@ -2,6 +2,8 @@ from fastapi import FastAPI
 # Define startup
 from .startup import (init_embed_model,
                       init_sparse_embed_model,
+                      close_embed_model,
+                      close_sparse_embed_model,
                       init_postgres,
                       init_vector_store,
                       init_minio,
@@ -134,6 +136,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     get_io_executor().shutdown(wait = False, cancel_futures = True)
     await VectorStoreFactory.close_all()
     await get_postgres_client().close()
+    await close_embed_model()
+    await close_sparse_embed_model()
     SystemLogger.success("[APP] Shutdown complete")
 
 

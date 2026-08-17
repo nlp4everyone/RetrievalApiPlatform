@@ -35,3 +35,7 @@ class OpenAIEmbeddingProvider(BaseEmbeddingProvider):
         """
         response = await self._client.embeddings.create(model = self._model, input = texts)
         return [item.embedding for item in response.data]
+
+    async def aclose(self) -> None:
+        """Close the underlying HTTP client and its connection pool."""
+        await self._client.close()

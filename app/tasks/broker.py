@@ -13,7 +13,9 @@ from taskiq_redis import RedisAsyncResultBackend, RedisStreamBroker
 from app.core.config import REDIS_URL
 from app.core.tracing import init_tracing
 from app.db.vector_store import VectorStoreFactory
-from app.startup import (get_postgres_client,
+from app.startup import (close_embed_model,
+                         close_sparse_embed_model,
+                         get_postgres_client,
                          init_cpu_executor,
                          init_download_semaphore,
                          init_embed_model,
@@ -78,6 +80,8 @@ async def worker_startup(state: TaskiqState) -> None:
 async def worker_shutdown(state: TaskiqState) -> None:
     if _initialized:
         await get_postgres_client().close()
+        await close_embed_model()
+        await close_sparse_embed_model()
 
     # Close every registered vector store client
     await VectorStoreFactory.close_all()

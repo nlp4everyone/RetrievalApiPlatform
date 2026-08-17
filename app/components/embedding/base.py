@@ -32,6 +32,11 @@ class BaseEmbeddingProvider(ABC):
         """
         pass
 
+    @abstractmethod
+    async def aclose(self) -> None:
+        """Release any connections the provider holds (called on app/worker shutdown)."""
+        pass
+
 
 class BaseSparseEmbeddingProvider(ABC):
     """
@@ -59,4 +64,9 @@ class BaseSparseEmbeddingProvider(ABC):
         Raises:
             Exception: If the underlying embedding backend is unreachable or returns an error
         """
+        pass
+
+    @abstractmethod
+    async def aclose(self) -> None:
+        """Release any connections the provider holds (called on app/worker shutdown)."""
         pass

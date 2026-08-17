@@ -27,9 +27,14 @@ class VLLMSparseEmbeddingProvider(BaseSparseEmbeddingProvider):
                 base_url: str,
                 model: str,
                 api_key: Optional[str] = None,
-                timeout: float = 30.0) -> None:
+                timeout: float = 30.0,
+                max_connections: int = 64) -> None:
         """
         Configure the vLLM HTTP client.
+
+        The client is built once and reused across calls. max_connections is
+        higher than the dense TEI provider's since _tokenize() fans out to one
+        connection per text.
 
         Args:
             base_url (str): Base URL of the vLLM server (a trailing "/v1" is
@@ -38,6 +43,8 @@ class VLLMSparseEmbeddingProvider(BaseSparseEmbeddingProvider):
             api_key (Optional[str]): Bearer token to send; omitted entirely if
                 the server does not require authentication
             timeout (float): Request timeout in seconds (default: 30.0)
+            max_connections (int): Ceiling on concurrent connections to the
+                vLLM server from this process (default: 64)
         """
         root = base_url.rstrip("/")
         if root.endswith("/v1"):
@@ -46,19 +53,17 @@ class VLLMSparseEmbeddingProvider(BaseSparseEmbeddingProvider):
         self._pooling_url = f"{root}/pooling"
         self._model = model
         self._headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-        self._timeout = timeout
+        self._client = httpx.AsyncClient(timeout = timeout,
+                                         limits = httpx.Limits(max_connections = max_connections))
 
-    async def _tokenize(self,
-                        client: httpx.AsyncClient,
-                        texts: List[str]) -> List[List[int]]:
+    async def _tokenize(self, texts: List[str]) -> List[List[int]]:
         """
         Get the token ids of each text.
 
         vLLM's /tokenize takes a single prompt per call, so the texts are sent
-        concurrently on the caller's client rather than one after another.
+        concurrently on the shared client rather than one after another.
 
         Args:
-            client (httpx.AsyncClient): Client to issue the requests on
             texts (List[str]): Texts to tokenize
 
         Returns:
@@ -68,9 +73,9 @@ class VLLMSparseEmbeddingProvider(BaseSparseEmbeddingProvider):
             httpx.HTTPStatusError: If the vLLM server returns a non-2xx response
         """
         responses: List[httpx.Response] = await asyncio.gather(
-            *[client.post(self._tokenize_url,
-                          headers = self._headers,
-                          json = {"model": self._model, "prompt": text})
+            *[self._client.post(self._tokenize_url,
+                                headers = self._headers,
+                                json = {"model": self._model, "prompt": text})
               for text in texts]
         )
         for response in responses:
@@ -99,13 +104,12 @@ class VLLMSparseEmbeddingProvider(BaseSparseEmbeddingProvider):
         if not texts:
             return []
 
-        async with httpx.AsyncClient(timeout = self._timeout) as client:
-            # Token ids and token weights come from two different endpoints,
-            # so both are fetched before either can be interpreted
-            all_tokens = await self._tokenize(client, texts)
-            response = await client.post(self._pooling_url,
-                                         headers = self._headers,
-                                         json = {"model": self._model, "input": texts})
+        # Token ids and token weights come from two different endpoints,
+        # so both are fetched before either can be interpreted
+        all_tokens = await self._tokenize(texts)
+        response = await self._client.post(self._pooling_url,
+                                           headers = self._headers,
+                                           json = {"model": self._model, "input": texts})
         response.raise_for_status()
         all_weights = [item["data"] for item in response.json()["data"]]
 
@@ -123,3 +127,7 @@ class VLLMSparseEmbeddingProvider(BaseSparseEmbeddingProvider):
                 sparse_vector[token] = max(weight, sparse_vector.get(token, 0.0))
             sparse_vectors.append(sparse_vector)
         return sparse_vectors
+
+    async def aclose(self) -> None:
+        """Close the underlying HTTP client and its connection pool."""
+        await self._client.aclose()

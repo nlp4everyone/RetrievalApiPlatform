@@ -60,6 +60,10 @@ class SparseEmbeddingService:
                                f"(model={SPARSE_MODEL_NAME!r}) - is the served model a "
                                f"token-classification one?")
 
+    async def aclose(self) -> None:
+        """Close the underlying provider's connections (called on shutdown)."""
+        await self._provider.aclose()
+
     @classmethod
     def from_settings(cls) -> "SparseEmbeddingService":
         """

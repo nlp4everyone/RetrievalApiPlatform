@@ -52,6 +52,10 @@ class EmbeddingService:
         result = await self._provider.embed(["Hello"])
         self.dimension = len(result[0])
 
+    async def aclose(self) -> None:
+        """Close the underlying provider's connections (called on shutdown)."""
+        await self._provider.aclose()
+
     @classmethod
     def from_settings(cls) -> "EmbeddingService":
         """

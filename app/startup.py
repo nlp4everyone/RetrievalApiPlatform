@@ -47,6 +47,10 @@ async def init_embed_model() -> EmbeddingService:
         raise
     return embed_model
 
+async def close_embed_model() -> None:
+    """Close the dense embedding service's connections (called on shutdown)."""
+    await embed_model.aclose()
+
 async def get_dense_embedding(texts: List[str]) -> List[List[float]]:
     """
     Generate dense embedding vectors for a list of texts via the configured embedding service.
@@ -106,6 +110,11 @@ async def init_sparse_embed_model() -> Optional[SparseEmbeddingService]:
         SystemLogger.error(f"[STARTUP] Init sparse embedding service failed: {e!r}")
         raise
     return sparse_embed_model
+
+async def close_sparse_embed_model() -> None:
+    """Close the sparse embedding service's connections, if one was built."""
+    if sparse_embed_model is not None:
+        await sparse_embed_model.aclose()
 
 async def get_sparse_embedding(texts: List[str]) -> List[SparseVector]:
     """
