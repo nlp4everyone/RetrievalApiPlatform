@@ -221,25 +221,21 @@ class PostgresFileStore:
         Raises:
             FileNotFoundException: If the file does not exist or doesn't belong to the API key
         """
+        query = """
+            DELETE FROM files
+            WHERE id = $1 AND api_key = $2
+            RETURNING metadata
+        """
         async with pool.acquire() as conn:
-            async with conn.transaction():
-                # Retrieve metadata before deleting the file
-                row = await conn.fetchrow("SELECT metadata FROM files WHERE id = $1 AND api_key = $2;",
-                                          file_id,
-                                          api_key)
+            row = await conn.fetchrow(query, file_id, api_key)
 
-                # Verify file exists and belongs to the specified API key
-                if not row: raise FileNotFoundException(file_id = file_id)
-                # Metadata
-                metadata = row["metadata"]
+        # Verify file exists and belongs to the specified API key
+        if not row: raise FileNotFoundException(file_id = file_id)
 
-                # Parse metadata from JSON string if needed
-                metadata = PostgresFileStore._parse_json_field(metadata)
+        # Parse metadata from JSON string if needed
+        metadata = PostgresFileStore._parse_json_field(row["metadata"])
 
-                # Execute the deletion
-                await conn.execute("DELETE FROM files WHERE id = $1;", file_id)
-
-                return {"metadata": metadata, "deleted": True}
+        return {"metadata": metadata, "deleted": True}
 
     @staticmethod
     async def check_existing_files(pool: asyncpg.Pool, file_ids: list[str]) -> list[str]:
