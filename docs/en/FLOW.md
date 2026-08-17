@@ -337,13 +337,17 @@ App Shutdown  (FastAPI lifespan, below the yield in app/app.py)
         ├── get_io_executor().shutdown(cancel_futures=True)   drop the I/O threads first, so nothing
         │                                        new reaches MinIO or the clients closed below
         ├── VectorStoreFactory.close_all()       closes every registered vector store connection
-        └── get_postgres_client().close()        closes the asyncpg pool
+        ├── get_postgres_client().close()        closes the asyncpg pool
+        ├── close_embed_model()                  closes the dense embedding provider's HTTP client
+        └── close_sparse_embed_model()            closes the sparse one, if SPARSE_EMBEDDING_ENABLED
                                                  the TracerProvider is deliberately left alone: it
                                                  registers its own atexit flush, and shutting it down
                                                  here would cut these shutdown logs short
 
 Worker Shutdown  (TaskIQ WORKER_SHUTDOWN, app/tasks/broker.py)
         ├── get_postgres_client().close()        closes the asyncpg pool — only if _initialized
+        ├── close_embed_model()                  closes the dense embedding provider's HTTP client — same guard
+        ├── close_sparse_embed_model()            closes the sparse one, if SPARSE_EMBEDDING_ENABLED — same guard
         └── VectorStoreFactory.close_all()       closes every registered vector store connection
                                                  (runs unconditionally, even on a failed startup)
 ```

@@ -331,13 +331,17 @@ App Shutdown  (FastAPI lifespan, phần dưới yield trong app/app.py)
         ├── get_io_executor().shutdown(cancel_futures=True)   cắt luồng I/O trước, để không còn gì
         │                                        chạm tới MinIO hay các client bị đóng bên dưới
         ├── VectorStoreFactory.close_all()       đóng mọi connection vector store đã đăng ký
-        └── get_postgres_client().close()        đóng pool asyncpg
+        ├── get_postgres_client().close()        đóng pool asyncpg
+        ├── close_embed_model()                  đóng HTTP client của dense embedding provider
+        └── close_sparse_embed_model()            đóng client sparse, nếu SPARSE_EMBEDDING_ENABLED
                                                  TracerProvider cố ý không đụng tới: nó tự đăng ký
                                                  atexit để flush, gọi shutdown ở đây sẽ cắt mất
                                                  chính các dòng log shutdown này
 
 Worker Shutdown  (TaskIQ WORKER_SHUTDOWN, app/tasks/broker.py)
         ├── get_postgres_client().close()        đóng pool asyncpg — chỉ khi _initialized
+        ├── close_embed_model()                  đóng HTTP client dense embedding — cùng điều kiện guard
+        ├── close_sparse_embed_model()            đóng client sparse, nếu bật — cùng điều kiện guard
         └── VectorStoreFactory.close_all()       đóng mọi connection vector store đã đăng ký
                                                  (luôn chạy, kể cả khi startup đã fail)
 ```
