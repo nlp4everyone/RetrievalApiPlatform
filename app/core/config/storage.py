@@ -19,9 +19,6 @@ MAX_FILE_SIZE = storage_config.get("max_file_size")
 # from CPU-bound work (chunking) so a slow download can't starve it
 IO_THREAD_POOL_SIZE = storage_config.get("io_thread_pool_size", 32)
 
-# API Versioning
-API_VERSION = settings.API_VERSION
-
 # Allowed MIME types for file upload
 ALLOWED_MIME_TYPES = [
     "application/pdf",

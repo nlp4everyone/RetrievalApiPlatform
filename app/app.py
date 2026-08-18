@@ -22,7 +22,7 @@ from .exceptions.handlers import common_exception_handler
 # Middleware
 from .api.middleware import RequestIDMiddleware
 # Config
-from .core.config.storage import API_VERSION
+from .core.config.api import API_VERSION
 # Tracing
 from .core.tracing import init_tracing
 # Components
