@@ -1,7 +1,7 @@
 from typing import Any, Optional
 from datetime import datetime, timezone, timedelta
 from fastapi import HTTPException, status
-import asyncpg, socket, json
+import json
 
 # Schemas
 from app.schemas.vector_store import *
@@ -26,8 +26,7 @@ from app.utils.vector_store.utils import (convert_retrieved_chunks_to_search_res
 from app.utils.datetime_utils import convert_to_unix_timestamp
 
 # Exceptions
-from app.exceptions import AppBaseException
-from app.exceptions.postgres import PostgresConnectionException
+from app.exceptions import postgres_errors
 from app.exceptions.vector_store import (UnsupportedMultipleFilesException,
                                          UnsupportedSearchTypeException)
 
@@ -137,6 +136,7 @@ class VectorStoreService:
         )
     
     @staticmethod
+    @postgres_errors("creating vector store")
     async def create(request: VectorStoreCreateRequest,
                      api_key: str) -> VectorStoreObject:
         """
@@ -174,128 +174,117 @@ class VectorStoreService:
         # Backend new vector stores are created on
         provider = VectorStoreFactory.default_provider()
 
-        try:
-            # Root span of the whole ingestion trace. Ingestion itself runs in the
-            # TaskIQ worker, which joins this trace via the injected trace context
-            # below - so the trace-level attributes have to be set here, on the
-            # root span, not in the worker where Langfuse would ignore them.
-            with traced_span(name="POST /v1/vector_stores",
-                             attributes={TRACE_USER_ID: api_key,
-                                         TRACE_TAGS: ["vector_store_ingestion"],
-                                         TRACE_INPUT: json.dumps({
-                                             "name": request.name,
-                                             "file_ids": request.file_ids}),
-                                         OBSERVATION_TYPE: ObservationType.SPAN,
-                                         **trace_metadata(vector_store_id=vectorstore_id,
-                                                          request_id=request_id_ctx.get(),
-                                                          vector_store_type=str(provider))}) as trace_span:
-                # Calculate expiration time and policy if specified
-                expires_at = None
-                expires_after = None
-                if request.expires_after is not None:
-                    # Convert days to seconds for storage
-                    expires_after = timedelta(days=request.expires_after.days).total_seconds()
-                    # Calculate absolute expiration timestamp
-                    expires_at = created_at + timedelta(days=request.expires_after.days)
+        # Root span of the whole ingestion trace. Ingestion itself runs in the
+        # TaskIQ worker, which joins this trace via the injected trace context
+        # below - so the trace-level attributes have to be set here, on the
+        # root span, not in the worker where Langfuse would ignore them.
+        with traced_span(name="POST /v1/vector_stores",
+                         attributes={TRACE_USER_ID: api_key,
+                                     TRACE_TAGS: ["vector_store_ingestion"],
+                                     TRACE_INPUT: json.dumps({
+                                         "name": request.name,
+                                         "file_ids": request.file_ids}),
+                                     OBSERVATION_TYPE: ObservationType.SPAN,
+                                     **trace_metadata(vector_store_id=vectorstore_id,
+                                                      request_id=request_id_ctx.get(),
+                                                      vector_store_type=str(provider))}) as trace_span:
+            # Calculate expiration time and policy if specified
+            expires_at = None
+            expires_after = None
+            if request.expires_after is not None:
+                # Convert days to seconds for storage
+                expires_after = timedelta(days=request.expires_after.days).total_seconds()
+                # Calculate absolute expiration timestamp
+                expires_at = created_at + timedelta(days=request.expires_after.days)
 
-                # Count files that will be processed
-                nums_in_progress_file = 0
-                if request.file_ids is not None:
-                    nums_in_progress_file = len(request.file_ids)
+            # Count files that will be processed
+            nums_in_progress_file = 0
+            if request.file_ids is not None:
+                nums_in_progress_file = len(request.file_ids)
 
-                # Save vector store metadata to PostgreSQL database
-                with traced_span(name="create_record",
-                                 attributes={OBSERVATION_TYPE: ObservationType.SPAN}):
-                    record = await PostgresVectorStore.create(
-                        pool=postgres_pool,
-                        id=vectorstore_id,
-                        api_key=api_key,
-                        name=request.name,
-                        description=request.description,
-                        created_at=created_at,
-                        last_active_at=created_at,
-                        status=UploadingStatus.IN_PROGRESS,
-                        usage_bytes=0,
-                        metadata=request.metadata,
-                        expires_at=expires_at,
-                        expires_after=expires_after,
-                        chunking_strategy=request.chunking_strategy.model_dump() if request.chunking_strategy else None,
-                        vector_store_type=provider
-                    )
-
-                # Determine chunking strategy parameters. Only static carries its
-                # own sizing; every other case - the field omitted, or an explicit
-                # {"type": "auto"} - is auto with the documented defaults. Kept as
-                # one condition so the two auto spellings cannot drift apart.
-                if (request.chunking_strategy is not None
-                        and request.chunking_strategy.type == "static"):
-                    chunking_strategy = "static"
-                    chunk_size = request.chunking_strategy.static.max_chunk_size_tokens
-                    chunk_overlap = request.chunking_strategy.static.chunk_overlap_tokens
-                else:
-                    chunking_strategy = "auto"
-                    chunk_size = 800
-                    chunk_overlap = 400
-
-                # Start background processing of files using TaskIQ worker
-                with traced_span(name="enqueue_ingestion",
-                                 attributes={OBSERVATION_TYPE: ObservationType.SPAN,
-                                             **observation_metadata(chunking_strategy=chunking_strategy,
-                                                                    chunk_size=chunk_size,
-                                                                    num_files=nums_in_progress_file)}):
-                    await ingest_vector_store_files.kiq(
-                        vectorstore_id=vectorstore_id,
-                        api_key=api_key,
-                        file_ids=request.file_ids,
-                        chunking_strategy=chunking_strategy,
-                        chunk_size=chunk_size,
-                        chunk_overlap=chunk_overlap,
-                        request_id=request_id_ctx.get(),
-                        # Carries this trace into the worker process
-                        trace_context=inject_trace_context(),
-                        vector_store_type=str(provider)
-                    )
-
-                SystemLogger.info(f"Vector store created: {vectorstore_id} ({nums_in_progress_file} file(s) queued)")
-
-                set_span_attributes(trace_span, {
-                    "vector_store.id": vectorstore_id,
-                    "vector_store.type": str(provider),
-                    "vector_store.num_files_queued": nums_in_progress_file,
-                })
-
-                # Build and return response object
-                return VectorStoreObject(
+            # Save vector store metadata to PostgreSQL database
+            with traced_span(name="create_record",
+                             attributes={OBSERVATION_TYPE: ObservationType.SPAN}):
+                record = await PostgresVectorStore.create(
+                    pool=postgres_pool,
                     id=vectorstore_id,
+                    api_key=api_key,
                     name=request.name,
-                    created_at=convert_to_unix_timestamp(created_at),
-                    last_active_at=convert_to_unix_timestamp(created_at),
-                    expires_at=convert_to_unix_timestamp(record.get("expires_at")),
-                    expires_after=VectorStoreExpiresAfter(
-                        days=timedelta(seconds=int(expires_after)).days,
-                        anchor="last_active_at"
-                    ) if expires_after is not None else None,
-                    file_counts=VectorStoreFileCounts(
-                        in_progress=nums_in_progress_file,
-                        total=nums_in_progress_file
-                    ),
-                    metadata=record.get("metadata"),
-                    status="in_progress",
-                    usage_bytes=0
+                    description=request.description,
+                    created_at=created_at,
+                    last_active_at=created_at,
+                    status=UploadingStatus.IN_PROGRESS,
+                    usage_bytes=0,
+                    metadata=request.metadata,
+                    expires_at=expires_at,
+                    expires_after=expires_after,
+                    chunking_strategy=request.chunking_strategy.model_dump() if request.chunking_strategy else None,
+                    vector_store_type=provider
                 )
-        except (asyncpg.PostgresError, socket.gaierror) as e:
-            SystemLogger.error(f"Postgres connection failed while creating vector store: {e}", exc_info=True)
-            raise PostgresConnectionException()
-        except AppBaseException:
-            raise
-        except Exception as e:
-            SystemLogger.error(f"Error creating vector store: {e}", exc_info=True)
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Error creating vector store: {str(e)}"
+
+            # Determine chunking strategy parameters. Only static carries its
+            # own sizing; every other case - the field omitted, or an explicit
+            # {"type": "auto"} - is auto with the documented defaults. Kept as
+            # one condition so the two auto spellings cannot drift apart.
+            if (request.chunking_strategy is not None
+                    and request.chunking_strategy.type == "static"):
+                chunking_strategy = "static"
+                chunk_size = request.chunking_strategy.static.max_chunk_size_tokens
+                chunk_overlap = request.chunking_strategy.static.chunk_overlap_tokens
+            else:
+                chunking_strategy = "auto"
+                chunk_size = 800
+                chunk_overlap = 400
+
+            # Start background processing of files using TaskIQ worker
+            with traced_span(name="enqueue_ingestion",
+                             attributes={OBSERVATION_TYPE: ObservationType.SPAN,
+                                         **observation_metadata(chunking_strategy=chunking_strategy,
+                                                                chunk_size=chunk_size,
+                                                                num_files=nums_in_progress_file)}):
+                await ingest_vector_store_files.kiq(
+                    vectorstore_id=vectorstore_id,
+                    api_key=api_key,
+                    file_ids=request.file_ids,
+                    chunking_strategy=chunking_strategy,
+                    chunk_size=chunk_size,
+                    chunk_overlap=chunk_overlap,
+                    request_id=request_id_ctx.get(),
+                    # Carries this trace into the worker process
+                    trace_context=inject_trace_context(),
+                    vector_store_type=str(provider)
+                )
+
+            SystemLogger.info(f"Vector store created: {vectorstore_id} ({nums_in_progress_file} file(s) queued)")
+
+            set_span_attributes(trace_span, {
+                "vector_store.id": vectorstore_id,
+                "vector_store.type": str(provider),
+                "vector_store.num_files_queued": nums_in_progress_file,
+            })
+
+            # Build and return response object
+            return VectorStoreObject(
+                id=vectorstore_id,
+                name=request.name,
+                created_at=convert_to_unix_timestamp(created_at),
+                last_active_at=convert_to_unix_timestamp(created_at),
+                expires_at=convert_to_unix_timestamp(record.get("expires_at")),
+                expires_after=VectorStoreExpiresAfter(
+                    days=timedelta(seconds=int(expires_after)).days,
+                    anchor="last_active_at"
+                ) if expires_after is not None else None,
+                file_counts=VectorStoreFileCounts(
+                    in_progress=nums_in_progress_file,
+                    total=nums_in_progress_file
+                ),
+                metadata=record.get("metadata"),
+                status="in_progress",
+                usage_bytes=0
             )
 
     @staticmethod
+    @postgres_errors("listing vector stores")
     async def list(api_key: str,
                    query_object: VectorStoreQueryRequest) -> ListVectorStoreObject:
         """
@@ -324,28 +313,6 @@ class VectorStoreService:
                 after=query_object.after,
                 before=query_object.before
             )
-            
-            # Convert records to VectorStoreObject format
-            vector_stores = []
-            for record in result["data"]:
-                vector_store = VectorStoreService._build_vector_store_object(record)
-                vector_stores.append(vector_store)
-
-            SystemLogger.debug(f"Listed {len(vector_stores)} vector store(s)")
-
-            # Return paginated response
-            return ListVectorStoreObject(
-                data=vector_stores,
-                first_id=result["first_id"],
-                last_id=result["last_id"],
-                has_more=result["has_more"]
-            )
-
-        except (asyncpg.PostgresError, socket.gaierror) as e:
-            SystemLogger.error(f"Postgres connection failed while listing vector stores: {e}", exc_info=True)
-            raise PostgresConnectionException()
-        except AppBaseException:
-            raise
         except ValueError as e:
             # An unknown after/before cursor is the caller's mistake, not a server fault
             SystemLogger.warning(f"Rejected vector store listing: {e}")
@@ -353,14 +320,25 @@ class VectorStoreService:
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=str(e)
             )
-        except Exception as e:
-            SystemLogger.error(f"Error listing vector stores: {e}", exc_info=True)
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Error listing vector stores: {str(e)}"
-            )
+
+        # Convert records to VectorStoreObject format
+        vector_stores = []
+        for record in result["data"]:
+            vector_store = VectorStoreService._build_vector_store_object(record)
+            vector_stores.append(vector_store)
+
+        SystemLogger.debug(f"Listed {len(vector_stores)} vector store(s)")
+
+        # Return paginated response
+        return ListVectorStoreObject(
+            data=vector_stores,
+            first_id=result["first_id"],
+            last_id=result["last_id"],
+            has_more=result["has_more"]
+        )
 
     @staticmethod
+    @postgres_errors("getting vector store {vector_store_id}")
     async def get(vector_store_id: str,
                   api_key: str) -> VectorStoreObject:
         """
@@ -381,32 +359,20 @@ class VectorStoreService:
         
         postgres_pool = get_postgres_pool()
 
-        try:
-            # Get vector store from database
-            record = await PostgresVectorStore.get_by_id(
-                pool=postgres_pool,
-                vector_store_id=vector_store_id,
-                api_key=api_key
-            )
+        # Get vector store from database
+        record = await PostgresVectorStore.get_by_id(
+            pool=postgres_pool,
+            vector_store_id=vector_store_id,
+            api_key=api_key
+        )
 
-            SystemLogger.debug(f"Vector store retrieved: {vector_store_id}")
+        SystemLogger.debug(f"Vector store retrieved: {vector_store_id}")
 
-            # Build and return vector store object
-            return VectorStoreService._build_vector_store_object(record)
-
-        except (asyncpg.PostgresError, socket.gaierror) as e:
-            SystemLogger.error(f"Postgres connection failed while getting vector store {vector_store_id}: {e}", exc_info=True)
-            raise PostgresConnectionException()
-        except AppBaseException:
-            raise
-        except Exception as e:
-            SystemLogger.error(f"Error getting vector store {vector_store_id}: {e}", exc_info=True)
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Error getting vector store: {str(e)}"
-            )
+        # Build and return vector store object
+        return VectorStoreService._build_vector_store_object(record)
 
     @staticmethod
+    @postgres_errors("modifying vector store {vector_store_id}")
     async def modify(vector_store_id: str,
                      request: VectorStoreModifyRequest,
                      api_key: str) -> VectorStoreObject:
@@ -429,34 +395,22 @@ class VectorStoreService:
         
         postgres_pool = get_postgres_pool()
 
-        try:
-            # Update the record
-            record = await PostgresVectorStore.update(
-                pool=postgres_pool,
-                vector_store_id=vector_store_id,
-                api_key=api_key,
-                name=request.name,
-                metadata=request.metadata
-            )
+        # Update the record
+        record = await PostgresVectorStore.update(
+            pool=postgres_pool,
+            vector_store_id=vector_store_id,
+            api_key=api_key,
+            name=request.name,
+            metadata=request.metadata
+        )
 
-            SystemLogger.info(f"Vector store modified: {vector_store_id}")
+        SystemLogger.info(f"Vector store modified: {vector_store_id}")
 
-            # Build and return updated vector store object
-            return VectorStoreService._build_vector_store_object(record)
-
-        except (asyncpg.PostgresError, socket.gaierror) as e:
-            SystemLogger.error(f"Postgres connection failed while modifying vector store {vector_store_id}: {e}", exc_info=True)
-            raise PostgresConnectionException()
-        except AppBaseException:
-            raise
-        except Exception as e:
-            SystemLogger.error(f"Error modifying vector store {vector_store_id}: {e}", exc_info=True)
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Error modifying vector store: {str(e)}"
-            )
+        # Build and return updated vector store object
+        return VectorStoreService._build_vector_store_object(record)
 
     @staticmethod
+    @postgres_errors("deleting vector store {vector_store_id}")
     async def delete(vector_store_id: str,
                      api_key: str) -> VectorStoreDeletion:
         """
@@ -482,45 +436,34 @@ class VectorStoreService:
 
         postgres_pool = get_postgres_pool()
 
-        try:
-            # Delete vector store metadata from PostgreSQL database. The
-            # returned record's vector_store_type tells us which backend
-            # actually holds the collection, which may differ from the
-            # currently configured provider
-            record = await PostgresVectorStore.delete(
-                pool=postgres_pool,
-                vector_store_id=vector_store_id,
-                api_key=api_key
-            )
+        # Delete vector store metadata from PostgreSQL database. The
+        # returned record's vector_store_type tells us which backend
+        # actually holds the collection, which may differ from the
+        # currently configured provider
+        record = await PostgresVectorStore.delete(
+            pool=postgres_pool,
+            vector_store_id=vector_store_id,
+            api_key=api_key
+        )
 
-            # Delete the actual vector collection from its backend
-            vector_store = VectorStoreFactory.get_store(
-                collection_name=vector_store_id,
-                provider=record.get("vector_store_type")
-            )
-            await vector_store.delete_collection()
+        # Delete the actual vector collection from its backend
+        vector_store = VectorStoreFactory.get_store(
+            collection_name=vector_store_id,
+            provider=record.get("vector_store_type")
+        )
+        await vector_store.delete_collection()
 
-            SystemLogger.info(f"Vector store deleted: {vector_store_id}")
+        SystemLogger.info(f"Vector store deleted: {vector_store_id}")
 
-            # Return deletion confirmation
-            return VectorStoreDeletion(
-                id=vector_store_id,
-                object="vector_store.deleted",
-                deleted=True
-            )
-        except (asyncpg.PostgresError, socket.gaierror) as e:
-            SystemLogger.error(f"Postgres connection failed while deleting vector store {vector_store_id}: {e}", exc_info=True)
-            raise PostgresConnectionException()
-        except AppBaseException:
-            raise
-        except Exception as e:
-            SystemLogger.error(f"Error deleting vector store {vector_store_id}: {e}", exc_info=True)
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Error deleting vector store: {str(e)}"
-            )
-    
+        # Return deletion confirmation
+        return VectorStoreDeletion(
+            id=vector_store_id,
+            object="vector_store.deleted",
+            deleted=True
+        )
+
     @staticmethod
+    @postgres_errors("searching vector store {vector_store_id}")
     async def search(vector_store_id: str,
                      search_request: VectorStoreSearchRequest,
                      api_key: str,
@@ -611,56 +554,43 @@ class VectorStoreService:
                 raise UnsupportedSearchTypeException(search_type=str(search_type),
                                                      reason=reason)
 
-        try:
-            # Root span of the search trace. The pipeline runs inside it and
-            # emits one observation per stage, so the trace-level attributes
-            # belong here, on the root span, where the api_key is known.
-            with traced_span(name=f"POST /v1/vector_stores/{vector_store_id}/search",
-                             attributes={TRACE_USER_ID: api_key,
-                                         TRACE_TAGS: ["vector_store_search"],
-                                         TRACE_INPUT: json.dumps({
-                                             "query": search_request.query,
-                                             "max_num_results": search_request.max_num_results}),
-                                         OBSERVATION_TYPE: ObservationType.SPAN,
-                                         **trace_metadata(vector_store_id=vector_store_id,
-                                                          vector_store_type=str(provider),
-                                                          search_type=str(search_type))}) as search_span:
-                set_span_attributes(search_span, {"vector_store.id": vector_store_id,
-                                                  "search.type": str(search_type)})
+        # Root span of the search trace. The pipeline runs inside it and
+        # emits one observation per stage, so the trace-level attributes
+        # belong here, on the root span, where the api_key is known.
+        with traced_span(name=f"POST /v1/vector_stores/{vector_store_id}/search",
+                         attributes={TRACE_USER_ID: api_key,
+                                     TRACE_TAGS: ["vector_store_search"],
+                                     TRACE_INPUT: json.dumps({
+                                         "query": search_request.query,
+                                         "max_num_results": search_request.max_num_results}),
+                                     OBSERVATION_TYPE: ObservationType.SPAN,
+                                     **trace_metadata(vector_store_id=vector_store_id,
+                                                      vector_store_type=str(provider),
+                                                      search_type=str(search_type))}) as search_span:
+            set_span_attributes(search_span, {"vector_store.id": vector_store_id,
+                                              "search.type": str(search_type)})
 
-                pipeline = build_retrieval_pipeline(vector_store=vector_store,
-                                                    embed_fn=get_dense_embedding,
-                                                    search_type=search_type,
-                                                    sparse_embed_fn=(get_sparse_embedding
-                                                                     if is_sparse_embedding_enabled() else None),
-                                                    collection_exists=collection_exists)
+            pipeline = build_retrieval_pipeline(vector_store=vector_store,
+                                                embed_fn=get_dense_embedding,
+                                                search_type=search_type,
+                                                sparse_embed_fn=(get_sparse_embedding
+                                                                 if is_sparse_embedding_enabled() else None),
+                                                collection_exists=collection_exists)
 
-                context = RetrievalContext(vector_store_id=vector_store_id,
-                                           api_key=api_key,
-                                           query=query,
-                                           limit=search_request.max_num_results,
-                                           filters=neutral_filter,
-                                           score_threshold=score_threshold)
-                await pipeline.run(context)
+            context = RetrievalContext(vector_store_id=vector_store_id,
+                                       api_key=api_key,
+                                       query=query,
+                                       limit=search_request.max_num_results,
+                                       filters=neutral_filter,
+                                       score_threshold=score_threshold)
+            await pipeline.run(context)
 
-                # Convert results to API response format
-                data = convert_retrieved_chunks_to_search_results(context.results)
+            # Convert results to API response format
+            data = convert_retrieved_chunks_to_search_results(context.results)
 
-                # Return search response
-                return VectorStoreSearchResponse(
-                    search_query=search_request.query,
-                    data=data,
-                    has_more=len(data) >= search_request.max_num_results
-                )
-
-        except (asyncpg.PostgresError, socket.gaierror) as e:
-            SystemLogger.error(f"Postgres connection failed while searching vector store {vector_store_id}: {e}", exc_info=True)
-            raise PostgresConnectionException()
-        except AppBaseException:
-            raise
-        except Exception as e:
-            SystemLogger.error(f"Error searching vector store {vector_store_id}: {e}", exc_info=True)
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Error searching vector store: {str(e)}"
+            # Return search response
+            return VectorStoreSearchResponse(
+                search_query=search_request.query,
+                data=data,
+                has_more=len(data) >= search_request.max_num_results
             )

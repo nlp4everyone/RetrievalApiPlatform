@@ -1,7 +1,6 @@
 from typing import Any, Optional
 from datetime import datetime, timedelta
-from fastapi import UploadFile, HTTPException, status
-import asyncpg, socket
+from fastapi import UploadFile
 from app.schemas.file import FilePurposes, FileObject, FileListResponse, FileQueryRequest
 from app.db.minio import MinioFileStore
 from app.db.postgres import PostgresFileStore
@@ -9,8 +8,7 @@ from app.startup import get_io_executor, get_minio_service, get_postgres_pool
 from app.core.config import UPLOADED_FILE_BUCKET
 from app.utils.key_generator import generate_file_id
 from app.utils.datetime_utils import convert_to_unix_timestamp
-from app.exceptions import AppBaseException
-from app.exceptions.postgres import PostgresConnectionException
+from app.exceptions import postgres_errors
 from loggers import SystemLogger
 import uuid
 
@@ -43,6 +41,7 @@ class FileService:
         return expires_at_timestamp, expires_at_dt
     
     @staticmethod
+    @postgres_errors("persisting file metadata")
     async def upload_file(file: UploadFile,
                           api_key: str,
                           purpose: FilePurposes,
@@ -101,55 +100,38 @@ class FileService:
             SystemLogger.error(f"Failed to upload file to MinIO: {e}", exc_info=True)
             raise
 
-        try:
-            # Persist file metadata to PostgreSQL
-            await PostgresFileStore.insert_file(
-                pool=postgres_pool,
-                id=file_id,
-                api_key=api_key,
-                bytes=file_size_bytes,
-                purpose=purpose,
-                created_at=current_time,
-                expires_at=expires_at_dt,
-                content_type=file.content_type,
-                metadata={
-                    "filename": file.filename,
-                    "minio_bucket": result.get("bucket"),
-                    "minio_path": result.get("object"),
-                    "etag": result.get("etag")
-                }
-            )
+        # Persist file metadata to PostgreSQL
+        await PostgresFileStore.insert_file(
+            pool=postgres_pool,
+            id=file_id,
+            api_key=api_key,
+            bytes=file_size_bytes,
+            purpose=purpose,
+            created_at=current_time,
+            expires_at=expires_at_dt,
+            content_type=file.content_type,
+            metadata={
+                "filename": file.filename,
+                "minio_bucket": result.get("bucket"),
+                "minio_path": result.get("object"),
+                "etag": result.get("etag")
+            }
+        )
 
-            SystemLogger.info(f"File metadata persisted: {file_id}")
+        SystemLogger.info(f"File metadata persisted: {file_id}")
 
-            # Return file object with Unix timestamps for API compatibility
-            return FileObject(
-                id=file_id,
-                bytes=file_size_bytes,
-                created_at=created_at_timestamp,
-                expires_at=expires_at_timestamp,
-                filename=file.filename,
-                purpose=purpose
-            )
-        except (asyncpg.PostgresError, socket.gaierror) as e:
-            SystemLogger.error(
-                f"Postgres connection failed while persisting file {file_id} "
-                f"(orphaned object left in MinIO at {object_path}): {e}", exc_info=True
-            )
-            raise PostgresConnectionException()
-        except AppBaseException:
-            raise
-        except Exception as e:
-            SystemLogger.error(
-                f"Error persisting file metadata for {file_id} "
-                f"(orphaned object left in MinIO at {object_path}): {e}", exc_info=True
-            )
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Error persisting file metadata: {str(e)}"
-            )
+        # Return file object with Unix timestamps for API compatibility
+        return FileObject(
+            id=file_id,
+            bytes=file_size_bytes,
+            created_at=created_at_timestamp,
+            expires_at=expires_at_timestamp,
+            filename=file.filename,
+            purpose=purpose
+        )
     
     @staticmethod
+    @postgres_errors("listing files")
     async def list_files(api_key: str,
                          query: FileQueryRequest) -> FileListResponse:
         """
@@ -166,52 +148,41 @@ class FileService:
         """
         postgres_pool = get_postgres_pool()
 
-        try:
-            # Query files from database with filters and pagination
-            results = await PostgresFileStore.list_files(
-                pool=postgres_pool,
-                api_key=api_key,
-                purpose=query.purpose,
-                after=query.after,
-                limit=query.limit,
-                order=query.order
-            )
+        # Query files from database with filters and pagination
+        results = await PostgresFileStore.list_files(
+            pool=postgres_pool,
+            api_key=api_key,
+            purpose=query.purpose,
+            after=query.after,
+            limit=query.limit,
+            order=query.order
+        )
 
-            # Convert database results to FileObject domain models
-            file_objects = [
-                FileObject(
-                    id=result.get("id"),
-                    bytes=result.get("bytes"),
-                    created_at=convert_to_unix_timestamp(result.get("created_at")),
-                    expires_at=convert_to_unix_timestamp(result.get("expires_at")),
-                    filename=result.get("metadata", {}).get("filename"),
-                    purpose=result.get("purpose")
-                )
-                for result in results
-            ]
-
-            SystemLogger.debug(f"Listed {len(file_objects)} file(s)")
-
-            # Build pagination metadata
-            return FileListResponse(
-                data=file_objects,
-                first_id=file_objects[0].id if file_objects else None,
-                last_id=file_objects[-1].id if file_objects else None,
-                has_more=len(file_objects) > 0 and len(file_objects) == query.limit
+        # Convert database results to FileObject domain models
+        file_objects = [
+            FileObject(
+                id=result.get("id"),
+                bytes=result.get("bytes"),
+                created_at=convert_to_unix_timestamp(result.get("created_at")),
+                expires_at=convert_to_unix_timestamp(result.get("expires_at")),
+                filename=result.get("metadata", {}).get("filename"),
+                purpose=result.get("purpose")
             )
-        except (asyncpg.PostgresError, socket.gaierror) as e:
-            SystemLogger.error(f"Postgres connection failed while listing files: {e}", exc_info=True)
-            raise PostgresConnectionException()
-        except AppBaseException:
-            raise
-        except Exception as e:
-            SystemLogger.error(f"Error listing files: {e}", exc_info=True)
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Error listing files: {str(e)}"
-            )
-    
+            for result in results
+        ]
+
+        SystemLogger.debug(f"Listed {len(file_objects)} file(s)")
+
+        # Build pagination metadata
+        return FileListResponse(
+            data=file_objects,
+            first_id=file_objects[0].id if file_objects else None,
+            last_id=file_objects[-1].id if file_objects else None,
+            has_more=len(file_objects) > 0 and len(file_objects) == query.limit
+        )
+
     @staticmethod
+    @postgres_errors("getting file {file_id}")
     async def get_file_by_id(file_id: str,
                              api_key: str) -> FileObject:
         """
@@ -229,36 +200,25 @@ class FileService:
         """
         postgres_pool = get_postgres_pool()
 
-        try:
-            # Fetch file metadata from database
-            result = await PostgresFileStore.get_file_by_id(pool=postgres_pool,
-                                                            file_id=file_id,
-                                                            api_key=api_key)
+        # Fetch file metadata from database
+        result = await PostgresFileStore.get_file_by_id(pool=postgres_pool,
+                                                        file_id=file_id,
+                                                        api_key=api_key)
 
-            SystemLogger.debug(f"File retrieved: {file_id}")
+        SystemLogger.debug(f"File retrieved: {file_id}")
 
-            # Convert to domain model with timestamp conversion
-            return FileObject(
-                id=result.get("id"),
-                bytes=result.get("bytes"),
-                created_at=convert_to_unix_timestamp(result.get("created_at")),
-                expires_at=convert_to_unix_timestamp(result.get("expires_at")),
-                filename=result.get("metadata", {}).get("filename"),
-                purpose=result.get("purpose")
-            )
-        except (asyncpg.PostgresError, socket.gaierror) as e:
-            SystemLogger.error(f"Postgres connection failed while getting file {file_id}: {e}", exc_info=True)
-            raise PostgresConnectionException()
-        except AppBaseException:
-            raise
-        except Exception as e:
-            SystemLogger.error(f"Error getting file {file_id}: {e}", exc_info=True)
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Error getting file: {str(e)}"
-            )
-    
+        # Convert to domain model with timestamp conversion
+        return FileObject(
+            id=result.get("id"),
+            bytes=result.get("bytes"),
+            created_at=convert_to_unix_timestamp(result.get("created_at")),
+            expires_at=convert_to_unix_timestamp(result.get("expires_at")),
+            filename=result.get("metadata", {}).get("filename"),
+            purpose=result.get("purpose")
+        )
+
     @staticmethod
+    @postgres_errors("deleting file {file_id}")
     async def delete_file(file_id: str,
                           api_key: str) -> dict[str, Any]:
         """
@@ -282,26 +242,14 @@ class FileService:
         postgres_pool = get_postgres_pool()
         minio_service = get_minio_service()
 
-        try:
-            # Delete from database (includes ownership validation)
-            result = await PostgresFileStore.delete_file_by_id(
-                pool=postgres_pool,
-                file_id=file_id,
-                api_key=api_key
-            )
+        # Delete from database (includes ownership validation)
+        result = await PostgresFileStore.delete_file_by_id(
+            pool=postgres_pool,
+            file_id=file_id,
+            api_key=api_key
+        )
 
-            SystemLogger.info(f"File deleted: {file_id}")
-        except (asyncpg.PostgresError, socket.gaierror) as e:
-            SystemLogger.error(f"Postgres connection failed while deleting file {file_id}: {e}", exc_info=True)
-            raise PostgresConnectionException()
-        except AppBaseException:
-            raise
-        except Exception as e:
-            SystemLogger.error(f"Error deleting file {file_id}: {e}", exc_info=True)
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Error deleting file: {str(e)}"
-            )
+        SystemLogger.info(f"File deleted: {file_id}")
 
         # Extract storage location from metadata
         metadata = result.get("metadata", {})
