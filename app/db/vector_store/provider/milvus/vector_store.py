@@ -23,7 +23,11 @@ from pymilvus import AnnSearchRequest, AsyncMilvusClient, DataType, RRFRanker
 from pymilvus.exceptions import MilvusException
 
 from app.core.config import HYBRID_PREFETCH_MULTIPLIER, RRF_K
-from app.db.vector_store.base import BaseAsyncVectorStore, Embedding, SparseEmbedding
+from app.db.vector_store.base import (BaseAsyncVectorStore,
+                                      Embedding,
+                                      SparseEmbedding,
+                                      validate_insert_lengths,
+                                      validate_retrieve_lengths)
 from app.db.vector_store.provider.milvus.filter_translator import to_milvus_expression
 from app.db.vector_store.types import RetrievedChunk, VectorStoreFilter
 from app.schemas.vector_store.types import VectorStoreType
@@ -283,14 +287,8 @@ class AsyncMilvusVectorStore(BaseAsyncVectorStore):
         Raises:
             ValueError: If documents is empty or lengths do not match.
         """
-        if not documents:
-            raise ValueError("Documents list is empty")
-        if len(documents) != len(embeddings):
-            raise ValueError(f"Number of documents ({len(documents)}) must equal "
-                             f"number of embeddings ({len(embeddings)})")
-        if sparse_embeddings is not None and len(documents) != len(sparse_embeddings):
-            raise ValueError(f"Number of documents ({len(documents)}) must equal "
-                             f"number of sparse embeddings ({len(sparse_embeddings)})")
+        # Validate document/embedding counts match
+        validate_insert_lengths(documents, embeddings, sparse_embeddings)
 
         rows = self._to_rows(documents = documents,
                              embeddings = embeddings,
@@ -364,9 +362,8 @@ class AsyncMilvusVectorStore(BaseAsyncVectorStore):
         Raises:
             ValueError: If sparse vectors are given but do not match the dense ones in number.
         """
-        if sparse_query_vectors is not None and len(sparse_query_vectors) != len(query_vectors):
-            raise ValueError(f"Number of dense query vectors ({len(query_vectors)}) must equal "
-                             f"number of sparse query vectors ({len(sparse_query_vectors)})")
+        # Validate query/sparse vector counts match
+        validate_retrieve_lengths(query_vectors, sparse_query_vectors)
         if not query_vectors:
             return []
 

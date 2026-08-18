@@ -11,7 +11,11 @@ from uuid import uuid4
 # Config
 from app.core.config import DENSE_MODEL_NAME, HYBRID_PREFETCH_MULTIPLIER, RRF_K, SPARSE_MODEL_NAME
 # Contract
-from app.db.vector_store.base import BaseAsyncVectorStore, Embedding, SparseEmbedding
+from app.db.vector_store.base import (BaseAsyncVectorStore,
+                                      Embedding,
+                                      SparseEmbedding,
+                                      validate_insert_lengths,
+                                      validate_retrieve_lengths)
 from app.db.vector_store.types import RetrievedChunk, VectorStoreFilter
 from app.db.vector_store.provider.qdrant.filter_translator import to_qdrant_filter
 from app.schemas.vector_store.types import VectorStoreType
@@ -396,14 +400,8 @@ class AsyncQdrantVectorStore(BaseAsyncVectorStore):
         Raises:
             ValueError: If documents is empty or lengths do not match.
         """
-        if not documents:
-            raise ValueError("Documents list is empty")
-        if len(documents) != len(embeddings):
-            raise ValueError(f"Number of documents ({len(documents)}) must equal "
-                             f"number of embeddings ({len(embeddings)})")
-        if sparse_embeddings is not None and len(documents) != len(sparse_embeddings):
-            raise ValueError(f"Number of documents ({len(documents)}) must equal "
-                             f"number of sparse embeddings ({len(sparse_embeddings)})")
+        # Validate document/embedding counts match
+        validate_insert_lengths(documents, embeddings, sparse_embeddings)
 
         # Define payload
         payloads = self._convert_documents_to_payloads(documents)
@@ -477,9 +475,8 @@ class AsyncQdrantVectorStore(BaseAsyncVectorStore):
         Raises:
             ValueError: If sparse vectors are given but do not match the dense ones in number.
         """
-        if sparse_query_vectors is not None and len(sparse_query_vectors) != len(query_vectors):
-            raise ValueError(f"Number of dense query vectors ({len(query_vectors)}) must equal "
-                             f"number of sparse query vectors ({len(sparse_query_vectors)})")
+        # Validate query/sparse vector counts match
+        validate_retrieve_lengths(query_vectors, sparse_query_vectors)
 
         query_filter = to_qdrant_filter(filters)
 

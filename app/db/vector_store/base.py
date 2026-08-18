@@ -27,6 +27,50 @@ Embedding = List[float]
 SparseEmbedding = Dict[int, float]
 
 
+# ------------------------------------------------------------------
+# SHARED VALIDATION
+# ------------------------------------------------------------------
+# Length checks common to insert_documents/retrieve, called by every backend
+# implementation so Qdrant and Milvus don't each carry their own copy.
+def validate_insert_lengths(documents: Sequence[Document],
+                            embeddings: Sequence[Embedding],
+                            sparse_embeddings: Optional[Sequence[SparseEmbedding]] = None) -> None:
+    """Validate insert_documents inputs shared by every backend.
+
+    Args:
+        documents: Documents to store, one per embedding.
+        embeddings: Dense vectors, aligned with documents.
+        sparse_embeddings: Optional sparse vectors, aligned with documents.
+
+    Raises:
+        ValueError: If documents is empty or lengths do not match.
+    """
+    if not documents:
+        raise ValueError("Documents list is empty")
+    if len(documents) != len(embeddings):
+        raise ValueError(f"Number of documents ({len(documents)}) must equal "
+                         f"number of embeddings ({len(embeddings)})")
+    if sparse_embeddings is not None and len(documents) != len(sparse_embeddings):
+        raise ValueError(f"Number of documents ({len(documents)}) must equal "
+                         f"number of sparse embeddings ({len(sparse_embeddings)})")
+
+
+def validate_retrieve_lengths(query_vectors: Sequence[Embedding],
+                              sparse_query_vectors: Optional[Sequence[SparseEmbedding]] = None) -> None:
+    """Validate retrieve inputs shared by every backend.
+
+    Args:
+        query_vectors: One dense vector per query.
+        sparse_query_vectors: Optional sparse vector per query, aligned with query_vectors.
+
+    Raises:
+        ValueError: If sparse vectors are given but do not match the dense ones in number.
+    """
+    if sparse_query_vectors is not None and len(sparse_query_vectors) != len(query_vectors):
+        raise ValueError(f"Number of dense query vectors ({len(query_vectors)}) must equal "
+                         f"number of sparse query vectors ({len(sparse_query_vectors)})")
+
+
 class BaseVectorStoreConnection(ABC):
     """A connection to a vector database, created once at application startup."""
 
