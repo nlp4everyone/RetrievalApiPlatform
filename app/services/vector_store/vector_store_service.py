@@ -242,18 +242,36 @@ class VectorStoreService:
                                          **observation_metadata(chunking_strategy=chunking_strategy,
                                                                 chunk_size=chunk_size,
                                                                 num_files=nums_in_progress_file)}):
-                await ingest_vector_store_files.kiq(
-                    vectorstore_id=vectorstore_id,
-                    api_key=api_key,
-                    file_ids=request.file_ids,
-                    chunking_strategy=chunking_strategy,
-                    chunk_size=chunk_size,
-                    chunk_overlap=chunk_overlap,
-                    request_id=request_id_ctx.get(),
-                    # Carries this trace into the worker process
-                    trace_context=inject_trace_context(),
-                    vector_store_type=str(provider)
-                )
+                try:
+                    await ingest_vector_store_files.kiq(
+                        vectorstore_id=vectorstore_id,
+                        api_key=api_key,
+                        file_ids=request.file_ids,
+                        chunking_strategy=chunking_strategy,
+                        chunk_size=chunk_size,
+                        chunk_overlap=chunk_overlap,
+                        request_id=request_id_ctx.get(),
+                        # Carries this trace into the worker process
+                        trace_context=inject_trace_context(),
+                        vector_store_type=str(provider)
+                    )
+                except Exception as enqueue_error:
+                    # The record above already reads in_progress, and only the
+                    # worker ever moves it off that - so a store whose task was
+                    # never queued would be polled forever. Mark it failed here,
+                    # then let the caller see the enqueue error.
+                    SystemLogger.error(f"Failed to enqueue ingestion for vector store "
+                                       f"{vectorstore_id}: {enqueue_error}")
+                    try:
+                        await PostgresVectorStore.update(pool=postgres_pool,
+                                                         vector_store_id=vectorstore_id,
+                                                         api_key=api_key,
+                                                         status=UploadingStatus.FAILED,
+                                                         last_active_at=datetime.now(timezone.utc))
+                    except Exception as mark_error:
+                        SystemLogger.error(f"Vector store {vectorstore_id} is stranded in_progress: "
+                                           f"marking it failed failed too: {mark_error}")
+                    raise
 
             SystemLogger.info(f"Vector store created: {vectorstore_id} ({nums_in_progress_file} file(s) queued)")
 
