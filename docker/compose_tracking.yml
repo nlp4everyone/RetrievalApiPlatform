@@ -2,6 +2,7 @@ services:
   minio:
     image: minio/minio:RELEASE.2025-07-23T15-54-02Z
     container_name: minio
+    restart: always
     environment:
       # Minio root user for authentication
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
