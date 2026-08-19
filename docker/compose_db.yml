@@ -27,8 +27,19 @@ services:
     image: redis:7
     container_name: redis_broker
     restart: always
+    # Redis holds pending ingestion work, not cache: unpersisted, a recreate
+    # drops the queue and strands every vector store in_progress. maxmemory
+    # sits below the container limit so a full queue errors on enqueue.
+    command: >
+      redis-server
+      --appendonly yes
+      --appendfsync everysec
+      --maxmemory 384mb
+      --dir /data
     ports:
       - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
     healthcheck:
       test: [ "CMD", "redis-cli", "ping" ]
       interval: 5s
@@ -46,3 +57,4 @@ services:
 
 volumes:
   postgres_data:
+  redis_data:
