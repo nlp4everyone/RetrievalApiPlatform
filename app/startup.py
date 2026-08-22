@@ -386,33 +386,35 @@ def get_cpu_executor() -> ThreadPoolExecutor:
     return cpu_executor
 
 
-def init_download_semaphore() -> asyncio.Semaphore:
+def init_storage_semaphore() -> asyncio.Semaphore:
     """
-    Initialize the semaphore capping concurrent file downloads per worker process.
+    Initialize the semaphore capping concurrent MinIO work per worker process.
 
-    Bounds how many files DownloadStage pulls from MinIO at once, so a burst
-    of ingestion jobs can't alone exhaust the I/O thread pool.
+    Every blocking MinIO call in the ingestion pipeline - the file download,
+    the parse-cache lookup, the artifact upload - runs on the I/O thread pool,
+    so they share one limit. Capping only some of them would leave the pool
+    just as exhaustible by whichever consumer was left uncapped.
 
     Returns:
-        asyncio.Semaphore: The download concurrency semaphore
+        asyncio.Semaphore: The storage concurrency semaphore
     """
-    global download_semaphore
-    download_semaphore = asyncio.Semaphore(DOWNLOAD_CONCURRENCY)
-    SystemLogger.success(f"[STARTUP] Download concurrency limit ready (limit={DOWNLOAD_CONCURRENCY})")
-    return download_semaphore
+    global storage_semaphore
+    storage_semaphore = asyncio.Semaphore(STORAGE_CONCURRENCY)
+    SystemLogger.success(f"[STARTUP] Storage concurrency limit ready (limit={STORAGE_CONCURRENCY})")
+    return storage_semaphore
 
 
-def get_download_semaphore() -> asyncio.Semaphore:
+def get_storage_semaphore() -> asyncio.Semaphore:
     """
-    Get the global download concurrency semaphore.
+    Get the global storage concurrency semaphore.
 
     Returns:
-        asyncio.Semaphore: The initialized download concurrency semaphore
+        asyncio.Semaphore: The initialized storage concurrency semaphore
 
     Raises:
-        NameError: If init_download_semaphore() has not run yet
+        NameError: If init_storage_semaphore() has not run yet
     """
-    return download_semaphore
+    return storage_semaphore
 
 
 async def wait_for_postgres(pool: asyncpg.Pool,

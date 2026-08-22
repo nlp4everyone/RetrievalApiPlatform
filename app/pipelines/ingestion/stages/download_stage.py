@@ -6,7 +6,7 @@ from minio import Minio
 from app.db.minio import MinioFileStore
 from app.pipelines.ingestion.base import BaseIngestionStage
 from app.pipelines.ingestion.context import IngestionContext
-from app.startup import get_download_semaphore, get_io_executor
+from app.startup import get_io_executor, get_storage_semaphore
 
 
 class DownloadStage(BaseIngestionStage):
@@ -30,7 +30,7 @@ class DownloadStage(BaseIngestionStage):
         """
         # Bounded so a burst of concurrent ingestion jobs in this worker
         # process can't alone exhaust the I/O thread pool
-        async with get_download_semaphore():
+        async with get_storage_semaphore():
             file_bytes = await MinioFileStore.download_file(minio_client = self._minio_client,
                                                             bucket_name = context.storage_bucket,
                                                             file_path = context.storage_path,

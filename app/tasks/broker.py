@@ -17,7 +17,7 @@ from app.startup import (close_embed_model,
                          close_sparse_embed_model,
                          get_postgres_client,
                          init_cpu_executor,
-                         init_download_semaphore,
+                         init_storage_semaphore,
                          init_embed_model,
                          init_io_executor,
                          init_minio,
@@ -54,11 +54,11 @@ async def _initialize_services() -> None:
     # Minio
     init_minio()
     # Thread pools: I/O (MinIO, chunking-adjacent network calls) kept apart
-    # from CPU (chunking), plus the download concurrency cap - this worker
+    # from CPU (chunking), plus the storage concurrency cap - this worker
     # process runs the whole ingestion pipeline, so it needs all three
     init_io_executor()
     init_cpu_executor()
-    init_download_semaphore()
+    init_storage_semaphore()
     # Vector store (registers itself with VectorStoreFactory)
     await init_vector_store()
     # Embedding models - sparse is a no-op unless SPARSE_EMBEDDING_ENABLED

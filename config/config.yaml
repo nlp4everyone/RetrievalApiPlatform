@@ -12,7 +12,10 @@ embedding:
 
 ingestion:
   cpu_thread_pool_size: 4
-  download_concurrency: 4
+  # Threads a worker may hold in io_thread_pool_size for MinIO work of any
+  # kind - download, cache lookup, artifact upload. One number so it can be
+  # checked against the pool without adding up separate limits.
+  storage_concurrency: 8
 
 retrieval:
   # Candidates per hybrid branch = this * max_num_results. Higher widens the
