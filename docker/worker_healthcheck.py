@@ -18,8 +18,12 @@ from app.core.config import (POSTGRES_DB,
                              POSTGRES_HOST,
                              POSTGRES_PASSWORD,
                              POSTGRES_USER,
-                             REDIS_URL,
-                             settings)
+                             REDIS_URL)
+
+# Not settings.POSTGRES_PORT - that's the host port compose maps (.env),
+# while inside the network postgres always listens on its own 5432. Same
+# convention as app.startup and app/core/config/database.py.
+POSTGRES_PORT = 5432
 
 # Below Docker's own `timeout`, so a hung dependency fails the check here with a
 # named reason instead of being killed anonymously by the daemon
@@ -36,7 +40,7 @@ async def _check_postgres() -> None:
                                        password = POSTGRES_PASSWORD,
                                        database = POSTGRES_DB,
                                        host = POSTGRES_HOST,
-                                       port = settings.POSTGRES_PORT,
+                                       port = POSTGRES_PORT,
                                        timeout = CHECK_TIMEOUT_S)
     try:
         await connection.fetchval("SELECT 1")
