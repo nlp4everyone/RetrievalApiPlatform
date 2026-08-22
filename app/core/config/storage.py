@@ -15,6 +15,11 @@ MINIO_ENDPOINT_URL = settings.MINIO_ENDPOINT_URL
 UPLOADED_FILE_BUCKET = storage_config.get("uploaded_file_bucket")
 MAX_FILE_SIZE = storage_config.get("max_file_size")
 
+# Parsed Markdown produced by ParseStage. Its own bucket, not a prefix inside
+# UPLOADED_FILE_BUCKET: derived data and original uploads want different
+# retention, and a bucket is what a lifecycle rule applies to.
+PARSED_TEXT_BUCKET = storage_config.get("parsed_text_bucket", "parsed-texts")
+
 # Thread pool for blocking MinIO I/O (upload/download/delete), kept separate
 # from CPU-bound work (chunking) so a slow download can't starve it
 IO_THREAD_POOL_SIZE = storage_config.get("io_thread_pool_size", 32)

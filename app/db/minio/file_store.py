@@ -113,6 +113,39 @@ class MinioFileStore:
             raise
 
     @staticmethod
+    async def object_exists(minio_client: Minio,
+                            bucket_name: str,
+                            file_path: str,
+                            executor: Optional[ThreadPoolExecutor] = None) -> bool:
+        """
+        Check whether an object is present, without fetching its body.
+
+        Args:
+            minio_client: Configured Minio client instance
+            bucket_name: Bucket to look in
+            file_path: Path to the object within the bucket
+            executor: Thread pool to run the blocking stat on. Defaults to
+                the event loop's default executor if not given.
+
+        Returns:
+            bool: True if the object exists
+
+        Raises:
+            S3Error: For any S3 failure other than the object being absent -
+                a missing bucket or a refused credential is a real problem
+                and must not read as "not cached"
+        """
+        loop = asyncio.get_running_loop()
+        try:
+            await loop.run_in_executor(executor, functools.partial(
+                minio_client.stat_object, bucket_name, file_path))
+            return True
+        except S3Error as e:
+            if e.code in ("NoSuchKey", "NoSuchObject"):
+                return False
+            raise
+
+    @staticmethod
     def _fetch_object(minio_client: Minio, bucket_name: str, file_path: str) -> bytes:
         """Open the object and read its full body - the actual blocking network I/O.
 

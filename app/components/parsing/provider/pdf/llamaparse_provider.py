@@ -8,11 +8,13 @@ from llama_cloud_services.parse.utils import ResultType
 # Utils
 from app.utils.io import async_temp_file
 # Typing
-from typing import Any, List, Optional
+from typing import Any, ClassVar, List, Optional
 
 
 class LlamaParseProvider(BaseParsingProvider):
     """Parse PDFs through the hosted LlamaParse service, returning Markdown."""
+
+    name: ClassVar[str] = "llamaparse"
 
     def __init__(self,
                  api_key: Optional[str],

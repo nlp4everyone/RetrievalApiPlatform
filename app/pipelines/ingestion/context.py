@@ -24,7 +24,11 @@ class IngestionContext:
 
     # --- Filled in progressively by the stages ---------------------------
     raw_bytes: Optional[bytes] = None          # download
+    content_sha256: Optional[str] = None       # download - addresses the parse cache
     text: Optional[str] = None                 # parse
+    # Set by parse when the text came from the cache instead of the parsing
+    # API, which is what tells persist there is nothing new to write
+    parsed_from_cache: bool = False
     chunks: list[str] = field(default_factory=list)  # chunk
     num_inserted: int = 0                      # embed + index
 

@@ -7,7 +7,7 @@ from bs4 import BeautifulSoup
 # Utils
 import asyncio
 # Typing
-from typing import Any, List, Optional
+from typing import Any, ClassVar, List, Optional
 
 
 class UnstructuredProvider(BaseParsingProvider):
@@ -18,6 +18,8 @@ class UnstructuredProvider(BaseParsingProvider):
     element list and converts it to Markdown locally, to match the output of
     the other parsing providers (e.g. LlamaParseProvider for PDFs).
     """
+
+    name: ClassVar[str] = "unstructured"
 
     def __init__(self,
                  api_key: Optional[str],

@@ -1,5 +1,8 @@
 storage:
   uploaded_file_bucket: uploaded-files
+  # Parsed Markdown, kept apart from the originals so the two can carry
+  # different lifecycle rules
+  parsed_text_bucket: parsed-texts
   max_file_size: 100
   io_thread_pool_size: 32
 

@@ -8,14 +8,17 @@ from typing import Optional
 
 from minio import Minio
 
-from app.core.config import EMBEDDING_BATCH_CONCURRENCY, EMBEDDING_UPLOAD_BATCH_SIZE
+from app.core.config import (EMBEDDING_BATCH_CONCURRENCY,
+                             EMBEDDING_UPLOAD_BATCH_SIZE,
+                             PARSED_TEXT_BUCKET)
 from app.db.vector_store import BaseAsyncVectorStore
 from app.components.chunking import ChunkingService
 from app.pipelines.ingestion.pipeline import IngestionPipeline
 from app.pipelines.ingestion.stages import (ChunkStage,
                                            DownloadStage,
                                            EmbedAndIndexStage,
-                                           ParseStage)
+                                           ParseStage,
+                                           PersistTextStage)
 from app.pipelines.ingestion.stages.embed_index_stage import EmbedFn, SparseEmbedFn
 from app.components.parsing import ParsingService
 
@@ -28,7 +31,7 @@ def build_ingestion_pipeline(minio_client: Minio,
                              chunk_size: Optional[int] = None,
                              chunk_overlap: Optional[int] = None,
                              sparse_embed_fn: Optional[SparseEmbedFn] = None) -> IngestionPipeline:
-    """Build the download -> parse -> chunk -> embed+index pipeline.
+    """Build the download -> parse -> persist -> chunk -> embed+index pipeline.
 
     Args:
         minio_client: Connected MinIO client for the download stage
@@ -52,7 +55,14 @@ def build_ingestion_pipeline(minio_client: Minio,
 
     return IngestionPipeline(stages = [
         DownloadStage(minio_client = minio_client),
-        ParseStage(parsing_service = parsing_service),
+        # Parse reads the artifact store as a cache and persist writes it, so
+        # the two are wired to the same bucket - they address it through
+        # app.pipelines.ingestion.parsed_cache rather than agreeing by hand
+        ParseStage(parsing_service = parsing_service,
+                   minio_client = minio_client,
+                   cache_bucket = PARSED_TEXT_BUCKET),
+        PersistTextStage(minio_client = minio_client,
+                         bucket = PARSED_TEXT_BUCKET),
         ChunkStage(chunking_service = chunking_service),
         EmbedAndIndexStage(vector_store = vector_store,
                            embed_fn = embed_fn,

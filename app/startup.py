@@ -219,7 +219,7 @@ def init_minio() -> MinioService:
     Initialize MinIO object storage service.
 
     Creates a MinioService instance and ensures the uploaded file bucket
-    (from UPLOADED_FILE_BUCKET config) exists.
+    (UPLOADED_FILE_BUCKET) and the parsed-text bucket (PARSED_TEXT_BUCKET) exist.
 
     Returns:
         MinioService: Configured MinIO service instance
@@ -234,16 +234,36 @@ def init_minio() -> MinioService:
                                  secret_key = MINIO_ROOT_PASSWORD)
 
     # Create bucket for Uploaded File
-    if not minio_service.client.bucket_exists(UPLOADED_FILE_BUCKET):
-        try:
-            minio_service.client.make_bucket(UPLOADED_FILE_BUCKET)
-            SystemLogger.success(f"Create Minio bucker for Uploaded File ({UPLOADED_FILE_BUCKET}) done!")
-        except Exception as e:
-            if "BucketAlreadyOwnedByYou" in str(e):
-                SystemLogger.info(f"Minio bucket for Uploaded File ({UPLOADED_FILE_BUCKET}) already exists")
-            else:
-                raise e
+    _ensure_bucket(minio_service, UPLOADED_FILE_BUCKET, "Uploaded File")
+    # And the one holding parsed Markdown, kept separate so retention rules
+    # for derived text and for the originals can differ
+    _ensure_bucket(minio_service, PARSED_TEXT_BUCKET, "Parsed Text")
     return minio_service
+
+
+def _ensure_bucket(minio_service: MinioService, bucket: str, label: str) -> None:
+    """
+    Create a bucket if it is not there yet.
+
+    Args:
+        minio_service: Connected MinIO service
+        bucket: Bucket name to create
+        label: Human-readable name for the log line
+
+    Raises:
+        Exception: If bucket creation fails for any reason other than the
+            bucket having been created concurrently
+    """
+    if minio_service.client.bucket_exists(bucket):
+        return
+    try:
+        minio_service.client.make_bucket(bucket)
+        SystemLogger.success(f"Create Minio bucket for {label} ({bucket}) done!")
+    except Exception as e:
+        if "BucketAlreadyOwnedByYou" in str(e):
+            SystemLogger.info(f"Minio bucket for {label} ({bucket}) already exists")
+        else:
+            raise e
 
 async def init_vector_store() -> BaseVectorStoreConnection:
     """
