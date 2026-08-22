@@ -50,7 +50,7 @@ Worker Startup  (TaskIQ WORKER_STARTUP, app/tasks/broker.py::_initialize_service
                                            the whole sequence runs once, guarded by _initialized
 ```
 
-Note that `init_embed_model()` (and `init_sparse_embed_model()` when `SPARSE_EMBEDDING_ENABLED`) probes a server *outside* this stack, so the embedding server must already be up or **both processes fail to boot** — deliberately, since an unreachable model server would otherwise surface as a failed ingestion much later. Start [EmbeddingService](https://github.com/nlp4everyone/EmbeddingService) (`make up dense`, or `make up hybrid` for sparse too) before `make up` here; see [Embedding Server](README.md#embedding-server).
+Note that `init_embed_model()` (and `init_sparse_embed_model()` when `SPARSE_EMBEDDING_ENABLED`) probes a server *outside* this stack, so the embedding server must already be up or **both processes fail to boot** — deliberately, since an unreachable model server would otherwise surface as a failed ingestion much later. Start [EmbeddingService](https://github.com/nlp4everyone/EmbeddingService) (`make up dense`, or `make up hybrid` for sparse too) before `make up` here.
 
 ```text
 Client  (OpenAI SDK / HTTP client)

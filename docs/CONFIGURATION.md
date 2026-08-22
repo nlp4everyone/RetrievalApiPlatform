@@ -44,7 +44,7 @@ Which backends startup *connects* is not configured separately: a backend is con
 | `LOG_FORMAT` | `auto` | `auto` (detect TTY) \| `console` (colorized) \| `json` (structured, for Docker/prod) |
 | `DENSE_MODEL_NAME` | `Qwen/Qwen3-Embedding-0.6B` | Model name sent to the embedding endpoint |
 | `EMBEDDING_PROVIDER` | `openai` | Embedding backend — see [Provider selection](#provider-selection) |
-| `DENSE_EMBEDDING_URL` | `http://172.17.0.1:8100/v1` | Base URL of the embedding server, whichever provider is selected — the OpenAI-compatible base (vLLM, `.../v1`) or the TEI base (the `/embed` path is appended). The default port is [EmbeddingService](https://github.com/nlp4everyone/EmbeddingService)'s `VLLM_DENSE_EMBEDDING_PORT` — see [Embedding server](#embedding-server) |
+| `DENSE_EMBEDDING_URL` | `http://172.17.0.1:8100/v1` | Base URL of the embedding server, whichever provider is selected — the OpenAI-compatible base (vLLM, `.../v1`) or the TEI base (the `/embed` path is appended). The default port is [EmbeddingService](https://github.com/nlp4everyone/EmbeddingService)'s `VLLM_DENSE_EMBEDDING_PORT` |
 | `DENSE_EMBEDDING_API_KEY` | — | Bearer token sent to the embedding server; TEI omits the header entirely when unset |
 | `SPARSE_EMBEDDING_ENABLED` | `false` | Whether to build and probe a sparse (lexical) embedding service at startup. Off by default — it needs a second model server, and dense retrieval alone serves every vector store today |
 | `SPARSE_EMBEDDING_PROVIDER` | `vllm` | Sparse embedding backend — see [Provider selection](#provider-selection) |
@@ -56,7 +56,7 @@ Which backends startup *connects* is not configured separately: a backend is con
 | `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` | — (required) | MinIO credentials |
 | `MINIO_ENDPOINT_URL` | — (required) | MinIO endpoint, e.g. `http://minio:9000` |
 | `VECTOR_STORE_PROVIDER` | `qdrant` | Backend new vector stores are created on — see [Provider selection](#provider-selection) |
-| `QDRANT_URL` | — (fill in to connect `qdrant`; required when it is `VECTOR_STORE_PROVIDER`) | Qdrant endpoint of an external service, e.g. `http://172.17.0.1:6333` (Docker bridge gateway) when it runs on the same host, or the cluster URL for Qdrant Cloud. Run one with [Vector Store (Qdrant)](en/README.md#vector-store-qdrant) — `v1.17`+ (weighted RRF), `v1.19` matched to the pinned client |
+| `QDRANT_URL` | — (fill in to connect `qdrant`; required when it is `VECTOR_STORE_PROVIDER`) | Qdrant endpoint of an external service, e.g. `http://172.17.0.1:6333` (Docker bridge gateway) when it runs on the same host, or the cluster URL for Qdrant Cloud. Run one from [Qdrant's install guide](https://qdrant.tech/documentation/guides/installation/) — `v1.17`+ (weighted RRF), `v1.19` matched to the pinned client |
 | `QDRANT_API_KEY` | — (fill in to connect `qdrant`; required when it is `VECTOR_STORE_PROVIDER`) | Qdrant API key |
 | `MILVUS_URI` | — (fill in to connect `milvus`; required when it is `VECTOR_STORE_PROVIDER`) | Milvus endpoint of an external service, e.g. `http://172.17.0.1:19530` (Docker bridge gateway) when it runs on the same host, or the cluster URI for Zilliz Cloud. Milvus `2.4`+ (`hybrid_search` with `RRFRanker`); verified against `3.0` with the pinned `pymilvus` |
 | `MILVUS_TOKEN` | — | Milvus auth token; leave empty on a server without authentication |

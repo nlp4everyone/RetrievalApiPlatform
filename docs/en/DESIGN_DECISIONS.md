@@ -96,7 +96,7 @@ Every embedding is an HTTP call to a model server this repo does not run. `Embed
 - It keeps the two halves independently useful: that repo serves any consumer, this one consumes any server.
 
 **Disadvantages**
-- Two repos to clone and two `.env` files to keep aligned before the first ingestion works — the port/model/API-key pairing is documented in [Embedding Server](README.md#embedding-server) precisely because nothing enforces it.
+- Two repos to clone and two `.env` files to keep aligned before the first ingestion works — the port/model/API-key pairing is documented in [EmbeddingService](https://github.com/nlp4everyone/EmbeddingService) precisely because nothing enforces it.
 - Embedding cost now includes a network hop per batch, and a startup that used to fail on a missing library now fails on an unreachable host.
 - A dimension mismatch (server changed model, collection did not) surfaces at ingest time, not at config time.
 

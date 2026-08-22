@@ -96,7 +96,7 @@ Mọi embedding đều là một lời gọi HTTP tới model server mà repo n�
 - Nó giữ cho hai nửa độc lập mà vẫn hữu ích: repo kia phục vụ mọi consumer, repo này tiêu thụ mọi server.
 
 **Nhược điểm**
-- Phải clone hai repo và giữ hai file `.env` khớp nhau trước khi lần ingest đầu tiên chạy được — cặp port/model/API key được ghi rõ trong [Embedding Server](README_vi.md#embedding-server) chính vì không có gì tự ép chúng phải khớp.
+- Phải clone hai repo và giữ hai file `.env` khớp nhau trước khi lần ingest đầu tiên chạy được — cặp port/model/API key được ghi rõ ở [EmbeddingService](https://github.com/nlp4everyone/EmbeddingService) chính vì không có gì tự ép chúng phải khớp.
 - Chi phí embedding giờ có thêm một network hop cho mỗi batch, và một startup trước kia fail vì thiếu thư viện thì nay fail vì host không tới được.
 - Lệch số chiều (server đổi model, collection thì không) chỉ lộ ra lúc ingest chứ không phải lúc cấu hình.
 
