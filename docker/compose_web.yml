@@ -46,7 +46,11 @@ services:
       dockerfile: docker/Dockerfile
     container_name: taskiq_worker
     restart: always
-    command: uv run taskiq worker app.tasks.broker:broker
+    # --max-async-tasks is the memory bound, not a throughput knob: every task
+    # in flight holds its whole file in RAM (DownloadStage), plus the parsed
+    # text and the chunks. TaskIQ's default is high enough that a handful of
+    # 100MB uploads would OOM this container against the 4g limit below.
+    command: uv run taskiq worker app.tasks.broker:broker --max-async-tasks ${WORKER_MAX_ASYNC_TASKS:-8}
     environment:
       REDIS_URL: redis://redis:${REDIS_PORT:-6379}/0
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
