@@ -7,9 +7,9 @@ An OpenAI-API-compatible **Retrieval Engine** for Retrieval-Augmented Generation
 ## Key Features
 
 - **OpenAI-compatible API surface** — `/v1/files` and `/v1/vector_stores` mirror the OpenAI Files and Vector Stores APIs closely enough that the stock `openai` Python SDK works against this server unmodified (see `examples/file_upload_example.py`)
-- **Staged pipelines** — ingestion (`download → parse → chunk → embed_index`) and retrieval (`embed_query → retrieve → fuse`) are built from `BaseStage` classes run by a shared `Pipeline`. Adding a step is adding a class, not editing an orchestration function
-- **Streaming ingestion with bounded memory** — the last step embeds and upserts **one batch at a time** under a single semaphore, so writes start with the first batch and peak memory is `batch_size × concurrency` rather than file-sized. The worker keeps its I/O thread pool separate from its CPU pool and caps concurrent downloads
-- **Swappable providers everywhere** — parsing, chunking, embedding, and the vector database each sit behind a `base.py` interface with a `provider/` directory and a `from_settings()` facade, selected by one environment variable
+- **Staged pipelines** — ingestion (`download → parse → persist_text → chunk → embed_index`) and retrieval (`embed_query → retrieve → fuse`) are built from `BaseStage` classes run by a shared `Pipeline`. Adding a step is adding a class, not editing an orchestration function
+- **Streaming ingestion with bounded memory** — the last step embeds and upserts **one batch at a time** under a single semaphore, so writes start with the first batch and peak memory is `batch_size × concurrency` rather than file-sized. The worker keeps its I/O thread pool separate from its CPU pool and caps concurrent MinIO work
+- **Swappable providers everywhere** — parsing, chunking, embedding, and the vector database each sit behind a `base.py` interface with a `provider/` directory and a facade service. Most are selected by one environment variable; chunking is picked per request instead, or inferred from the document
 - **Async ingestion** — file upload returns immediately; the pipeline runs out-of-band on a TaskIQ worker (Redis Streams broker)
 - **Provider-agnostic vector search** — dense and hybrid search through `BaseAsyncVectorStore`; Qdrant and Milvus are both implemented and can be connected at the same time, since every vector store remembers which engine holds it. Metadata filters are expressed in a backend-neutral tree and translated per backend
 - **Tracing that follows the work** — the pipeline (not each stage) opens the spans, so the Langfuse trace shape stays correct as stages change. W3C trace context is propagated into the worker, so ingestion observations land inside the HTTP request's trace
@@ -42,8 +42,8 @@ cd RetrievalApiPlatform
 cp .env.sample .env
 # edit .env: API keys, Postgres/MinIO/Qdrant/Langfuse credentials, embedding endpoint,
 #            parsing keys (LLAMAPARSE_API_KEY, UNSTRUCTURED_API_KEY/UNSTRUCTURED_API_URL),
-#            and the provider switches (EMBEDDING_PROVIDER, CHUNKING_PROVIDER,
-#            PDF_PARSER_PROVIDER, VECTOR_STORE_PROVIDER)
+#            and the provider switches (EMBEDDING_PROVIDER, PDF_PARSER_PROVIDER,
+#            VECTOR_STORE_PROVIDER)
 make up      # builds and starts postgres, redis, minio, worker, web
 make logs    # tail the web service
 ```
@@ -69,7 +69,9 @@ file = client.files.create(
 vector_store = client.vector_stores.create(name="Support FAQ", file_ids=[file.id])
 ```
 
-The upload returns immediately; ingestion (download → parse → chunk → embed_index) runs asynchronously. Poll `GET /v1/vector_stores/{id}` and watch `status` go `in_progress` → `completed` (or `failed`).
+The upload returns immediately; ingestion (download → parse → persist_text → chunk → embed_index) runs asynchronously. Poll `GET /v1/vector_stores/{id}` and watch `status` go `in_progress` → `completed` (or `failed`).
+
+*Optional:* the splitter is inferred from the document (Markdown when it has headings, recursive otherwise). To pick one yourself, add `extra_body={"chunking_splitter": "recursive"}` — one of `markdown`, `recursive`, `sentence`, `token`, `character`. Note that `recursive` has no overlap, so pairing it with a non-zero `chunk_overlap_tokens` is a `422`.
 
 **3. Search it and print the hits.** Once the store reports `completed`:
 
@@ -99,7 +101,7 @@ Each hit carries `score`, `file_id`/`filename`, the file's `attributes`, and `co
 | Object storage | MinIO (uploaded file bytes) | — |
 | Task queue | Redis Streams + TaskIQ | — |
 | Parsing | LlamaParse (`.pdf`), Unstructured API (`.txt`, `.md`, `.docx`, `.doc`, images) — both return Markdown | `PDF_PARSER_PROVIDER` (PDF only) |
-| Chunking | [Chonkie](https://docs.chonkie.ai) or `langchain_text_splitters` | `CHUNKING_PROVIDER` |
+| Chunking | [Chonkie](https://docs.chonkie.ai) or `langchain_text_splitters` | `chunking_splitter` per request, else inferred from the document |
 | Embeddings | OpenAI-compatible endpoint or Text Embeddings Inference — e.g. [EmbeddingService](https://github.com/nlp4everyone/EmbeddingService) (vLLM) | `EMBEDDING_PROVIDER` |
 | Tracing | Langfuse via OpenTelemetry OTLP | — |
 | Runtime | Docker Compose | — |
@@ -129,7 +131,8 @@ Each hit carries `score`, `file_id`/`filename`, the file's `attributes`, and `co
 - [x] Apply metadata filters in search
 - [x] Unstructured API parsing for `.txt`/`.md`/`.docx`/`.doc`/images (replaces the in-process decoder; every format now yields Markdown)
 - [x] Streaming ingestion: embed and index merged into one stage, peak memory independent of file size
-- [x] Split I/O and CPU thread pools, cap concurrent downloads in the worker
+- [x] Split I/O and CPU thread pools, cap concurrent MinIO work in the worker
+- [x] Persist parsed Markdown and reuse it as a per-account parse cache, so re-ingesting never re-pays the parsing vendor
 - [ ] `vector_store_files` table for per-file state (the prerequisite for both items below)
 - [ ] Multi-file ingest per vector store
 - [x] Hybrid search (BGE-M3 sparse vectors, fused with dense by Qdrant RRF)

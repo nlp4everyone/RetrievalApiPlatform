@@ -38,9 +38,10 @@ Worker Startup  (TaskIQ WORKER_STARTUP, app/tasks/broker.py::_initialize_service
         ├── init_cpu_executor()            ThreadPoolExecutor(CPU_THREAD_POOL_SIZE=4, prefix "cpu")
         │                                  KEPT SEPARATE from the I/O pool: chunking is CPU-bound and
         │                                  must not queue behind - or be starved by - a slow transfer
-        ├── init_download_semaphore()      asyncio.Semaphore(DOWNLOAD_CONCURRENCY=4)
-        │                                  caps concurrent downloads so one burst of ingestion jobs
-        │                                  cannot exhaust the I/O pool on its own
+        ├── init_storage_semaphore()       asyncio.Semaphore(STORAGE_CONCURRENCY=8)
+        │                                  caps every MinIO call the pipeline makes - download,
+        │                                  parse-cache lookup, artifact upload - so one burst of
+        │                                  ingestion jobs cannot exhaust the I/O pool on its own
         ├── init_vector_store() · init_embed_model() · init_sparse_embed_model()
         │                                  the worker embeds too, so it builds the same two services
         │                                  the web process does — sparse still a no-op when disabled
@@ -157,24 +158,42 @@ FastAPI HTTP Gateway
         │               │                                                                        │
         │               │  download   MinioFileStore.download_file → context.raw_bytes           │
         │               │             bucket/path read from context.file_metadata                │
-        │               │             async with get_download_semaphore()                        │
-        │               │                 ← bounded by DOWNLOAD_CONCURRENCY=4                    │
+        │               │             async with get_storage_semaphore()                         │
+        │               │                 ← bounded by STORAGE_CONCURRENCY=8, shared with the    │
+        │               │                   parse-cache lookup and the artifact upload           │
         │               │             _fetch_object() (get_object + .read() + close) runs as ONE │
         │               │             unit on get_io_executor(): opening the stream is just      │
         │               │             headers, the real transfer is .read() — both must leave    │
         │               │             the event loop together                                    │
         │               │             returns None → ValueError("Failed to download file: ...")  │
+        │               │             sha256(raw_bytes) on get_cpu_executor() → content_sha256   │
+        │               │                 addresses the parse cache. Hashed here, not at upload  │
+        │               │                 time: the bytes are already in memory, and the web     │
+        │               │                 process is capped at a single CPU                      │
         │               │                                                                        │
         │               │  parse      ParsingService.parse(raw_bytes, context.file_extension)    │
         │               │             → context.text  (Markdown for EVERY format)                │
+        │               │             FIRST parsed_text_key(api_key, provider, content_sha256)   │
+        │               │                 object_exists + download → context.text: cache HIT,    │
+        │               │                 the vendor is never called, parsed_from_cache=True     │
+        │               │                 any cache failure degrades to a MISS - parsing again   │
+        │               │                 is always correct, only slower and dearer              │
         │               │             .pdf → PDF_PARSER_PROVIDER (LlamaParseProvider)            │
         │               │             .txt .md .docx .doc .png .jpg .jpeg → UnstructuredProvider │
         │               │                 partition_via_api on asyncio.to_thread, then the JSON  │
         │               │                 element list is rendered to Markdown locally           │
         │               │             unmapped extension → ValueError("Unsupported file format") │
         │               │                                                                        │
+        │               │  persist_text  PersistTextStage - best effort                          │
+        │               │             context.text → PARSED_TEXT_BUCKET under that same key      │
+        │               │             parsed/{api_key}/{provider}/{CACHE_VERSION}/{sha256}.md    │
+        │               │             skipped on a cache hit (emits_span → False: nothing to     │
+        │               │             write, and a no-op step is noise in the trace)             │
+        │               │             any failure → warning + parsed_text_saved=False; the       │
+        │               │             vector store is already correct without the artifact       │
+        │               │                                                                        │
         │               │  chunk      ChunkingService.split_text(text) → context.chunks          │
-        │               │             provider from CHUNKING_PROVIDER, size/overlap per request  │
+        │               │             splitter per request, else detected from the document      │
         │               │             runs on get_cpu_executor() — CPU-bound, kept off the I/O   │
         │               │             pool                                                       │
         │               │                                                                        │

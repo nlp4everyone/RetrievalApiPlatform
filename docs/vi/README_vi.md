@@ -7,8 +7,8 @@ Một **Retrieval Engine** tương thích OpenAI API dành cho các hệ thống
 ## Tính năng chính
 
 - **API tương thích OpenAI** — `/v1/files` và `/v1/vector_stores` mô phỏng sát OpenAI Files API và Vector Stores API, đến mức SDK `openai` Python gốc chạy được thẳng với server này mà không cần sửa (xem `examples/file_upload_example.py`)
-- **Pipeline theo stage** — ingestion (`download → parse → chunk → embed_index`) và retrieval (`embed_query → retrieve → fuse`) đều được ghép từ các class `BaseStage` do một `Pipeline` chung thực thi. Thêm một bước là thêm một class, không phải sửa hàm điều phối
-- **Ingestion streaming, bộ nhớ có trần** — bước cuối embed và upsert **từng batch một** trong cùng một semaphore, nên việc ghi bắt đầu từ batch đầu tiên và bộ nhớ đỉnh là `batch_size × concurrency` chứ không theo kích thước file. Worker tách pool thread I/O khỏi pool CPU và chặn trần số download song song
+- **Pipeline theo stage** — ingestion (`download → parse → persist_text → chunk → embed_index`) và retrieval (`embed_query → retrieve → fuse`) đều được ghép từ các class `BaseStage` do một `Pipeline` chung thực thi. Thêm một bước là thêm một class, không phải sửa hàm điều phối
+- **Ingestion streaming, bộ nhớ có trần** — bước cuối embed và upsert **từng batch một** trong cùng một semaphore, nên việc ghi bắt đầu từ batch đầu tiên và bộ nhớ đỉnh là `batch_size × concurrency` chứ không theo kích thước file. Worker tách pool thread I/O khỏi pool CPU và chặn trần số thao tác MinIO song song
 - **Provider có thể thay thế ở mọi lớp** — parsing, chunking, embedding và vector database đều nằm sau một interface `base.py`, với thư mục `provider/` và một facade `from_settings()`, chọn bằng đúng một biến môi trường
 - **Ingestion bất đồng bộ** — upload file trả về ngay lập tức; pipeline chạy nền trên một TaskIQ worker (broker Redis Streams)
 - **Vector search không phụ thuộc backend** — dense và hybrid search qua `BaseAsyncVectorStore`; cả Qdrant lẫn Milvus đều đã triển khai và có thể kết nối cùng lúc, vì mỗi vector store đều nhớ engine nào đang giữ nó. Metadata filter được biểu diễn dưới dạng cây trung lập rồi dịch riêng cho từng backend
@@ -42,8 +42,8 @@ cd RetrievalApiPlatform
 cp .env.sample .env
 # chỉnh .env: API key, credential Postgres/MinIO/Qdrant/Langfuse, endpoint embedding,
 #             key parsing (LLAMAPARSE_API_KEY, UNSTRUCTURED_API_KEY/UNSTRUCTURED_API_URL),
-#             và các công tắc provider (EMBEDDING_PROVIDER, CHUNKING_PROVIDER,
-#             PDF_PARSER_PROVIDER, VECTOR_STORE_PROVIDER)
+#             và các công tắc provider (EMBEDDING_PROVIDER, PDF_PARSER_PROVIDER,
+#             VECTOR_STORE_PROVIDER)
 make up      # build và khởi động postgres, redis, minio, worker, web
 make logs    # xem log của web service
 ```
@@ -69,7 +69,9 @@ file = client.files.create(
 vector_store = client.vector_stores.create(name="Support FAQ", file_ids=[file.id])
 ```
 
-Upload trả về ngay lập tức; ingestion (download → parse → chunk → embed_index) chạy bất đồng bộ ở nền. Poll `GET /v1/vector_stores/{id}` và theo dõi `status` chuyển từ `in_progress` → `completed` (hoặc `failed`).
+Upload trả về ngay lập tức; ingestion (download → parse → persist_text → chunk → embed_index) chạy bất đồng bộ ở nền. Poll `GET /v1/vector_stores/{id}` và theo dõi `status` chuyển từ `in_progress` → `completed` (hoặc `failed`).
+
+*Tuỳ chọn:* kiểu chunking được tự suy ra từ tài liệu (Markdown nếu có heading, còn lại dùng recursive). Muốn tự chọn thì thêm `extra_body={"chunking_splitter": "recursive"}` — một trong `markdown`, `recursive`, `sentence`, `token`, `character`. Lưu ý `recursive` không có overlap, nên đi kèm `chunk_overlap_tokens` khác 0 sẽ bị `422`.
 
 **3. Search và in kết quả.** Khi store đã `completed`:
 
@@ -99,7 +101,7 @@ Mỗi hit gồm `score`, `file_id`/`filename`, `attributes` của file, và `con
 | Object storage | MinIO (lưu byte của file đã upload) | — |
 | Task queue | Redis Streams + TaskIQ | — |
 | Parsing | LlamaParse (`.pdf`), Unstructured API (`.txt`, `.md`, `.docx`, `.doc`, ảnh) — cả hai đều trả Markdown | `PDF_PARSER_PROVIDER` (chỉ cho PDF) |
-| Chunking | [Chonkie](https://docs.chonkie.ai) hoặc `langchain_text_splitters` | `CHUNKING_PROVIDER` |
+| Chunking | [Chonkie](https://docs.chonkie.ai) hoặc `langchain_text_splitters` | `chunking_splitter` theo từng request, không có thì tự suy ra từ tài liệu |
 | Embeddings | endpoint tương thích OpenAI hoặc Text Embeddings Inference — ví dụ [EmbeddingService](https://github.com/nlp4everyone/EmbeddingService) (vLLM) | `EMBEDDING_PROVIDER` |
 | Tracing | Langfuse qua OpenTelemetry OTLP | — |
 | Runtime | Docker Compose | — |
@@ -129,7 +131,8 @@ Mỗi hit gồm `score`, `file_id`/`filename`, `attributes` của file, và `con
 - [x] Áp dụng metadata filter trong search
 - [x] Parsing qua Unstructured API cho `.txt`/`.md`/`.docx`/`.doc`/ảnh (thay decoder in-process; mọi định dạng giờ đều ra Markdown)
 - [x] Ingestion streaming: gộp embed + index thành một stage, bộ nhớ đỉnh không phụ thuộc kích thước file
-- [x] Tách pool thread I/O và CPU, chặn trần download đồng thời trong worker
+- [x] Tách pool thread I/O và CPU, chặn trần thao tác MinIO đồng thời trong worker
+- [x] Lưu lại bản Markdown đã parse và dùng làm cache parse theo từng tài khoản, nên ingest lại không phải trả tiền cho vendor parse lần nữa
 - [ ] Bảng `vector_store_files` cho trạng thái theo từng file (điều kiện tiên quyết của cả hai mục dưới)
 - [ ] Ingest nhiều file cho một vector store
 - [x] Hybrid search (sparse vector BGE-M3, trộn với dense bằng RRF của Qdrant)

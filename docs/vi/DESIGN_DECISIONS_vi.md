@@ -21,7 +21,7 @@
 
 ## Vì sao dùng background worker qua TaskIQ
 
-Ingest một file (download → parse → chunk → embed_index) có thể mất từ vài giây tới vài chục giây, đặc biệt khi parsing đi qua service ngoài (LlamaParse, Unstructured API) hoặc file lớn — quá lâu để giữ một HTTP request mở đồng bộ. `POST /v1/vector_stores` chỉ tạo record với `status=in_progress` và đẩy job; phần việc thật chạy trên một tiến trình worker riêng (TaskIQ, broker Redis Streams), tách khỏi vòng đời request.
+Ingest một file (download → parse → persist_text → chunk → embed_index) có thể mất từ vài giây tới vài chục giây, đặc biệt khi parsing đi qua service ngoài (LlamaParse, Unstructured API) hoặc file lớn — quá lâu để giữ một HTTP request mở đồng bộ. `POST /v1/vector_stores` chỉ tạo record với `status=in_progress` và đẩy job; phần việc thật chạy trên một tiến trình worker riêng (TaskIQ, broker Redis Streams), tách khỏi vòng đời request.
 
 **Ưu điểm**
 - Request trả về ngay với thời gian phản hồi dự đoán được: tiến trình API không bao giờ bị chặn bởi công việc nặng CPU/IO.
@@ -65,7 +65,7 @@ Ingestion và retrieval mỗi cái được biểu diễn thành một danh sác
 
 ## Vì sao mọi năng lực đều nằm sau một interface provider
 
-Parsing, chunking, embedding và vector database đều theo cùng một khuôn: một interface `base.py`, một thư mục `provider/` chứa các implementation, và một facade có `from_settings()` dựng cái được đặt tên bởi một biến môi trường. Tên provider được validate trong `settings.py`, nên gõ sai sẽ fail lúc startup chứ không phải lúc dùng lần đầu.
+Parsing, chunking, embedding và vector database đều theo cùng một khuôn: một interface `base.py`, một thư mục `provider/` chứa các implementation, và một facade dựng ra một trong số đó. Với parsing, embedding và vector database, `from_settings()` của facade đọc một biến môi trường, và tên được validate trong `settings.py` nên gõ sai sẽ fail lúc startup chứ không phải lúc dùng lần đầu. Chunking là ngoại lệ: nó không có biến cấu hình nào, và `ChunkingService.for_strategy()` tra splitter qua `registry.py` — một hàm toàn phần trên enum strategy, nên không còn tổ hợp sai nào để phải validate.
 
 **Ưu điểm**
 - Đổi backend là sửa `.env`, không phải sửa code — hữu ích khi so sánh các chunker hoặc chuyển giữa embedding server tương thích OpenAI và TEI.
@@ -169,17 +169,43 @@ Trước đây `EmbedStage` embed toàn bộ chunk của file rồi để `Index
 
 ## Vì sao tách pool thread I/O khỏi pool CPU
 
-Worker chạy hai `ThreadPoolExecutor` riêng — `IO_THREAD_POOL_SIZE=32` cho transfer MinIO, `CPU_THREAD_POOL_SIZE=4` cho chunking — cộng một `asyncio.Semaphore(DOWNLOAD_CONCURRENCY=4)` chặn số file tải song song.
+Worker chạy hai `ThreadPoolExecutor` riêng — `IO_THREAD_POOL_SIZE=32` cho transfer MinIO, `CPU_THREAD_POOL_SIZE=4` cho chunking và cho việc băm sha256 phần byte vừa tải — cộng một `asyncio.Semaphore(STORAGE_CONCURRENCY=8)` chặn số thao tác MinIO song song.
 
 **Ưu điểm**
 - Hai loại công việc có hình dạng tối ưu trái ngược nhau: I/O muốn nhiều thread đang chờ mạng, CPU-bound thì oversubscribe chỉ thêm context switch. Một pool duy nhất buộc phải chọn sai cho một trong hai.
 - Không bỏ đói lẫn nhau: một loạt transfer chậm không thể chiếm hết slot khiến chunking phải xếp hàng, và ngược lại.
-- Trần download là lớp bảo vệ thứ hai ở mức job: nhiều job ingestion đồng thời trong cùng tiến trình worker không thể tự làm cạn pool I/O.
+- Trần storage là lớp bảo vệ thứ hai ở mức job: nhiều job ingestion đồng thời trong cùng tiến trình worker không thể tự làm cạn pool I/O. Nó phủ mọi lời gọi MinIO của pipeline — download, tra cache parse, ghi artifact — vì chặn một nửa thì consumer còn lại vẫn đủ sức làm cạn pool.
 
 **Nhược điểm**
 - Ba con số phải điều chỉnh thay vì một, và điều chỉnh đúng phụ thuộc vào phần cứng cùng kích thước file thực tế — vì thế cả ba đều nằm trong `config/config.yaml`.
 - Thêm resource phải khởi tạo lúc startup, và một getter gọi trước init sẽ fail với `NameError` — đó chính là lý do provider chunking gọi `get_cpu_executor()` chứ không tự giữ pool riêng.
-- Tiến trình web và worker không còn khởi tạo cùng một tập service (web bỏ pool CPU và semaphore download), nên "cả hai chạy chung `app/startup.py`" giờ đúng ở mức từng hàm, không phải ở mức toàn bộ chuỗi.
+- Tiến trình web và worker không còn khởi tạo cùng một tập service (web bỏ pool CPU và semaphore storage), nên "cả hai chạy chung `app/startup.py`" giờ đúng ở mức từng hàm, không phải ở mức toàn bộ chuỗi.
+
+## Vì sao lưu lại bản parse, và vì sao cache của nó bị giới hạn theo tài khoản
+
+`PersistTextStage` ghi bản Markdown mà `ParseStage` tạo ra vào một bucket riêng, đánh khoá bằng SHA-256 nội dung file: `parsed/{api_key}/{provider}/{CACHE_VERSION}/{sha256}.md`. `ParseStage` tra khoá đó trước khi gọi vendor, nên cùng một chuỗi byte không bao giờ bị parse hai lần bởi cùng một backend cho cùng một tài khoản.
+
+Parse là stage duy nhất mà kết quả không thể tái tạo miễn phí. Nó tính tiền theo trang, bị nhà cung cấp giới hạn tần suất, và model phía sau có thể đổi mà không báo trước — trong khi download, chunk và embed đều chạy lại thoải mái.
+
+**Ưu điểm**
+- Truy vết được: câu hỏi "vì sao store này trả ra kết quả đó?" trở thành việc mở một file ra đọc, thay vì upload lại rồi parse lại để đoán.
+- Ingest lại một tài liệu với cấu hình chunking khác không tốn gì ở phía parse — đó chính là thứ khiến việc tinh chỉnh `chunk_size`/`chunk_overlap` trở nên khả thi.
+- Cache đánh trúng trần thật của pipeline. Khi tải cao, ràng buộc siết trước là rate limit của vendor parse, không phải CPU hay RAM của deployment này.
+- Việc ghi không bao giờ làm hỏng một lượt ingest: vector store vốn đã đúng kể cả khi thiếu artifact, nên mọi lỗi ở stage đó chỉ được log rồi nuốt.
+
+**Nhược điểm**
+- Thêm một bản sao đầy đủ toàn văn mọi tài liệu, nhân đôi bề mặt mà chính sách lưu trữ hay PII phải phủ.
+- Không có gì xoá nó. `delete_file` cố ý không xoá, vì một artifact có thể phục vụ nhiều file, nên muốn chặn phình phải dùng lifecycle rule của bucket chứ không phải code ứng dụng.
+- Tỷ lệ hit thấp hơn cảm giác ban đầu: SHA-256 chỉ trùng khi giống nhau từng byte, mà cùng một tài liệu export hai lần thì hiếm khi như vậy. Trường hợp hit đáng tin là chính tài khoản đó upload lại đúng file đó.
+
+**Các phương án đã cân nhắc**
+
+| Phương án | Vì sao không chọn |
+|---|---|
+| Một cache toàn cục, không scope theo `api_key` | Rò rỉ qua thời gian phản hồi — hit trả về trong vài mili giây còn miss mất đúng bằng thời gian gọi API parse, đủ để bất kỳ ai kiểm chứng xem một tài liệu cụ thể đã từng được người khác upload hay chưa. Nó cũng khiến việc xoá sạch dữ liệu của một tài khoản là bất khả thi nếu không đếm tham chiếu |
+| Chỉ đánh khoá theo byte của file, bỏ phần provider | Kết quả parse là hàm của parser chẳng kém gì hàm của file; đổi `PDF_PARSER_PROVIDER` xong cache vẫn âm thầm trả về output của backend cũ. `CACHE_VERSION` phủ nốt phần mà tên provider không nói lên được — options của parser, hay một lần nâng model phía vendor |
+| Lưu text vào Postgres cạnh row của file | Text lớn làm phình row và phình mọi bản backup của chúng; object storage mới là thứ sinh ra cho lifecycle rule và đọc khối lượng lớn với giá rẻ |
+| Để trong span Langfuse | Langfuse có giới hạn kích thước payload và retention riêng, và nó là hệ thống observability chứ không phải kho mà pipeline đọc ngược lại được |
 
 ## Vì sao mọi định dạng không phải PDF đều đi qua Unstructured API
 
@@ -207,7 +233,7 @@ Worker chạy hai `ThreadPoolExecutor` riêng — `IO_THREAD_POOL_SIZE=32` cho t
 - **Chỉ ingest một file.** Nhiều hơn một `file_id` bị từ chối với lỗi 400 ngay tại request, và `IngestionService` kiểm tra lại rồi đánh dấu store `failed` thay vì báo `completed` trên một store rỗng. Rào cản nằm ở schema chứ không ở lệnh kiểm tra: không có bảng `vector_store_files`, nên tiến độ của một store chỉ là một cột `status` — thứ không thể diễn tả "3 file xong, 1 file lỗi". Muốn ingest nhiều file thì phải mô hình hoá trạng thái theo từng file trước, đúng như sub-resource `vector_store.files` của chính OpenAI.
 - **`file_counts` là suy ra chứ không phải đếm.** `_calculate_file_counts` ánh xạ đúng một cột status của store thành `completed=1` / `failed=1`; không có giá trị nào khác là khả dĩ. Field này tồn tại vì tương thích OpenAI và là hệ quả trực tiếp của giới hạn phía trên.
 - **Chưa có bộ test tự động nào.** `pytest` và `pytest-asyncio` đã nằm trong nhóm dependency dev, nhưng không có thư mục `tests/` và không có lấy một file test — `examples/file_upload_example.py` chạy trên một stack đang sống là kiểm tra end-to-end duy nhất. Kiến trúc phân tầng vốn được dựng để dễ test (stage nhận một context thuần, `IngestionService` không import TaskIQ, provider nằm sau interface) nhưng chưa có gì khai thác điều đó.
-- **`chunking_strategy` chỉ mang thông tin kích thước, và cũng chỉ một phần sống sót.** Kiểu `"auto"`/`"static"` không hề chọn splitter — `ChunkingService.from_settings` nhận rồi bỏ qua nó, provider được quyết bởi `CHUNKING_PROVIDER` — nên giá trị này chỉ đi tới row của store, thuộc tính span `chunk.strategy` và cổng kiểm tra ở worker. Trong hai con số thực sự đi tiếp, `max_chunk_size_tokens` tới được chunker nhưng bị đếm theo **ký tự** (`tokenizer="character"`), còn `chunk_overlap_tokens` bị bỏ thẳng ở nhánh mặc định `recursive` vì nhánh này không truyền overlap cho `RecursiveChunker`. Không giá trị nào được báo ngược lại, nên caller không có cách nào biết. Muốn sửa phần overlap thì phải đưa nó cho một chunker chịu nhận, hoặc cho phép cấu hình strategy nội bộ; muốn sửa đơn vị thì phải dùng tokenizer thật.
+- **`max_chunk_size_tokens` được đếm theo ký tự, không phải token.** Mọi splitter ở đây đều đo bằng ký tự (`tokenizer="character"` phía Chonkie, còn các splitter LangChain vốn đã đếm ký tự), nên field mà OpenAI đặt tên theo token thực chất là ngân sách ký tự. Muốn sửa thì phải dùng tokenizer thật, mà điều đó làm đổi ranh giới chunk của mọi store đang có nên cần kế hoạch re-index riêng. Những phần **không còn** là hạn chế: `chunking_strategy` vẫn chỉ mang kích thước, nhưng splitter giờ được chọn tường minh (`chunking_splitter`) hoặc tự suy ra từ tài liệu; yêu cầu overlap cho splitter không hỗ trợ sẽ bị 422 thay vì bị bỏ âm thầm; và thứ thực sự chạy được báo ngược lại — trên span `chunk` và trong `chunking_strategy.resolved` của store.
 - **`ranking_options` mới có tác dụng một phần.** `score_threshold` giờ đã đi tới backend (gắn vào nhánh dense — áp lên output RRF thì sẽ loại sạch mọi thứ), nhưng `ranker` và `rewrite_query` vẫn được nhận rồi bỏ qua, còn quantization rescore chưa được phơi bày trên contract của vector store. `filters` thì **đã** được áp dụng.
 - **Query dạng list bị cắt.** Nếu `query` là một list, chỉ phần tử đầu tiên được dùng.
 - **Auth single-tenant.** Một `FASTAPI_API_KEY` dùng chung, dù các row đã được scope theo `api_key` như thể đã multi-tenant.

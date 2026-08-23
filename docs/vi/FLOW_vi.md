@@ -37,8 +37,9 @@ Worker Startup  (TaskIQ WORKER_STARTUP, app/tasks/broker.py::_initialize_service
         ├── init_cpu_executor()            ThreadPoolExecutor(CPU_THREAD_POOL_SIZE=4, prefix "cpu")
         │                                  TÁCH RIÊNG khỏi pool I/O: chunking là CPU-bound, không được
         │                                  xếp hàng sau — hay bị bỏ đói bởi — một lượt transfer chậm
-        ├── init_download_semaphore()      asyncio.Semaphore(DOWNLOAD_CONCURRENCY=4)
-        │                                  chặn trần số file tải song song, để một loạt job ingestion
+        ├── init_storage_semaphore()       asyncio.Semaphore(STORAGE_CONCURRENCY=8)
+        │                                  chặn trần MỌI lời gọi MinIO của pipeline — download, tra
+        │                                  cache parse, ghi artifact — để một loạt job ingestion
         │                                  không tự làm cạn pool I/O
         ├── init_vector_store() · init_embed_model() · init_sparse_embed_model()
         │                                  worker cũng embed, nên nó dựng đúng hai service như tiến trình
@@ -157,22 +158,41 @@ FastAPI HTTP Gateway
         │               │                                                                          │
         │               │  download   MinioFileStore.download_file → context.raw_bytes             │
         │               │             bucket/path đọc từ context.file_metadata                     │
-        │               │             async with get_download_semaphore()  ← DOWNLOAD_CONCURRENCY=4│
+        │               │             async with get_storage_semaphore()                           │
+        │               │                 ← chặn bởi STORAGE_CONCURRENCY=8, dùng chung với         │
+        │               │                   lượt tra cache parse và lượt ghi artifact              │
         │               │             _fetch_object() (get_object + .read() + close) chạy NGUYÊN   │
         │               │             KHỐI trên get_io_executor(): mở stream mới chỉ là header,    │
         │               │             transfer thật nằm ở .read() — cả hai phải rời event loop     │
         │               │             trả None → ValueError("Failed to download file: ...")        │
+        │               │             sha256(raw_bytes) trên get_cpu_executor() → content_sha256   │
+        │               │                 chính là địa chỉ của cache parse. Băm ở đây chứ không    │
+        │               │                 phải lúc upload: byte đã nằm sẵn trong RAM, và tiến      │
+        │               │                 trình web chỉ được cấp 1 CPU                             │
         │               │                                                                          │
         │               │  parse      ParsingService.parse(raw_bytes, context.file_extension)      │
         │               │             → context.text  (Markdown cho MỌI định dạng)                 │
+        │               │             TRƯỚC TIÊN parsed_text_key(api_key, provider, sha256)        │
+        │               │                 object_exists + download → context.text: cache HIT,      │
+        │               │                 không gọi vendor, parsed_from_cache=True                 │
+        │               │                 cache lỗi thì coi như MISS — parse lại luôn đúng,        │
+        │               │                 chỉ chậm và tốn tiền hơn                                 │
         │               │             .pdf → PDF_PARSER_PROVIDER (LlamaParseProvider)              │
         │               │             .txt .md .docx .doc .png .jpg .jpeg → UnstructuredProvider   │
         │               │                 partition_via_api trên asyncio.to_thread, rồi element    │
         │               │                 list JSON được render thành Markdown tại chỗ             │
         │               │             extension không có trong map → ValueError("Unsupported ...") │
         │               │                                                                          │
+        │               │  persist_text  PersistTextStage — best effort                            │
+        │               │             context.text → PARSED_TEXT_BUCKET, đúng key vừa tra          │
+        │               │             parsed/{api_key}/{provider}/{CACHE_VERSION}/{sha256}.md      │
+        │               │             bỏ qua khi hit cache (emits_span → False: không có gì        │
+        │               │             để ghi, và một bước no-op chỉ làm nhiễu trace)               │
+        │               │             lỗi → warning + parsed_text_saved=False; vector store        │
+        │               │             vốn đã đúng kể cả khi không có artifact                      │
+        │               │                                                                          │
         │               │  chunk      ChunkingService.split_text(text) → context.chunks            │
-        │               │             provider từ CHUNKING_PROVIDER, size/overlap theo request     │
+        │               │             splitter theo request, không có thì suy ra từ tài liệu       │
         │               │             chạy trên get_cpu_executor() — CPU-bound, không được đứng    │
         │               │             chung pool với I/O                                           │
         │               │                                                                          │

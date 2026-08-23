@@ -74,13 +74,14 @@ MinioFileStore                ▼                          ▼
                         ▼
               IngestionPipeline (app/pipelines/ingestion)
 
-      download  ──▶  parse    ──▶  chunk    ──▶  embed_index
-      MinIO          Parsing       Chunking      EmbedAndIndexStage
-      semaphore      Service       Service       mỗi batch (16 chunk):
-      + pool I/O     LlamaParse    pool CPU        embed → Document → upsert
-                     (.pdf)                        trong cùng 1 semaphore(4)
-                     Unstructured                ensure_collection() đúng 1 lần,
-                     (còn lại)                   embedding_dim từ cache startup
+      download  ──▶  parse           ──▶  persist   ──▶  chunk    ──▶  embed_index
+      MinIO          Parsing              ghi .md đã     Chunking      EmbedAndIndexStage
+      storage        Service              parse về       Service       mỗi batch (16 chunk):
+      semaphore      LlamaParse (.pdf)    MinIO,         pool CPU        embed → Document → upsert
+      + pool I/O     Unstructured         best effort                    trong cùng 1 semaphore(4)
+      + sha256       (còn lại)            (bỏ qua khi                  ensure_collection() đúng 1 lần,
+      (pool CPU)     hit cache thì        hit cache)                   embedding_dim từ cache startup
+                     bỏ qua vendor
                         │
                         ▼
         PostgresVectorStore.update(status=completed | failed)
@@ -107,11 +108,11 @@ Mọi route (trừ `/health`) đều phụ thuộc `verify_api_key` (`app/api/se
 
 **Bước 4 — Ingestion nền (TaskIQ worker)**
 
-`ingest_vector_store_files` (`app/tasks/ingestion_task.py`) chỉ là một adapter mỏng: bind correlation id rồi uỷ quyền cho `IngestionService.ingest_vector_store_files`. Service đó xác định file nào còn tồn tại, dựng `IngestionPipeline` qua `build_ingestion_pipeline(...)`, và chạy nó trên một `IngestionContext`. Bốn stage — `download`, `parse`, `chunk`, `embed_index` — đều đọc và ghi vào chính context object đó. Bất kỳ lỗi nào cũng chuyển `status=failed` và raise lại; thành công thì đặt `status=completed` kèm `usage_bytes`.
+`ingest_vector_store_files` (`app/tasks/ingestion_task.py`) chỉ là một adapter mỏng: bind correlation id rồi uỷ quyền cho `IngestionService.ingest_vector_store_files`. Service đó xác định file nào còn tồn tại, dựng `IngestionPipeline` qua `build_ingestion_pipeline(...)`, và chạy nó trên một `IngestionContext`. Năm stage — `download`, `parse`, `persist_text`, `chunk`, `embed_index` — đều đọc và ghi vào chính context object đó. Bất kỳ lỗi nào cũng chuyển `status=failed` và raise lại; thành công thì đặt `status=completed` kèm `usage_bytes`.
 
 Bước cuối là **một** stage streaming (`EmbedAndIndexStage`) chứ không phải hai: mỗi batch chunk được embed rồi upsert ngay trong cùng một lượt giữ semaphore, nên việc ghi bắt đầu từ batch đầu tiên thay vì chờ embed xong cả file, và bộ nhớ đỉnh bị chặn ở `batch_size × concurrency` chứ không theo kích thước file. Collection được tạo trước vòng lặp từ số chiều vector đã cache lúc startup (`get_dense_embedding_dim()`) — đó chính là thứ khiến streaming khả thi, vì không còn phải chờ kết quả embed đầu tiên để biết `embedding_dim`.
 
-Tiến trình worker chạy trên **hai** thread pool tách biệt cộng một trần download: pool I/O (`IO_THREAD_POOL_SIZE`) cho transfer MinIO, pool CPU (`CPU_THREAD_POOL_SIZE`) cho chunking, và `asyncio.Semaphore(DOWNLOAD_CONCURRENCY)` giới hạn số file tải song song. Dùng chung một pool sẽ khiến chunking (CPU-bound) xếp hàng sau các lượt transfer chậm, và một loạt job ingestion đồng thời có thể tự làm cạn pool.
+Tiến trình worker chạy trên **hai** thread pool tách biệt cộng một trần storage: pool I/O (`IO_THREAD_POOL_SIZE`) cho transfer MinIO, pool CPU (`CPU_THREAD_POOL_SIZE`) cho chunking và cho việc băm sha256 phần byte vừa tải, và `asyncio.Semaphore(STORAGE_CONCURRENCY)` giới hạn số thao tác MinIO song song. Trần này phủ **mọi** lời gọi MinIO trong pipeline — download, tra cache parse, ghi artifact — vì chặn một nửa thì consumer còn lại vẫn đủ sức làm cạn pool. Dùng chung một pool sẽ khiến chunking (CPU-bound) xếp hàng sau các lượt transfer chậm, và một loạt job ingestion đồng thời có thể tự làm cạn pool.
 
 **Bước 5 — Search**
 
@@ -129,7 +130,7 @@ Cả hai pipeline dùng chung một bộ máy (`app/pipelines/pipeline.py`), ch�
 |---|---|---|
 | Chạy ở | TaskIQ worker | tiến trình web, trong request |
 | Context | `IngestionContext` | `RetrievalContext` |
-| Các stage | `download → parse → chunk → embed_index` | `embed_query → retrieve → fuse` |
+| Các stage | `download → parse → persist_text → chunk → embed_index` | `embed_query → retrieve → fuse` |
 | Dựng bởi | `build_ingestion_pipeline(...)` | `build_retrieval_pipeline(..., search_type)` |
 | Trace cha | `trace_context` đi kèm task | span của request hiện tại |
 
@@ -165,7 +166,7 @@ Chưa triển khai: ingestion nhiều file cho một vector store, endpoint sub-
 | | |
 |---|---|
 | Queue | Redis Streams (`RedisStreamBroker`, TaskIQ) |
-| Entrypoint | `taskiq worker app.tasks.broker:broker` |
+| Entrypoint | `taskiq worker app.tasks.broker:broker --max-async-tasks 8` |
 | Task | `ingest_vector_store_files` (`app/tasks/ingestion_task.py`) |
 | Business logic | `IngestionService` (`app/services/ingestion/`) — không import TaskIQ, nên gọi và test được mà không cần broker |
 | Container | `taskiq_worker`, `restart: always`; phụ thuộc `postgres`, `redis`, `minio` khoẻ mạnh (`compose_web.yml`) |
@@ -174,7 +175,7 @@ Chưa triển khai: ingestion nhiều file cho một vector store, endpoint sub-
 | Streaming | `EmbedAndIndexStage` embed rồi upsert từng batch trong cùng một lượt giữ semaphore. `Document` chỉ được dựng **sau** khi lấy được semaphore, nên tối đa `concurrency` batch chunk/vector/Document tồn tại cùng lúc thay vì cả file |
 | Tạo collection | `ensure_collection(embedding_dim)` gọi đúng một lần trước vòng lặp, với `embedding_dim` lấy từ `get_dense_embedding_dim()` (cache lúc startup bởi `EmbeddingService.check_connection()`), nên mọi insert đều là ghi thuần và chạy song song được |
 | Thread pool | Pool I/O (`IO_THREAD_POOL_SIZE=32`) cho MinIO tách khỏi pool CPU (`CPU_THREAD_POOL_SIZE=4`) cho chunking; `MinioFileStore._fetch_object` gộp `get_object()` + `.read()` thành một lời gọi duy nhất trên pool I/O, vì mở stream chỉ tốn header còn transfer thật nằm ở `.read()` |
-| Trần download | `asyncio.Semaphore(DOWNLOAD_CONCURRENCY=4)` trên mỗi tiến trình worker, để một loạt job ingestion không tự làm cạn pool I/O |
+| Trần storage | `asyncio.Semaphore(STORAGE_CONCURRENCY=8)` trên mỗi tiến trình worker, dùng chung cho download, tra cache parse và ghi artifact, để một loạt job ingestion không tự làm cạn pool I/O. Phải nhỏ hơn `--max-async-tasks`, nếu không nó không bao giờ chặn ai |
 | Correlation | `request_id_ctx` được bind lại trong worker từ `request_id` truyền qua `.kiq(...)`; `trace_context` (W3C) được extract để span ingestion lồng vào trace Langfuse của request gốc |
 
 `app/tasks/broker.py` chỉ quản lý vòng đời của broker — kết nối, bootstrap service khi `WORKER_STARTUP`, đóng khi `WORKER_SHUTDOWN`. Việc tách task sang module riêng là thứ cho phép broker làm entrypoint deploy mà không phải import cả ingestion pipeline chỉ để khởi động tiến trình.
@@ -199,7 +200,8 @@ app/
     ingestion/            # IngestionService — business logic của task nền
   pipelines/
     base.py, pipeline.py  # contract BaseStage + runner nắm toàn bộ tracing
-    ingestion/            # context, factory, pipeline, stages/ (download→parse→chunk→embed_index)
+    ingestion/            # context, factory, pipeline, parsed_cache, stages/
+                          #   (download→parse→persist_text→chunk→embed_index)
     retrieval/            # context, factory, pipeline, fusion, retriever/, stages/
   components/             # năng lực có thể thay thế: base.py + provider/ + <X>Service.from_settings()
     parsing/              # LlamaParseProvider (.pdf), UnstructuredProvider (mọi định dạng khác)
@@ -220,8 +222,8 @@ app/
     ingestion_task.py     # ingest_vector_store_files — adapter mỏng gọi IngestionService
   utils/                  # config_loader, datetime_utils, io, key_generator, helper vector_store
 config/config.yaml        # tunable được version control: batch size/concurrency embedding,
-                          # tên bucket, storage.io_thread_pool_size,
-                          # ingestion.cpu_thread_pool_size, ingestion.download_concurrency,
+                          # tên các bucket, storage.io_thread_pool_size,
+                          # ingestion.cpu_thread_pool_size, ingestion.storage_concurrency,
                           # retrieval.hybrid_prefetch_multiplier, retrieval.rrf_k
 docker/                   # Dockerfile + compose_db.yml / compose_web.yml / compose_tracking.yml
 examples/file_upload_example.py  # demo end-to-end dùng SDK openai

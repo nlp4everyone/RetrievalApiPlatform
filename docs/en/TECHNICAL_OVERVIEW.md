@@ -74,13 +74,13 @@ MinioFileStore                ▼                          ▼
                         ▼
               IngestionPipeline (app/pipelines/ingestion)
 
-      download  ──▶  parse    ──▶  chunk    ──▶  embed_index
-      MinIO          Parsing       Chunking      EmbedAndIndexStage
-      semaphore      Service       Service       per batch (16 chunks):
-      + I/O pool     LlamaParse    CPU pool        embed → Documents → upsert
-                     (.pdf)                        holding one semaphore(4) slot
-                     Unstructured                ensure_collection() exactly once,
-                     (the rest)                  embedding_dim from startup cache
+      download  ──▶  parse           ──▶  persist   ──▶  chunk    ──▶  embed_index
+      MinIO          Parsing              parsed .md     Chunking      EmbedAndIndexStage
+      storage        Service              back to        Service       per batch (16 chunks):
+      semaphore      LlamaParse (.pdf)    MinIO,         CPU pool        embed → Documents → upsert
+      + I/O pool     Unstructured (rest)  best effort                    holding one semaphore(4) slot
+      + sha256       a cache hit skips    (skipped on                  ensure_collection() exactly once,
+      (CPU pool)     the vendor call      a cache hit)                 embedding_dim from startup cache
                         │
                         ▼
         PostgresVectorStore.update(status=completed | failed)
@@ -107,11 +107,11 @@ Every route (except `/health`) depends on `verify_api_key` (`app/api/security.py
 
 **Step 4 — Background ingestion (TaskIQ worker)**
 
-`ingest_vector_store_files` (`app/tasks/ingestion_task.py`) is a thin adapter: it binds the correlation id and delegates to `IngestionService.ingest_vector_store_files`. That service resolves which files still exist, builds an `IngestionPipeline` via `build_ingestion_pipeline(...)`, and runs it against an `IngestionContext`. The pipeline's four stages — `download`, `parse`, `chunk`, `embed_index` — each read from and write to that one context object. Any failure flips `status=failed` and re-raises; success sets `status=completed` with `usage_bytes`.
+`ingest_vector_store_files` (`app/tasks/ingestion_task.py`) is a thin adapter: it binds the correlation id and delegates to `IngestionService.ingest_vector_store_files`. That service resolves which files still exist, builds an `IngestionPipeline` via `build_ingestion_pipeline(...)`, and runs it against an `IngestionContext`. The pipeline's five stages — `download`, `parse`, `persist_text`, `chunk`, `embed_index` — each read from and write to that one context object. Any failure flips `status=failed` and re-raises; success sets `status=completed` with `usage_bytes`.
 
 The last step is **one** streaming stage (`EmbedAndIndexStage`), not two: each batch of chunks is embedded and upserted while holding the same semaphore slot, so writes begin with the first batch instead of after the whole file is embedded, and peak memory is bounded by `batch_size × concurrency` rather than file size. The collection is created before the loop from the vector dimension cached at startup (`get_dense_embedding_dim()`) — that is what makes streaming possible, since there is no longer any need to wait for the first embedding result to learn `embedding_dim`.
 
-The worker process runs **two** separate thread pools plus a download cap: the I/O pool (`IO_THREAD_POOL_SIZE`) for MinIO transfers, the CPU pool (`CPU_THREAD_POOL_SIZE`) for chunking, and `asyncio.Semaphore(DOWNLOAD_CONCURRENCY)` limiting concurrent downloads. Sharing a single pool would make CPU-bound chunking queue behind slow transfers, and a burst of concurrent ingestion jobs could exhaust the pool on its own.
+The worker process runs **two** separate thread pools plus a storage cap: the I/O pool (`IO_THREAD_POOL_SIZE`) for MinIO transfers, the CPU pool (`CPU_THREAD_POOL_SIZE`) for chunking and for hashing the downloaded bytes, and `asyncio.Semaphore(STORAGE_CONCURRENCY)` limiting concurrent MinIO work. Sharing a single pool would make CPU-bound chunking queue behind slow transfers, and a burst of concurrent ingestion jobs could exhaust the pool on its own. The cap covers *every* MinIO call in the pipeline — the download, the parse-cache lookup, the artifact upload — because capping only some of them would leave the pool just as exhaustible by whichever consumer was left uncapped.
 
 **Step 5 — Search**
 
@@ -129,7 +129,7 @@ Both pipelines are the same machinery (`app/pipelines/pipeline.py`) with differe
 |---|---|---|
 | Runs in | TaskIQ worker | web process, inside the request |
 | Context | `IngestionContext` | `RetrievalContext` |
-| Stages | `download → parse → chunk → embed_index` | `embed_query → retrieve → fuse` |
+| Stages | `download → parse → persist_text → chunk → embed_index` | `embed_query → retrieve → fuse` |
 | Assembled by | `build_ingestion_pipeline(...)` | `build_retrieval_pipeline(..., search_type)` |
 | Parent trace | `trace_context` carried through the task | the ambient request span |
 
@@ -165,7 +165,7 @@ Not yet implemented: multi-file ingestion for a single vector store, a vector-st
 | | |
 |---|---|
 | Queue | Redis Streams (`RedisStreamBroker`, TaskIQ) |
-| Entrypoint | `taskiq worker app.tasks.broker:broker` |
+| Entrypoint | `taskiq worker app.tasks.broker:broker --max-async-tasks 8` |
 | Task | `ingest_vector_store_files` (`app/tasks/ingestion_task.py`) |
 | Business logic | `IngestionService` (`app/services/ingestion/`) — no TaskIQ import, so it is callable and testable without a broker |
 | Container | `taskiq_worker`, `restart: always`; depends on `postgres`, `redis`, `minio` being healthy (`compose_web.yml`) |
@@ -174,7 +174,7 @@ Not yet implemented: multi-file ingestion for a single vector store, a vector-st
 | Streaming | `EmbedAndIndexStage` embeds then upserts each batch while holding the same semaphore slot. `Document` objects are built **after** the slot is acquired, so at most `concurrency` batches' worth of chunks/vectors/Documents exist at once instead of the whole file's |
 | Collection creation | `ensure_collection(embedding_dim)` is called exactly once before the loop, with `embedding_dim` from `get_dense_embedding_dim()` (cached at startup by `EmbeddingService.check_connection()`), so every insert is a pure write and they all run concurrently |
 | Thread pools | I/O pool (`IO_THREAD_POOL_SIZE=32`) for MinIO, kept apart from the CPU pool (`CPU_THREAD_POOL_SIZE=4`) for chunking; `MinioFileStore._fetch_object` folds `get_object()` + `.read()` into a single offloaded call, since opening the stream is just headers while the real transfer is `.read()` |
-| Download cap | `asyncio.Semaphore(DOWNLOAD_CONCURRENCY=4)` per worker process, so one burst of ingestion jobs cannot exhaust the I/O pool on its own |
+| Storage cap | `asyncio.Semaphore(STORAGE_CONCURRENCY=8)` per worker process, shared by the download, the parse-cache lookup and the artifact upload, so one burst of ingestion jobs cannot exhaust the I/O pool on its own. Keep it below `--max-async-tasks`, or it never binds |
 | Correlation | `request_id_ctx` is re-bound inside the worker from the `request_id` passed through `.kiq(...)`; `trace_context` (W3C) is extracted so ingestion spans nest inside the originating request's Langfuse trace |
 
 `app/tasks/broker.py` owns only the broker lifecycle — connect, bootstrap services on `WORKER_STARTUP`, close them on `WORKER_SHUTDOWN`. Keeping the task in a separate module is what lets the broker be the deploy entrypoint without importing the ingestion pipeline just to start the process.
@@ -199,7 +199,8 @@ app/
     ingestion/            # IngestionService — the background task's business logic
   pipelines/
     base.py, pipeline.py  # BaseStage contract + the runner that owns all tracing
-    ingestion/            # context, factory, pipeline, stages/ (download→parse→chunk→embed_index)
+    ingestion/            # context, factory, pipeline, parsed_cache, stages/
+                          #   (download→parse→persist_text→chunk→embed_index)
     retrieval/            # context, factory, pipeline, fusion, retriever/, stages/
   components/             # swappable capabilities: base.py + provider/ + <X>Service.from_settings()
     parsing/              # LlamaParseProvider (.pdf), UnstructuredProvider (every other format)
@@ -220,8 +221,8 @@ app/
     ingestion_task.py     # ingest_vector_store_files — thin adapter over IngestionService
   utils/                  # config_loader, datetime_utils, io, key_generator, vector_store helpers
 config/config.yaml        # version-controlled tunables: embedding batch size/concurrency,
-                          # bucket name, storage.io_thread_pool_size,
-                          # ingestion.cpu_thread_pool_size, ingestion.download_concurrency,
+                          # bucket names, storage.io_thread_pool_size,
+                          # ingestion.cpu_thread_pool_size, ingestion.storage_concurrency,
                           # retrieval.hybrid_prefetch_multiplier, retrieval.rrf_k
 docker/                   # Dockerfile + compose_db.yml / compose_web.yml / compose_tracking.yml
 examples/file_upload_example.py  # end-to-end demo using the openai SDK

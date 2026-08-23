@@ -12,13 +12,14 @@ Conditionally required by `validate_vector_store_credentials` — the settings o
 
 ## Provider selection
 
-Five variables pick which backend serves each swappable capability. Each is validated by a `field_validator` in `settings.py`, so an unknown value fails at **startup**, not at first use.
+Four variables pick which backend serves each swappable capability. Each is validated by a `field_validator` in `settings.py`, so an unknown value fails at **startup**, not at first use.
+
+Chunking is the exception, and has no variable at all: the splitter is named per request in `chunking_splitter`, or inferred from the document when the request does not name one. The splitter then determines the library, so there is no provider left to configure.
 
 | Variable | Default | Accepted values | Picks |
 |---|---|---|---|
 | `EMBEDDING_PROVIDER` | `openai` | `openai`, `tei` | `OpenAIEmbeddingProvider` (OpenAI-compatible endpoint) or `TEIEmbeddingProvider` (raw HTTP to a Text Embeddings Inference `/embed` endpoint). Both read the same `DENSE_EMBEDDING_URL` / `DENSE_EMBEDDING_API_KEY` |
 | `SPARSE_EMBEDDING_PROVIDER` | `vllm` | `vllm` | `VLLMSparseEmbeddingProvider` (token ids from vLLM's `/tokenize`, token weights from `/pooling`, on a BGE-M3 style model). Only built when `SPARSE_EMBEDDING_ENABLED` is true |
-| `CHUNKING_PROVIDER` | `chonkie` | `chonkie`, `langchain` | `ChonkieProvider` or `LangchainProvider` (`langchain_text_splitters`) |
 | `PDF_PARSER_PROVIDER` | `llamaparse` | `llamaparse` | PDF backend. Every other format (`.txt`, `.md`, `.docx`, `.doc`, images) always goes through the Unstructured API, so only PDF has a backend worth choosing |
 | `VECTOR_STORE_PROVIDER` | `qdrant` | `qdrant`, `milvus` | Backend **new** vector stores are created on. Existing stores are unaffected — each row names the backend holding it |
 
@@ -51,7 +52,6 @@ Which backends startup *connects* is not configured separately: a backend is con
 | `SPARSE_EMBEDDING_URL` | `http://172.17.0.1:8101` | Root URL of the sparse embedding server (`/tokenize` and `/pooling` are appended; a trailing `/v1` is stripped). The default port is [EmbeddingService](https://github.com/nlp4everyone/EmbeddingService)'s `VLLM_SPARSE_EMBEDDING_PORT`, served by `make up sparse` or `make up hybrid` |
 | `SPARSE_EMBEDDING_API_KEY` | — | Bearer token sent to the sparse embedding server; the header is omitted entirely when unset |
 | `SPARSE_MODEL_NAME` | `BAAI/bge-m3` | Model name sent to the sparse embedding endpoint |
-| `CHUNKING_PROVIDER` | `chonkie` | Chunking backend — see [Provider selection](#provider-selection) |
 | `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` / `POSTGRES_HOST` | — (required) | Postgres connection |
 | `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` | — (required) | MinIO credentials |
 | `MINIO_ENDPOINT_URL` | — (required) | MinIO endpoint, e.g. `http://minio:9000` |
@@ -64,6 +64,7 @@ Which backends startup *connects* is not configured separately: a backend is con
 | `LANGFUSE_BASE_URL` | — (required) | Self-hosted (or cloud) Langfuse base URL; traces post to `{this}/api/public/otel/v1/traces` |
 | `API_VERSION` | `v1` | Router path prefix; must start with `v` |
 | `NUM_WORKERS` | 1 | Uvicorn worker count (`--workers` in the web Compose command) |
+| `WORKER_MAX_ASYNC_TASKS` | 8 | Ingestion tasks a worker process runs at once (`--max-async-tasks`). This is a **memory** bound, not a throughput knob: each task holds its whole file in RAM, so the ceiling is the worker container's memory limit divided by `storage.max_file_size`. TaskIQ's own default is 100, enough to OOM the container on a handful of large uploads. It also cannot usefully exceed the Postgres pool's `max_size` (10), which every task needs at the end of its run |
 
 ## Embedding server
 
@@ -86,6 +87,7 @@ None of the embedding settings above start a model server — they only say wher
 | `api.version` | `v1` | Informational; actual prefix is driven by `API_VERSION` env var |
 | `api.num_workers` | 1 | Informational; actual worker count is driven by `NUM_WORKERS` env var |
 | `storage.uploaded_file_bucket` | `uploaded-files` | MinIO bucket for uploaded file objects |
+| `storage.parsed_text_bucket` | `parsed-texts` | MinIO bucket for the Markdown `ParseStage` produced. Its own bucket rather than a prefix inside the uploads one, because derived text and original uploads want different retention — and a lifecycle rule applies to a bucket |
 | `storage.max_file_size` | 100 | Max upload size in MB, enforced by `validate_file_size` |
 | `storage.io_thread_pool_size` | 32 | Threads for blocking MinIO I/O (upload/download/delete), kept separate from the CPU pool |
 | `redis.url` | `redis://redis:6379` | TaskIQ broker + result-backend connection string |
@@ -93,7 +95,7 @@ None of the embedding settings above start a model server — they only say wher
 | `embedding.upload_batch_size` | 16 | Chunks per batch in `EmbedAndIndexStage` — used for that batch's embed call and its upsert call alike |
 | `embedding.batch_concurrency` | 4 | Batches in flight at once (embed + upsert combined) — peak memory stays roughly `upload_batch_size * batch_concurrency`, not file-sized |
 | `ingestion.cpu_thread_pool_size` | 4 | Threads for CPU-bound chunking; sized to cores rather than to the I/O pool, since oversubscribing CPU work only adds context switching |
-| `ingestion.download_concurrency` | 4 | Max files a worker process downloads from MinIO at once, so a burst of ingestion jobs can't exhaust the I/O pool |
+| `ingestion.storage_concurrency` | 8 | Max MinIO operations a worker process runs at once — the download, the parse-cache lookup and the artifact upload share one limit, since they all draw on `storage.io_thread_pool_size`. Capping only some of them would leave the pool just as exhaustible by whichever consumer was left uncapped. Keep it below both `io_thread_pool_size` and `WORKER_MAX_ASYNC_TASKS`; at or above the latter it can never bind, because a task only ever holds one permit at a time |
 | `retrieval.hybrid_prefetch_multiplier` | 2 | Candidates each hybrid branch fetches = this × `max_num_results`. RRF can only reorder the pool it is handed, so a document ranked just outside both top-k lists needs the extra depth to compete; `1` effectively disables the cross-branch consensus hybrid exists for. Must be an integer ≥ 1 — anything else raises at import. Recorded per search as the `retrieval.hybrid.prefetch_multiplier` span attribute |
 | `retrieval.rrf_k` | empty | RRF `k`. Larger rewards documents found by *both* branches, smaller rewards one strong single-branch hit. Empty leaves the backend's default (60 on both). On Qdrant that sends `FusionQuery(fusion=RRF)` — the exact request used before this was tunable; a value switches to `RrfQuery(rrf=Rrf(k=…))`, so only an opted-in deployment meets the newer request shape. Milvus always takes it as `RRFRanker(k=…)`. Must be an integer ≥ 1 or empty. Recorded as `retrieval.hybrid.rrf_k`, absent when left empty. Tune it **after** `hybrid_prefetch_multiplier` — both control how much cross-branch agreement is worth, from different angles |
 
@@ -129,10 +131,11 @@ Renaming the Qdrant vector-name mapping strands every collection created before 
 
 | Setting group | Read by |
 |---|---|
-| Provider switches | `EmbeddingService.from_settings()`, `ChunkingService.from_settings()`, `ParsingService.from_settings()`, `VectorStoreFactory.default_provider()` (new stores) / `VectorStoreFactory.enabled_providers()` (what `init_vector_store()` connects) |
+| Provider switches | `EmbeddingService.from_settings()`, `ParsingService.from_settings()`, `VectorStoreFactory.default_provider()` (new stores) / `VectorStoreFactory.enabled_providers()` (what `init_vector_store()` connects). Chunking has no switch — `ChunkingService.for_strategy()` resolves the splitter through `registry.py` |
 | Postgres / MinIO / vector store credentials | `app/startup.py` `init_*` functions, shared by the web app and the TaskIQ worker |
 | `REDIS_URL` | `app/tasks/broker.py` — both the broker and the result backend |
 | `EMBEDDING_UPLOAD_BATCH_SIZE` / `EMBEDDING_BATCH_CONCURRENCY` | `build_ingestion_pipeline()` → `EmbedAndIndexStage` |
-| `IO_THREAD_POOL_SIZE` / `CPU_THREAD_POOL_SIZE` / `DOWNLOAD_CONCURRENCY` | `init_io_executor()` / `init_cpu_executor()` / `init_download_semaphore()` in `app/startup.py`; read back by `MinioFileStore`, the chunking providers, and `DownloadStage` |
+| `IO_THREAD_POOL_SIZE` / `CPU_THREAD_POOL_SIZE` / `STORAGE_CONCURRENCY` | `init_io_executor()` / `init_cpu_executor()` / `init_storage_semaphore()` in `app/startup.py`; read back by `MinioFileStore`, the chunking providers, `DownloadStage` (transfer + sha256), `ParseStage` (cache lookup) and `PersistTextStage` |
+| `PARSED_TEXT_BUCKET` | `init_minio()` creates it at startup; `build_ingestion_pipeline()` hands it to both `ParseStage` (read) and `PersistTextStage` (write), which address it through `app/pipelines/ingestion/parsed_cache.py` |
 | `HYBRID_PREFETCH_MULTIPLIER` / `RRF_K` | `AsyncQdrantVectorStore.__init__` and `AsyncMilvusVectorStore.__init__` defaults — overridable per instance, e.g. to sweep values in an eval harness without touching the API |
 | Langfuse credentials | `init_tracing()`, called independently by the web app and the worker |

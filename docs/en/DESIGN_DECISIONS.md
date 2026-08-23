@@ -21,7 +21,7 @@
 
 ## Why a background worker via TaskIQ
 
-Ingesting a file (download → parse → chunk → embed_index) can take anywhere from a few seconds to tens of seconds, especially when parsing goes through an external service (LlamaParse, the Unstructured API) or the file is large — too long to hold an HTTP request open synchronously. `POST /v1/vector_stores` just creates a record with `status=in_progress` and enqueues a job; the actual work runs on a separate worker process (TaskIQ, Redis Streams broker), decoupled from the request lifecycle.
+Ingesting a file (download → parse → persist_text → chunk → embed_index) can take anywhere from a few seconds to tens of seconds, especially when parsing goes through an external service (LlamaParse, the Unstructured API) or the file is large — too long to hold an HTTP request open synchronously. `POST /v1/vector_stores` just creates a record with `status=in_progress` and enqueues a job; the actual work runs on a separate worker process (TaskIQ, Redis Streams broker), decoupled from the request lifecycle.
 
 **Advantages**
 - The request returns immediately with a predictable response time: the API process is never blocked on CPU/IO-heavy work.
@@ -52,7 +52,7 @@ Ingestion and retrieval are each expressed as a list of `BaseStage` classes run 
 - The two pipelines share one runner, so an improvement to error handling or span nesting benefits both.
 
 **Disadvantages**
-- More indirection to read through: following one ingestion end-to-end means opening a factory, a context, and four stage files instead of a single function.
+- More indirection to read through: following one ingestion end-to-end means opening a factory, a context, and five stage files instead of a single function.
 - The shared mutable context is a weaker contract than explicit arguments — a stage can technically read a field an earlier stage never populated, and only fail at runtime.
 - Overhead is unwarranted for a pipeline that will only ever have two steps; this pays off because both pipelines are expected to grow.
 
@@ -65,7 +65,7 @@ Ingestion and retrieval are each expressed as a list of `BaseStage` classes run 
 
 ## Why every capability sits behind a provider interface
 
-Parsing, chunking, embedding, and the vector database each follow the same shape: a `base.py` interface, a `provider/` directory of implementations, and a facade whose `from_settings()` builds the one named by an environment variable. Provider names are validated in `settings.py`, so a typo fails at startup rather than at first use.
+Parsing, chunking, embedding, and the vector database each follow the same shape: a `base.py` interface, a `provider/` directory of implementations, and a facade that builds one of them. For parsing, embedding and the vector database the facade's `from_settings()` reads an environment variable, and the names are validated in `settings.py` so a typo fails at startup rather than at first use. Chunking is the exception: it has no setting, and `ChunkingService.for_strategy()` resolves the splitter through `registry.py` — a total function over the strategy enum, so there is no invalid combination left to validate.
 
 **Advantages**
 - Swapping a backend is an `.env` change, not a code change — useful when comparing chunkers or moving between an OpenAI-compatible embedding server and TEI.
@@ -169,17 +169,43 @@ The cost is that adding a search type means touching the enum and the factory ra
 
 ## Why the I/O thread pool is separate from the CPU thread pool
 
-The worker runs two `ThreadPoolExecutor`s — `IO_THREAD_POOL_SIZE=32` for MinIO transfers, `CPU_THREAD_POOL_SIZE=4` for chunking — plus an `asyncio.Semaphore(DOWNLOAD_CONCURRENCY=4)` capping concurrent file downloads.
+The worker runs two `ThreadPoolExecutor`s — `IO_THREAD_POOL_SIZE=32` for MinIO transfers, `CPU_THREAD_POOL_SIZE=4` for chunking and for hashing downloaded bytes — plus an `asyncio.Semaphore(STORAGE_CONCURRENCY=8)` capping concurrent MinIO work.
 
 **Advantages**
 - The two kinds of work have opposite optimal shapes: I/O wants many threads parked on the network, CPU-bound work gains nothing from oversubscription but context switching. A single pool has to be sized wrong for one of them.
 - Neither starves the other: a burst of slow transfers cannot occupy every slot and make chunking queue behind it, or vice versa.
-- The download cap is a second layer of protection at the job level: many concurrent ingestion jobs in one worker process cannot exhaust the I/O pool by themselves.
+- The storage cap is a second layer of protection at the job level: many concurrent ingestion jobs in one worker process cannot exhaust the I/O pool by themselves. It covers every MinIO call the pipeline makes — the download, the parse-cache lookup, the artifact upload — because capping only some of them would leave the pool just as exhaustible by whichever consumer was left uncapped.
 
 **Disadvantages**
 - Three numbers to tune instead of one, and tuning them right depends on the hardware and the real file mix — which is why all three live in `config/config.yaml`.
 - More resources to initialise at startup, and a getter called before init fails with `NameError` — which is why the chunking providers call `get_cpu_executor()` rather than holding their own pool.
-- The web and worker processes no longer initialise the same set of services (web skips the CPU pool and the download semaphore), so "both run the same `app/startup.py`" is now true per-function rather than for the whole sequence.
+- The web and worker processes no longer initialise the same set of services (web skips the CPU pool and the storage semaphore), so "both run the same `app/startup.py`" is now true per-function rather than for the whole sequence.
+
+## Why parsed text is stored, and why its cache is scoped per account
+
+`PersistTextStage` writes the Markdown `ParseStage` produced to its own bucket, keyed by the SHA-256 of the file's bytes: `parsed/{api_key}/{provider}/{CACHE_VERSION}/{sha256}.md`. `ParseStage` looks that key up before calling the vendor, so the same bytes are never parsed twice by the same backend for the same account.
+
+Parsing is the only stage whose output cannot be reproduced for free. It is billed per page, rate limited by the vendor, and the model behind it can change without notice — while download, chunk and embed can all be re-run at will.
+
+**Advantages**
+- Traceability: "why did this store answer that?" becomes reading a file, instead of re-uploading and re-parsing to guess.
+- Re-ingesting a document with different chunking costs nothing on the parsing side, which is what makes tuning `chunk_size`/`chunk_overlap` practical.
+- The cache attacks the pipeline's real ceiling. Under load the binding constraint is the parsing vendor's rate limit, not this deployment's CPU or RAM.
+- Writing it can never fail an ingestion: the vector store is already correct without the artifact, so every failure in that stage is logged and swallowed.
+
+**Disadvantages**
+- A second full copy of every document's text, doubling the surface that a retention or PII policy has to cover.
+- Nothing deletes it. `delete_file` deliberately does not, since one artifact may serve several files, so bounding growth means a bucket lifecycle rule rather than application code.
+- The hit rate is lower than it first appears: SHA-256 matches only byte-identical files, and the same document exported twice rarely is. The dependable hit is the same account re-uploading the same file.
+
+**Alternatives considered**
+
+| Option | Why not chosen |
+|---|---|
+| One global cache, not scoped by `api_key` | Leaks by timing — a hit returns in milliseconds and a miss takes as long as the parsing API, which lets anyone test whether a given document was already uploaded by someone else. It also makes erasing an account's data impossible without reference counting |
+| Key on the file's bytes alone, without the provider | A parse result is a function of the parser as much as of the file; switching `PDF_PARSER_PROVIDER` would silently keep serving the previous backend's output. `CACHE_VERSION` covers what the provider name cannot — parser options, a vendor-side model upgrade |
+| Store the text in Postgres alongside the file row | Large text bloats the rows and every backup taken of them; object storage is what lifecycle rules and cheap bulk reads are built for |
+| Keep it in the Langfuse span instead | Langfuse has payload size limits and its own retention, and it is an observability system, not a store the pipeline can read back from |
 
 ## Why every non-PDF format goes through the Unstructured API
 
@@ -207,7 +233,7 @@ The worker runs two `ThreadPoolExecutor`s — `IO_THREAD_POOL_SIZE=32` for MinIO
 - **Single-file ingestion.** More than one `file_id` is rejected with a 400 at request time, and `IngestionService` re-checks and marks the store `failed` rather than reporting `completed` on an empty store. The obstacle is the schema, not the check: there is no `vector_store_files` table, so a store's progress is one `status` column — which cannot express "3 files done, 1 failed". Multi-file means modelling per-file state first, the way OpenAI's own `vector_store.files` sub-resource does.
 - **`file_counts` is derived, not counted.** `_calculate_file_counts` maps the store's single status to `completed=1` / `failed=1`; no other value is reachable. The field is present for OpenAI compatibility and follows from the gap above.
 - **No automated test suite.** `pytest` and `pytest-asyncio` are declared in the dev dependency group, but there is no `tests/` directory and not a single test file — `examples/file_upload_example.py` against a running stack is the only end-to-end check. The layering is built for testability (stages take a plain context, `IngestionService` imports no TaskIQ, providers sit behind interfaces) but nothing exercises it.
-- **`chunking_strategy` carries sizing, and only part of it survives.** The `"auto"`/`"static"` type never selects a splitter — `ChunkingService.from_settings` takes it and ignores it, resolving the provider from `CHUNKING_PROVIDER` instead — so the value only reaches the store row, the `chunk.strategy` span attribute and the worker's validation gate. Of the two numbers that do travel, `max_chunk_size_tokens` reaches the chunker but is counted in **characters** (`tokenizer="character"`), and `chunk_overlap_tokens` is dropped outright on the default `recursive` path, which passes no overlap to `RecursiveChunker`. Neither is reported back, so a caller cannot tell. Fixing the overlap means either handing it to a chunker that accepts one or making the internal strategy configurable; fixing the unit means a real tokenizer.
+- **`max_chunk_size_tokens` is counted in characters, not tokens.** Every splitter here measures characters (`tokenizer="character"` on the Chonkie side, and the LangChain splitters natively), so the field OpenAI names in tokens is applied as a character budget. Fixing it means a real tokenizer, which would change the chunk boundaries of every existing store and so needs a re-index plan. Note what is no longer a gap: `chunking_strategy` still carries sizing only, but the splitter is now chosen explicitly (`chunking_splitter`) or detected from the document, an overlap asked of a splitter that has none is a 422 rather than a silent drop, and what actually ran is reported back — on the `chunk` span and in the store's `chunking_strategy.resolved`.
 - **`ranking_options` is only partly applied.** `score_threshold` now reaches the backend (on the dense branch — applied to RRF output it would drop everything), but `ranker` and `rewrite_query` are still accepted and ignored, and quantization rescore is not surfaced on the vector store contract. `filters` **are** applied.
 - **List queries are truncated.** If `query` is a list, only the first element is used.
 - **Single-tenant auth.** One shared `FASTAPI_API_KEY`, even though rows are scoped by `api_key` as if for multi-tenancy.
