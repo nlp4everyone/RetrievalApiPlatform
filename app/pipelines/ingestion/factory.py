@@ -12,7 +12,6 @@ from app.core.config import (EMBEDDING_BATCH_CONCURRENCY,
                              EMBEDDING_UPLOAD_BATCH_SIZE,
                              PARSED_TEXT_BUCKET)
 from app.db.vector_store import BaseAsyncVectorStore
-from app.components.chunking import ChunkingService
 from app.pipelines.ingestion.pipeline import IngestionPipeline
 from app.pipelines.ingestion.stages import (ChunkStage,
                                            DownloadStage,
@@ -21,15 +20,14 @@ from app.pipelines.ingestion.stages import (ChunkStage,
                                            PersistTextStage)
 from app.pipelines.ingestion.stages.embed_index_stage import EmbedFn, SparseEmbedFn
 from app.components.parsing import ParsingService
+from app.schemas.chunking import ChunkingStrategy
 
 
 def build_ingestion_pipeline(minio_client: Minio,
                              vector_store: BaseAsyncVectorStore,
                              embed_fn: EmbedFn,
                              parsing_service: ParsingService,
-                             chunking_strategy: str = "auto",
-                             chunk_size: Optional[int] = None,
-                             chunk_overlap: Optional[int] = None,
+                             chunking_splitter: Optional[ChunkingStrategy] = None,
                              sparse_embed_fn: Optional[SparseEmbedFn] = None) -> IngestionPipeline:
     """Build the download -> parse -> persist -> chunk -> embed+index pipeline.
 
@@ -38,21 +36,14 @@ def build_ingestion_pipeline(minio_client: Minio,
         vector_store: Store bound to the target collection
         embed_fn: Coroutine turning texts into dense vectors
         parsing_service: Service resolving a parsing provider per file extension
-        chunking_strategy: Strategy recorded on the vector store
-        chunk_size: Maximum chunk size
-        chunk_overlap: Overlap between chunks
+        chunking_splitter: Splitter the request asked for; None lets the chunk
+            stage detect one from the parsed document
         sparse_embed_fn: Optional coroutine turning texts into sparse vectors;
             supplying it makes the collection hybrid (dense + sparse per point)
 
     Returns:
         IngestionPipeline: Pipeline ready to run against an IngestionContext
     """
-    # Built per pipeline, not at startup: chunk size and overlap come from the
-    # vector store's create request
-    chunking_service = ChunkingService.from_settings(chunking_strategy = chunking_strategy,
-                                                     chunk_size = chunk_size,
-                                                     chunk_overlap = chunk_overlap)
-
     return IngestionPipeline(stages = [
         DownloadStage(minio_client = minio_client),
         # Parse reads the artifact store as a cache and persist writes it, so
@@ -63,7 +54,9 @@ def build_ingestion_pipeline(minio_client: Minio,
                    cache_bucket = PARSED_TEXT_BUCKET),
         PersistTextStage(minio_client = minio_client,
                          bucket = PARSED_TEXT_BUCKET),
-        ChunkStage(chunking_service = chunking_service),
+        # Sizing comes off the context; only the splitter is fixed here, and
+        # only when the request named one
+        ChunkStage(splitter = chunking_splitter),
         EmbedAndIndexStage(vector_store = vector_store,
                            embed_fn = embed_fn,
                            batch_size = EMBEDDING_UPLOAD_BATCH_SIZE,

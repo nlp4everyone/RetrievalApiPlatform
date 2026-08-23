@@ -60,9 +60,6 @@ class Settings(BaseSettings):
     SPARSE_EMBEDDING_PROVIDER: str = "vllm"
     SPARSE_EMBEDDING_URL: str = "http://172.17.0.1:8101"
     SPARSE_EMBEDDING_API_KEY: Optional[str] = Field(None, description="API key for the sparse embedding service")
-
-    # Chunking provider selection: "chonkie" or "langchain"
-    CHUNKING_PROVIDER: str = "chonkie"
     
     # Postgres Config
     POSTGRES_USER: str = Field(..., description="PostgreSQL username")
@@ -159,16 +156,6 @@ class Settings(BaseSettings):
         normalized = v.lower()
         if normalized not in allowed:
             raise ValueError(f'SPARSE_EMBEDDING_PROVIDER must be one of {sorted(allowed)}, got: {v}')
-        return normalized
-
-    @field_validator('CHUNKING_PROVIDER')
-    @classmethod
-    def validate_chunking_provider(cls, v: str) -> str:
-        """Validate that the chunking provider is one this app knows how to build."""
-        allowed = {"chonkie", "langchain"}
-        normalized = v.lower()
-        if normalized not in allowed:
-            raise ValueError(f'CHUNKING_PROVIDER must be one of {sorted(allowed)}, got: {v}')
         return normalized
 
     @field_validator('PDF_PARSER_PROVIDER')

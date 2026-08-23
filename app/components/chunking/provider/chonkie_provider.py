@@ -6,53 +6,30 @@ from chonkie import (RecursiveChunker,
                      SentenceChunker)
 from chonkie.chunker.base import BaseChunker
 # Local imports
-from app.schemas.chunking import (ChunkingStrategy,
-                                  ChonkieChunkingConfig)
+from app.schemas.chunking.chunking_config import (RecursiveChunkingConfig,
+                                                  SentenceChunkingConfig,
+                                                  TokenChunkingConfig)
 # Typing
-from typing import List, Optional
+from typing import List
 # Other component
 import asyncio
 from app.startup import get_cpu_executor
 
 
 class ChonkieProvider(BaseChunkingProvider):
-    """Split text using Chonkie's chunkers."""
+    """Run an already-built Chonkie chunker off the event loop.
 
-    def __init__(self, config: Optional[ChonkieChunkingConfig] = None) -> None:
+    Which chunker it wraps is decided by the build_* functions below, one per
+    strategy, so this class has no idea which strategy it is serving and no
+    branch to keep in step with the registry.
+    """
+
+    def __init__(self, chunker: BaseChunker) -> None:
         """
-        Configure the Chonkie chunker.
-
         Args:
-            config (Optional[ChonkieChunkingConfig]): Chunking configuration.
-                Uses defaults if not provided.
+            chunker (BaseChunker): Configured Chonkie chunker to run
         """
-        self.config = config or ChonkieChunkingConfig()
-        self._chunker = self._create_chunker()
-
-    def _create_chunker(self) -> BaseChunker:
-        """Create the Chonkie Chunker based on configuration."""
-        if self.config.strategy == ChunkingStrategy.TOKEN:
-            # Token chunker
-            return TokenChunker(tokenizer = self.config.tokenizer,
-                                chunk_size = self.config.chunk_size,
-                                chunk_overlap = self.config.chunk_overlap)
-        elif self.config.strategy == ChunkingStrategy.SENTENCE:
-            # Sentence chunker
-            return SentenceChunker(tokenizer = self.config.tokenizer,
-                                   chunk_size = self.config.chunk_size,
-                                   chunk_overlap = self.config.chunk_overlap,
-                                   min_sentences_per_chunk = self.config.min_sentences_per_chunk,
-                                   min_characters_per_sentence = self.config.min_characters_per_sentence)
-        else:
-            # Recursive chunker
-            return RecursiveChunker(tokenizer = self.config.tokenizer,
-                                    chunk_size = self.config.chunk_size,
-                                    rules = self.config.rules,
-                                    min_characters_per_chunk = self.config.min_characters_per_chunk)
-
-    @property
-    def strategy_name(self) -> str:
-        return f"chonkie:{self.config.strategy.value}"
+        self._chunker = chunker
 
     async def split_text(self, text: str) -> List[str]:
         """
@@ -72,3 +49,55 @@ class ChonkieProvider(BaseChunkingProvider):
 
     def _split_sync(self, text: str) -> List[str]:
         return [chunk.text for chunk in self._chunker.chunk(text)]
+
+
+def build_recursive(config: RecursiveChunkingConfig) -> ChonkieProvider:
+    """
+    Build the recursive splitter: descends a hierarchy of delimiters.
+
+    Args:
+        config (RecursiveChunkingConfig): Recursive splitter settings
+
+    Returns:
+        ChonkieProvider: Provider wrapping a RecursiveChunker
+
+    Note:
+        RecursiveChunker takes no chunk_overlap - its constructor has no such
+        parameter - which is what ChunkingStrategy.supports_overlap reports.
+    """
+    return ChonkieProvider(RecursiveChunker(tokenizer = config.tokenizer,
+                                            chunk_size = config.chunk_size,
+                                            rules = config.rules,
+                                            min_characters_per_chunk = config.min_characters_per_chunk))
+
+
+def build_token(config: TokenChunkingConfig) -> ChonkieProvider:
+    """
+    Build the token splitter: fixed-length windows with overlap.
+
+    Args:
+        config (TokenChunkingConfig): Token splitter settings
+
+    Returns:
+        ChonkieProvider: Provider wrapping a TokenChunker
+    """
+    return ChonkieProvider(TokenChunker(tokenizer = config.tokenizer,
+                                        chunk_size = config.chunk_size,
+                                        chunk_overlap = config.chunk_overlap))
+
+
+def build_sentence(config: SentenceChunkingConfig) -> ChonkieProvider:
+    """
+    Build the sentence splitter: packs whole sentences up to chunk_size.
+
+    Args:
+        config (SentenceChunkingConfig): Sentence splitter settings
+
+    Returns:
+        ChonkieProvider: Provider wrapping a SentenceChunker
+    """
+    return ChonkieProvider(SentenceChunker(tokenizer = config.tokenizer,
+                                           chunk_size = config.chunk_size,
+                                           chunk_overlap = config.chunk_overlap,
+                                           min_sentences_per_chunk = config.min_sentences_per_chunk,
+                                           min_characters_per_sentence = config.min_characters_per_sentence))

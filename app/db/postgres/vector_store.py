@@ -160,7 +160,8 @@ class PostgresVectorStore:
                      status: Optional[str] = None,
                      last_active_at: Optional[Any] = None,
                      usage_bytes: Optional[int] = None,
-                     metadata: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+                     metadata: Optional[Dict[str, str]] = None,
+                     chunking_strategy_merge: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         Update specific fields of an existing vector store.
         
@@ -175,7 +176,11 @@ class PostgresVectorStore:
             last_active_at: New last activity timestamp (optional)
             usage_bytes: New usage in bytes (optional)
             metadata: New metadata dictionary (optional)
-            
+            chunking_strategy_merge: Keys to merge into the existing
+                chunking_strategy object, leaving the rest of it alone
+                (optional). Merged in SQL rather than read-modify-written, so
+                it cannot clobber what create() put there.
+
         Returns:
             Dict containing the updated vector store record
             
@@ -208,6 +213,14 @@ class PostgresVectorStore:
         if metadata is not None:
             updates.append("metadata = ${}::jsonb".format(len(params) + 1))
             params.append(json.dumps(metadata))
+
+        if chunking_strategy_merge is not None:
+            # Concatenation, not assignment: the worker adds what it resolved
+            # alongside the type/static object create() wrote, so existing
+            # readers of ->>'type' keep seeing what they saw before
+            updates.append("chunking_strategy = COALESCE(chunking_strategy, '{{}}'::jsonb) "
+                           "|| ${}::jsonb".format(len(params) + 1))
+            params.append(json.dumps(chunking_strategy_merge))
 
         # Validate that at least one field is being updated
         if not updates:

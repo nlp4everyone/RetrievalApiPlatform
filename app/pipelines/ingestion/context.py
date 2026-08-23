@@ -29,6 +29,11 @@ class IngestionContext:
     # Set by parse when the text came from the cache instead of the parsing
     # API, which is what tells persist there is nothing new to write
     parsed_from_cache: bool = False
+    # chunk - the splitter that actually ran, and whether it was detected
+    # rather than asked for. Written by ChunkStage, read by the span it
+    # reports and by the record the worker writes back to Postgres.
+    splitter: Optional[str] = None
+    splitter_detected: bool = False
     chunks: list[str] = field(default_factory=list)  # chunk
     num_inserted: int = 0                      # embed + index
 

@@ -21,6 +21,7 @@ async def ingest_vector_store_files(vectorstore_id: str,
                                     api_key: str,
                                     file_ids: list[str],
                                     chunking_strategy: str,
+                                    chunking_splitter: Optional[str] = None,
                                     chunk_size: Optional[int] = None,
                                     chunk_overlap: Optional[int] = None,
                                     request_id: str = "-",
@@ -34,6 +35,9 @@ async def ingest_vector_store_files(vectorstore_id: str,
         api_key (str): API key for authentication and authorization
         file_ids (list[str]): List of file IDs to process
         chunking_strategy (str): Strategy for text chunking ("auto" or "static")
+        chunking_splitter (Optional[str]): Splitter the request asked for
+                          ("recursive", "markdown", ...); None means detect it
+                          from the parsed document
         chunk_size (Optional[int]): Size of text chunks for static strategy
         chunk_overlap (Optional[int]): Overlap between chunks for static strategy
         request_id (str): ID of the HTTP request that enqueued this task, so
@@ -48,6 +52,7 @@ async def ingest_vector_store_files(vectorstore_id: str,
                                                           api_key = api_key,
                                                           file_ids = file_ids,
                                                           chunking_strategy = chunking_strategy,
+                                                          chunking_splitter = chunking_splitter,
                                                           chunk_size = chunk_size,
                                                           chunk_overlap = chunk_overlap,
                                                           vector_store_type = vector_store_type,

@@ -8,6 +8,9 @@ class BaseChunkingProvider(ABC):
     Concrete providers wrap a specific splitting library (Chonkie, LangChain
     text splitters, ...). ChunkingService depends only on this interface, so a
     new backend can be added without touching the ingestion pipeline.
+
+    Providers no longer report which strategy they are running: the strategy
+    selects the implementation (see .registry), so the caller already knows.
     """
 
     @abstractmethod
@@ -25,13 +28,3 @@ class BaseChunkingProvider(ABC):
             Exception: If the underlying splitter rejects the configuration
         """
         pass
-
-    @property
-    @abstractmethod
-    def strategy_name(self) -> str:
-        """
-        Human-readable name of the splitting strategy, reported on traces.
-
-        Returns:
-            str: Strategy identifier, e.g. "chonkie:recursive"
-        """

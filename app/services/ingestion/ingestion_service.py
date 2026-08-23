@@ -12,6 +12,7 @@ from app.core.tracing import TraceCarrier
 from app.db.postgres import PostgresFileStore, PostgresVectorStore
 from app.db.vector_store import VectorStoreFactory
 from app.pipelines.ingestion import IngestionContext, build_ingestion_pipeline
+from app.schemas.chunking import ChunkingStrategy
 from app.schemas.file.types import UploadingStatus
 from app.startup import (get_dense_embedding,
                          get_minio_service,
@@ -35,6 +36,7 @@ class IngestionService:
                                         api_key: str,
                                         file_ids: list[str],
                                         chunking_strategy: str,
+                                        chunking_splitter: Optional[str],
                                         chunk_size: Optional[int],
                                         chunk_overlap: Optional[int],
                                         vector_store_type: str,
@@ -47,6 +49,8 @@ class IngestionService:
             api_key: API key for authentication and authorization
             file_ids: List of file IDs to process
             chunking_strategy: Strategy for text chunking ("auto" or "static")
+            chunking_splitter: Splitter the request asked for, or None to
+                detect one from the parsed document
             chunk_size: Size of text chunks for static strategy
             chunk_overlap: Overlap between chunks for static strategy
             vector_store_type: Backend the vector store was created with
@@ -70,6 +74,9 @@ class IngestionService:
         SystemLogger.info(f"[WORKER] Start processing vector store {vectorstore_id} (files: {file_ids})")
         postgres_pool = get_postgres_pool()
         usage_bytes = 0
+        # Stays None for a store created with no files, which never runs a
+        # pipeline and so has no resolved splitter to record
+        context: Optional[IngestionContext] = None
 
         # An unknown strategy used to fall through the ingest branch untouched and
         # still report COMPLETED, so reject it here rather than skipping the work
@@ -107,15 +114,16 @@ class IngestionService:
                 raise ValueError(f"Unsupported number of files for ingestion: {len(files_metadata)}")
 
             try:
-                num_inserted = await IngestionService._ingest_single_file(vectorstore_id = vectorstore_id,
-                                                                          api_key = api_key,
-                                                                          file_id = existing_file_ids[0],
-                                                                          file_metadata = files_metadata[0],
-                                                                          chunking_strategy = chunking_strategy,
-                                                                          chunk_size = chunk_size,
-                                                                          chunk_overlap = chunk_overlap,
-                                                                          vector_store_type = vector_store_type,
-                                                                          trace_context = trace_context)
+                context = await IngestionService._ingest_single_file(vectorstore_id = vectorstore_id,
+                                                                     api_key = api_key,
+                                                                     file_id = existing_file_ids[0],
+                                                                     file_metadata = files_metadata[0],
+                                                                     chunking_strategy = chunking_strategy,
+                                                                     chunking_splitter = chunking_splitter,
+                                                                     chunk_size = chunk_size,
+                                                                     chunk_overlap = chunk_overlap,
+                                                                     vector_store_type = vector_store_type,
+                                                                     trace_context = trace_context)
             except Exception as ingestion_error:
                 SystemLogger.error(f"[WORKER] Ingestion failed for vector store {vectorstore_id}: {ingestion_error}")
                 await IngestionService._mark_failed(vectorstore_id, api_key, usage_bytes)
@@ -123,20 +131,50 @@ class IngestionService:
 
             # The pipeline runs to the end on a file it cannot get any text out of,
             # which leaves the collection empty - not something to call COMPLETED
-            if num_inserted == 0:
+            if context.num_inserted == 0:
                 SystemLogger.error(f"[WORKER] Ingestion produced no documents for vector store "
                                    f"{vectorstore_id}; nothing was written to the collection")
                 await IngestionService._mark_failed(vectorstore_id, api_key, usage_bytes)
                 raise ValueError(f"Ingestion produced no documents for vector store {vectorstore_id}")
 
-        # Step 3: Mark vector store as completed
+        # Step 3: Mark vector store as completed, recording what actually ran.
+        # The splitter may have been detected per document, so the request no
+        # longer says which one was used and no setting does either - if this
+        # update did not carry it, nothing would, and there is no re-ingest
+        # endpoint to work it out again afterwards. It rides along on an
+        # update the worker was making regardless, so it costs no round-trip.
         await PostgresVectorStore.update(pool = postgres_pool,
                                          vector_store_id = vectorstore_id,
                                          api_key = api_key,
                                          status = UploadingStatus.COMPLETED,
                                          usage_bytes = usage_bytes,
-                                         last_active_at = datetime.now(timezone.utc))
+                                         last_active_at = datetime.now(timezone.utc),
+                                         chunking_strategy_merge = IngestionService._resolved_chunking(context))
         SystemLogger.success(f"[WORKER] Vector store {vectorstore_id} processing completed")
+
+    @staticmethod
+    def _resolved_chunking(context: Optional[IngestionContext]) -> Optional[dict[str, Any]]:
+        """
+        Describe the chunking that actually ran, for the vector store record.
+
+        Args:
+            context: The finished ingestion context, or None if no file was ingested
+
+        Returns:
+            Optional[dict[str, Any]]: A "resolved" key to merge into the
+                store's chunking_strategy object, or None when there is
+                nothing to record. Merged rather than assigned, so the
+                type/static object the create request wrote stays intact.
+        """
+        if context is None:
+            return None
+        return {"resolved": {"splitter": context.splitter,
+                             "chunk_size": context.chunk_size,
+                             "chunk_overlap": context.chunk_overlap,
+                             # Tells "the caller chose this" apart from "we
+                             # guessed it", which is the whole question when
+                             # tracing back why a store chunked the way it did
+                             "detected": context.splitter_detected}}
 
     @staticmethod
     async def _mark_failed(vectorstore_id: str, api_key: str, usage_bytes: int) -> None:
@@ -153,10 +191,11 @@ class IngestionService:
                                   file_id: str,
                                   file_metadata: dict[str, Any],
                                   chunking_strategy: str,
+                                  chunking_splitter: Optional[str],
                                   chunk_size: Optional[int],
                                   chunk_overlap: Optional[int],
                                   vector_store_type: str,
-                                  trace_context: Optional[TraceCarrier]) -> int:
+                                  trace_context: Optional[TraceCarrier]) -> IngestionContext:
         """
         Build and run the ingestion pipeline for one file.
 
@@ -166,13 +205,17 @@ class IngestionService:
             file_id: File being ingested
             file_metadata: Row from the files table (filename, bucket, path, ...)
             chunking_strategy: Strategy recorded on the vector store
+            chunking_splitter: Splitter the request asked for, or None to
+                detect one from the parsed document
             chunk_size: Maximum chunk size
             chunk_overlap: Overlap between chunks
             vector_store_type: Backend the vector store was created with
             trace_context: Trace context from the request that queued this task
 
         Returns:
-            int: Number of chunks written to the vector store
+            IngestionContext: The finished context - not just the insert count,
+                because the splitter and overlap are only settled inside the
+                pipeline and the caller has to record them
         """
         vector_store = VectorStoreFactory.get_store(collection_name = vectorstore_id,
                                                     provider = vector_store_type)
@@ -183,9 +226,8 @@ class IngestionService:
                                             vector_store = vector_store,
                                             embed_fn = get_dense_embedding,
                                             parsing_service = get_parsing_service(),
-                                            chunking_strategy = chunking_strategy,
-                                            chunk_size = chunk_size,
-                                            chunk_overlap = chunk_overlap,
+                                            chunking_splitter = (ChunkingStrategy(chunking_splitter)
+                                                                 if chunking_splitter else None),
                                             sparse_embed_fn = (get_sparse_embedding
                                                                if is_sparse_embedding_enabled() else None))
 
@@ -199,5 +241,6 @@ class IngestionService:
 
         await pipeline.run(context, parent_carrier = trace_context)
         SystemLogger.info(f"[WORKER] Inserted {context.num_inserted} documents into "
-                          f"{vector_store_type} collection: {vectorstore_id}")
-        return context.num_inserted
+                          f"{vector_store_type} collection: {vectorstore_id} "
+                          f"(splitter: {context.splitter}, detected: {context.splitter_detected})")
+        return context
