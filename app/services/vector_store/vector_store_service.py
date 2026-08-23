@@ -233,13 +233,27 @@ class VectorStoreService:
                 chunk_overlap = request.chunking_strategy.static.chunk_overlap_tokens
             else:
                 chunking_strategy = "auto"
-                chunk_size = 800
-                chunk_overlap = 400
+                # Left unset on purpose: "auto" means the splitter decides its
+                # own sizing, and the splitter is not known here - it may be
+                # detected from the document in the worker. Pinning a number
+                # here would override the per-strategy defaults, which is how
+                # markdown ends up chunked like a fixed-window splitter.
+                chunk_size = None
+                chunk_overlap = None
+
+            # The splitter the caller asked for, if any. None means the worker
+            # picks one from the document, so it is only knowable there - which
+            # is why this span records the request and the chunk span records
+            # what ran. observation_metadata drops None, so an unset splitter
+            # simply leaves the attribute off.
+            chunking_splitter = (request.chunking_splitter.value
+                                 if request.chunking_splitter else None)
 
             # Start background processing of files using TaskIQ worker
             with traced_span(name="enqueue_ingestion",
                              attributes={OBSERVATION_TYPE: ObservationType.SPAN,
                                          **observation_metadata(chunking_strategy=chunking_strategy,
+                                                                chunking_splitter=chunking_splitter,
                                                                 chunk_size=chunk_size,
                                                                 num_files=nums_in_progress_file)}):
                 try:
@@ -248,6 +262,7 @@ class VectorStoreService:
                         api_key=api_key,
                         file_ids=request.file_ids,
                         chunking_strategy=chunking_strategy,
+                        chunking_splitter=chunking_splitter,
                         chunk_size=chunk_size,
                         chunk_overlap=chunk_overlap,
                         request_id=request_id_ctx.get(),

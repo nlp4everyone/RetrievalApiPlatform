@@ -5,7 +5,12 @@ from pydantic import BaseModel, Field
 class AutoChunkingStrategy(BaseModel):
     """
     The default chunking strategy.
-    Uses max_chunk_size_tokens=800 and chunk_overlap_tokens=400.
+
+    Sizing is left to whichever splitter runs, rather than pinned here: the
+    window splitters use 800/400, and markdown - whose chunks are whole
+    heading sections rather than fixed windows - uses 1200/120. See
+    app.schemas.chunking.chunking_config for the numbers and the reasoning.
+    Callers who need one specific size can ask with the static strategy.
     """
     type: Literal["auto"] = Field(default="auto",
                                   description="Always 'auto'. Uses the default automatic chunking strategy.")
